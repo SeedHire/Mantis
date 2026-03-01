@@ -119,12 +119,21 @@ var internalBlockRe = regexp.MustCompile(`(?s)\[Internal analysis\].*?(\n\n|\z)`
 
 func stripInternalBlocks(s string) string {
 	s = internalBlockRe.ReplaceAllString(s, "")
-	// Also strip any "Would you like me to" trailing menus (4 numbered options).
+	// Strip "Would you like me to" trailing menus.
 	if idx := strings.Index(s, "\nWould you like me to"); idx != -1 {
 		s = strings.TrimRight(s[:idx], "\n ")
 	}
 	if idx := strings.Index(s, "\nWould you like to"); idx != -1 {
 		s = strings.TrimRight(s[:idx], "\n ")
+	}
+	// Warn user if model left stubs — this shouldn't happen with new system prompt
+	// but we surface it so they know to re-ask.
+	stubPatterns := []string{"// TODO:", "# TODO:", "// FIXME:", "// ... rest", "# ... rest", "pass  # implement", "raise NotImplementedError"}
+	for _, p := range stubPatterns {
+		if strings.Contains(s, p) {
+			s = s + "\n\n> ⚠️  Response contains incomplete stubs. Ask Mantis to \"complete the implementation\" for full code.\n"
+			break
+		}
 	}
 	return strings.TrimSpace(s) + "\n"
 }

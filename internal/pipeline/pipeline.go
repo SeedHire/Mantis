@@ -166,7 +166,7 @@ func assemble(plan, code, tests string) string {
 // ── Complexity detector ────────────────────────────────────────────────────────
 
 func isComplexBuild(lower string) bool {
-	buildVerbs := []string{"build", "create", "develop", "implement", "make", "write"}
+	buildVerbs := []string{"build", "create", "develop", "implement", "make", "write", "scaffold", "set up", "setup", "generate", "design"}
 	hasBuild := false
 	for _, v := range buildVerbs {
 		if strings.Contains(lower, v) {
@@ -174,15 +174,25 @@ func isComplexBuild(lower string) bool {
 			break
 		}
 	}
-	if !hasBuild {
-		return false
-	}
+
+	// Complex signals always trigger pipeline regardless of build verb.
 	for _, s := range complexSignals {
 		if strings.Contains(lower, s) {
 			return true
 		}
 	}
-	// Implicit: two or more distinct code-domain components present.
+
+	if !hasBuild {
+		return false
+	}
+
+	// Long requests (>15 words) with a build verb likely need planning.
+	wordCount := len(strings.Fields(lower))
+	if wordCount > 15 {
+		return true
+	}
+
+	// Two or more distinct code-domain components present.
 	count := 0
 	for _, c := range codeComponents {
 		if strings.Contains(lower, c) {

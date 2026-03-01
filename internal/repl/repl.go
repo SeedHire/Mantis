@@ -107,8 +107,26 @@ func Run(cfg Config) error {
 		if err == nil && len(models) > 0 {
 			availableModels = models
 			router.ResolveAll(models)
-			for tier, model := range router.ResolvedSummary() {
-				fmt.Printf("  %s%-8s%s → %s\n", colorGold, tier, colorReset, model)
+			summary := router.ResolvedSummary()
+			// Check for collapsed tiers (same model used for 3+ tiers = limited install).
+			modelFreq := map[string]int{}
+			for _, m := range summary {
+				modelFreq[m]++
+			}
+			collapsed := false
+			for _, count := range modelFreq {
+				if count >= 3 {
+					collapsed = true
+					break
+				}
+			}
+			if collapsed {
+				fmt.Printf("%s● models: limited install — some tiers share the same model%s\n", colorGold, colorReset)
+				fmt.Printf("%s  install more: ollama pull devstral-small, qwen2.5-coder:14b, llama3.1:70b%s\n", colorDim, colorReset)
+			} else {
+				for tier, model := range summary {
+					fmt.Printf("  %s%-8s%s → %s\n", colorGold, tier, colorReset, model)
+				}
 			}
 		}
 	}
@@ -281,10 +299,19 @@ func Run(cfg Config) error {
 		printSep()
 
 		// Update system prompt for this tier's reasoning depth.
-		// Load skills relevant to the detected task type; budget scales with tier.
-		skillsBudget := 20000 // chars: ~4–5 priority skills
-		if intent.Tier <= router.TierFast {
-			skillsBudget = 4000 // ~1 skill for trivial/fast turns
+		// Skill budget scales with both tier AND request scope (word count).
+		// Quick fixes load 1-2 skills; full project builds load 4-5.
+		wordCount := len(strings.Fields(input))
+		var skillsBudget int
+		switch {
+		case intent.Tier <= router.TierFast:
+			skillsBudget = 2000 // ~0-1 skills for trivial/fast
+		case wordCount <= 8:
+			skillsBudget = 4000 // short request → 1-2 skills
+		case wordCount <= 20:
+			skillsBudget = 10000 // medium request → 2-3 skills
+		default:
+			skillsBudget = 20000 // complex/long request → 4-5 skills
 		}
 		tierSkills := b.LoadSkillsForTask(string(intent.TaskType), skillsBudget)
 		tierPrompt := buildSystemPrompt(brainContext, tierSkills, intent.Tier)
@@ -736,6 +763,16 @@ func buildSystemPrompt(brainCtx, skillsCtx string, tier router.Tier) string {
 - NEVER output [Internal analysis] sections or show your reasoning steps. Reason internally, respond with the solution only.
 - When you write a package.json, the very next thing you show MUST be the command: npm install — never skip this.
 - When you write a requirements.txt, follow immediately with: pip install -r requirements.txt
+
+## Completeness rules (non-negotiable)
+- NEVER leave TODO, FIXME, stub, or placeholder in code you write. Write the real implementation.
+- NEVER truncate with "// ... rest of the code" or "# similar pattern for other routes". Write every line.
+- If building an API: include ALL CRUD endpoints (GET list, GET by id, POST, PUT/PATCH, DELETE). No half-implementations.
+- If the user mentions auth/login/JWT: ALWAYS include the middleware/guard and apply it to protected routes.
+- If writing a Dockerfile: also write docker-compose.yml and .dockerignore.
+- If writing a database schema: include indexes for all foreign keys and frequently queried columns.
+- If writing a function: include error handling for every error path — never silently swallow errors.
+- After writing files for a project, list exactly what the user must run to start it (install deps, run migrations, start server).
 
 ## File generation
 When writing files, ALWAYS tag the opening fence with the filename using a colon:
@@ -1513,11 +1550,17 @@ func compressIfNeeded(messages []interface{}, client *ollama.Client) []interface
 	oldTurns := turns[:len(turns)-6]
 	recentTurns := turns[len(turns)-6:]
 
-	// Build summary of old turns.
+	// Build summary of old turns — preserve decisions, file names, and rejected approaches.
 	var summaryInput strings.Builder
 	summaryInput.WriteString("Summarize this conversation in concise bullet points.\n")
-	summaryInput.WriteString("Focus on: decisions made, code changes discussed, open questions, key findings.\n")
-	summaryInput.WriteString("Keep it under 500 words.\n\n")
+	summaryInput.WriteString("You MUST preserve:\n")
+	summaryInput.WriteString("- Every technical decision made (e.g. 'chose PostgreSQL over SQLite because...')\n")
+	summaryInput.WriteString("- Every file path written to disk (e.g. 'wrote src/models/user.ts')\n")
+	summaryInput.WriteString("- Any approach that was tried and rejected, and why\n")
+	summaryInput.WriteString("- The current project stack (language, framework, database, auth method)\n")
+	summaryInput.WriteString("- Any open TODOs or next steps discussed\n")
+	summaryInput.WriteString("Format: use DECISION:, FILE:, REJECTED:, STACK:, TODO: prefixes on those lines.\n")
+	summaryInput.WriteString("Keep it under 600 words.\n\n")
 	for _, m := range oldTurns {
 		if msg, ok := m.(ollama.Message); ok {
 			role := msg.Role
