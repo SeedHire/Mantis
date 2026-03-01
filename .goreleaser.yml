@@ -3,9 +3,6 @@ version: 2
 
 project_name: mantis
 
-partial:
-  by: goos
-
 before:
   hooks:
     - go mod tidy
@@ -16,17 +13,11 @@ builds:
     binary: mantis
     env:
       - CGO_ENABLED=1
-      - '{{if and (eq .Os "linux") (eq .Arch "arm64")}}CC=aarch64-linux-gnu-gcc{{end}}'
     goos:
-      - linux
       - darwin
-      - windows
     goarch:
       - amd64
       - arm64
-    ignore:
-      - goos: windows
-        goarch: arm64
     ldflags:
       - -s -w
       - -X main.version={{.Version}}
@@ -36,12 +27,8 @@ builds:
 archives:
   - id: mantis
     name_template: "mantis_{{ .Os }}_{{ .Arch }}"
-    format_overrides:
-      - goos: windows
-        formats: [zip]
     files:
       - README.md
-      - LICENSE
       - .mantisrc.yml
 
 checksum:
