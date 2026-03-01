@@ -135,8 +135,8 @@ func Run(cfg Config) error {
 		go func() { _ = truthWriter.BuildFull(root) }()
 	}
 
-	// Conversation history.
-	systemPrompt := buildSystemPrompt()
+	// Conversation history — start with a default system prompt (will be rebuilt per-turn with tier context).
+	systemPrompt := buildSystemPrompt(brainContext, router.TierCode)
 	messages := []interface{}{
 		ollama.Message{Role: "system", Content: systemPrompt},
 	}
@@ -237,6 +237,12 @@ func Run(cfg Config) error {
 		showRouting(intent, model, turn)
 		printSep()
 
+		// Update system prompt for this tier's reasoning depth.
+		tierPrompt := buildSystemPrompt(brainContext, intent.Tier)
+		if len(messages) > 0 {
+			messages[0] = ollama.Message{Role: "system", Content: tierPrompt}
+		}
+
 		// Run codebase intelligence tools silently if graph is available.
 		var toolCtx string
 		if intent.NeedsGraph && dispatcher != nil {
@@ -311,8 +317,40 @@ func Run(cfg Config) error {
 			fmt.Printf("%s%s%s\n\n", colorRed, warn, colorReset)
 		}
 
+		// Verify response against ground truth — re-prompt once on hallucination.
 		if vr := verify.Check(rb.String(), truthWriter); !vr.Clean {
-			fmt.Printf("%s%s%s\n\n", colorRed, vr.Warning, colorReset)
+			// Attempt self-healing: re-prompt with corrections.
+			corrections := verify.SuggestCorrections(vr.UnknownSymbols, truthWriter)
+			if corrections != "" {
+				fmt.Printf("%s  [verifying symbols… re-prompting for accuracy]%s\n", colorDim, colorReset)
+				correctionMsg := fmt.Sprintf(
+					"Your previous answer referenced symbols that don't exist in this project: %s\n"+
+						"The actual symbols in this codebase are:\n%s\n"+
+						"Please correct your answer using only real symbols.",
+					strings.Join(vr.UnknownSymbols, ", "), corrections)
+
+				retryMsgs := append(messages, ollama.Message{Role: "user", Content: correctionMsg})
+				var rb2 strings.Builder
+				retryCtx, retryCancel := context.WithTimeout(context.Background(), 3*time.Minute)
+				pt2, ct2, err2 := streamWithFallback(retryCtx, client, model, intent.Tier, retryMsgs, &rb2)
+				retryCancel()
+
+				if err2 == nil && strings.TrimSpace(rb2.String()) != "" {
+					// Replace original response with corrected one.
+					messages[len(messages)-1] = ollama.Message{Role: "assistant", Content: rb2.String()}
+					sess.Add(model, intent.Tier, pt2, ct2, false)
+					fmt.Printf("%s◈ Mantis%s %s(corrected)%s\n", colorCopper+colorBold, colorReset, colorDim, colorReset)
+					renderResponse(rb2.String())
+
+					if vr2 := verify.Check(rb2.String(), truthWriter); !vr2.Clean {
+						fmt.Printf("%s%s%s\n\n", colorRed, vr2.Warning, colorReset)
+					}
+				} else {
+					fmt.Printf("%s%s%s\n\n", colorRed, vr.Warning, colorReset)
+				}
+			} else {
+				fmt.Printf("%s%s%s\n\n", colorRed, vr.Warning, colorReset)
+			}
 		}
 
 		if promptTok > 8000 {
@@ -477,14 +515,65 @@ func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
 	return false
 }
 
-// buildSystemPrompt returns a lean system prompt.
-// Context (README, brain, codebase symbols) is injected lazily per-turn instead.
-func buildSystemPrompt() string {
-	return `You are Mantis, an expert AI coding assistant. Be precise, direct, and concise.
-Write clean, idiomatic code. Explain reasoning briefly.
-Never hallucinate function names — if unsure, say so.
-When project context is provided in the conversation, use it accurately.
-Format code with correct language tags. Prefer showing code over describing it.`
+// buildSystemPrompt returns the base system prompt (tier-independent).
+// Brain context and tier-specific guidance are appended separately.
+func buildSystemPrompt(brainCtx string, tier router.Tier) string {
+	var sb strings.Builder
+
+	// ── Core identity & reasoning guidance ────────────────────────────────
+	sb.WriteString(`You are Mantis, an expert AI coding assistant with deep knowledge of this project.
+
+## How to think
+- Break complex problems into steps before answering.
+- State your assumptions explicitly.
+- When modifying code, explain what breaks if you're wrong.
+- If you are unsure about a function name or API, say so — never guess.
+
+## How to answer
+- Show the final code or answer FIRST, then explain.
+- Use the exact function signatures from [ground_truth] — never invent names.
+- When referencing files, use full paths from the project.
+- If the question is ambiguous, ask one clarifying question before answering.
+- Format code with correct language tags.
+`)
+
+	// ── Tier-specific suffix ──────────────────────────────────────────────
+	switch tier {
+	case router.TierTrivial, router.TierFast:
+		sb.WriteString("\n## Response style\nBe extremely concise. One code block, minimal explanation.\n")
+	case router.TierCode:
+		sb.WriteString("\n## Response style\nThink step-by-step. Show the change, then explain why it works.\n")
+	case router.TierReason:
+		sb.WriteString("\n## Response style\nAnalyze thoroughly. Consider edge cases. Structure your response with headers.\n")
+	case router.TierHeavy:
+		sb.WriteString("\n## Response style\nThis is a complex task. Break it into phases. For each phase: what changes, what could break, what to test.\n")
+	case router.TierMax:
+		sb.WriteString("\n## Response style\nProvide the most thorough, production-quality answer possible. Cover edge cases, error handling, and testing.\n")
+	}
+
+	// ── Chain-of-thought injection for reasoning tiers ────────────────────
+	if tier >= router.TierReason && tier != router.TierVision {
+		sb.WriteString(`
+## Thinking process
+Before answering, reason through the problem step by step inside a <thinking> block.
+Then give your final answer after </thinking>. Example:
+<thinking>
+1. The user wants to...
+2. The relevant code is in...
+3. The risk is...
+</thinking>
+[your answer here]
+`)
+	}
+
+	// ── Project brain context (if available) ──────────────────────────────
+	if brainCtx != "" {
+		sb.WriteString("\n## Project context (from persistent memory)\n")
+		sb.WriteString(brainCtx)
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
 }
 
 // contextMessageFor returns a context injection message for this turn, or nil.
@@ -541,12 +630,41 @@ func endSession(sess *session.Session, b *brain.Brain, messages []interface{}) {
 	printSep()
 	fmt.Println(sess.Report())
 	printSep()
+
+	summary := ""
 	if len(sess.Turns) >= 3 {
-		if summary := extractSessionSummary(messages); summary != "" {
+		summary = extractSessionSummary(messages)
+		if summary != "" {
 			_ = b.UpdateBrain(summary)
 			fmt.Printf("%s● project memory updated%s\n", colorDim, colorReset)
 		}
 	}
+
+	// Persist session to disk for cross-session continuity.
+	topic := extractSessionTopic(messages)
+	root, _ := os.Getwd()
+	mantisDir := filepath.Join(root, ".mantis")
+	if err := sess.Save(mantisDir, topic, summary); err == nil {
+		fmt.Printf("%s● session saved%s\n", colorDim, colorReset)
+	}
+}
+
+// extractSessionTopic returns a short topic from the first user message.
+func extractSessionTopic(messages []interface{}) string {
+	for _, m := range messages {
+		if msg, ok := m.(ollama.Message); ok && msg.Role == "user" {
+			topic := msg.Content
+			// Strip context wrapper if present.
+			if idx := strings.Index(topic, "Now answer: "); idx != -1 {
+				topic = topic[idx+12:]
+			}
+			if len(topic) > 60 {
+				topic = topic[:60] + "…"
+			}
+			return strings.TrimSpace(topic)
+		}
+	}
+	return "untitled session"
 }
 
 func extractSessionSummary(messages []interface{}) string {
@@ -836,18 +954,25 @@ func streamEnsemble(ctx context.Context, client *ollama.Client,
 
 	var synthPrompt strings.Builder
 	synthPrompt.WriteString("You received the following responses from different AI models to the same question.\n")
-	synthPrompt.WriteString("Synthesise the BEST answer: pick the most correct parts, fix any mistakes, remove duplication.\n")
-	synthPrompt.WriteString("Produce ONE definitive, complete answer. Do not mention the models.\n\n")
+	synthPrompt.WriteString("Evaluate each response for:\n")
+	synthPrompt.WriteString("1. Correctness — does the code use real function names and compile?\n")
+	synthPrompt.WriteString("2. Completeness — does it handle edge cases and errors?\n")
+	synthPrompt.WriteString("3. Reasoning — is the explanation logical and well-structured?\n\n")
+	synthPrompt.WriteString("Then produce ONE definitive, complete answer that:\n")
+	synthPrompt.WriteString("- Uses the most correct code from any response\n")
+	synthPrompt.WriteString("- Keeps the strongest reasoning chain\n")
+	synthPrompt.WriteString("- Flags any uncertainty\n")
+	synthPrompt.WriteString("Do NOT mention the models or responses.\n\n")
 	for i, r := range responses {
 		synthPrompt.WriteString(fmt.Sprintf("--- Response %d ---\n%s\n\n", i+1, r.content))
 	}
 	synthPrompt.WriteString("--- Synthesised answer ---\n")
 
 	synthMessages := []interface{}{
-		ollama.Message{Role: "system", Content: "You are an expert synthesis engine. Combine AI responses into the single best answer."},
+		ollama.Message{Role: "system", Content: "You are an expert synthesis engine. Evaluate multiple AI responses for correctness, completeness, and reasoning quality. Combine them into the single best answer."},
 		ollama.Message{Role: "user", Content: synthPrompt.String()},
 	}
-	synthModel := router.ModelFor(router.TierCode)
+	synthModel := router.ModelFor(router.TierReason)
 	spt, sct, err := client.StreamChat(ctx, synthModel, synthMessages, nil,
 		func(chunk string) { rb.WriteString(chunk) })
 	if err != nil {
@@ -920,32 +1045,31 @@ func streamWithFallback(ctx context.Context, client *ollama.Client, model string
 	return 0, 0, fmt.Errorf("no available model found for tier %s — run /models to see what's available", tier)
 }
 
-// trimToMinimal keeps only the system message and the last user message.
+// trimToMinimal keeps the system message and the last 3 user+assistant messages.
 // Used as a last resort when the full context exceeds the model's window.
 func trimToMinimal(messages []interface{}) []interface{} {
-	var sys, lastUser interface{}
+	var sys interface{}
+	var recent []interface{}
 	for _, m := range messages {
 		if msg, ok := m.(ollama.Message); ok {
 			if msg.Role == "system" {
 				sys = m
-			} else if msg.Role == "user" {
-				lastUser = m
+			} else {
+				recent = append(recent, m)
 			}
 		} else if img, ok := m.(ollama.ImageMessage); ok && img.Role == "user" {
-			lastUser = m
+			recent = append(recent, m)
 		}
 	}
 	var out []interface{}
 	if sys != nil {
-		// Use a stripped-down system prompt without codebase context.
-		out = append(out, ollama.Message{
-			Role:    "system",
-			Content: "You are Mantis, an expert AI coding assistant. Be precise, direct, and concise.",
-		})
+		out = append(out, sys)
 	}
-	if lastUser != nil {
-		out = append(out, lastUser)
+	// Keep last 3 messages (user+assistant pairs) instead of just 1
+	if len(recent) > 6 {
+		recent = recent[len(recent)-6:]
 	}
+	out = append(out, recent...)
 	return out
 }
 

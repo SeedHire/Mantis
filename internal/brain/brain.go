@@ -113,7 +113,7 @@ func (b *Brain) Load() string {
 	if rejected := b.readFile("REJECTED.md"); rejected != "" {
 		parts = append(parts, "## Previously Rejected Approaches (do NOT suggest these again)\n"+rejected)
 	}
-	if gt := b.loadGroundTruth(); gt != "" {
+	if gt := b.loadGroundTruthN(50, 8000); gt != "" {
 		parts = append(parts, "## Live Code State (GROUND_TRUTH)\n"+gt)
 	}
 
@@ -180,9 +180,9 @@ type FuncSig struct {
 	Returns string `json:"returns"`
 }
 
-// LoadGroundTruth returns a compact text summary of GROUND_TRUTH.json
-// suitable for injection into the AI's system prompt.
-func (b *Brain) loadGroundTruth() string {
+// loadGroundTruthN returns a compact text summary of GROUND_TRUTH.json
+// capped at maxFiles files and maxChars characters.
+func (b *Brain) loadGroundTruthN(maxFiles, maxChars int) string {
 	path := filepath.Join(b.dir, "GROUND_TRUTH.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -200,7 +200,7 @@ func (b *Brain) loadGroundTruth() string {
 	sb.WriteString("Verified live symbols in this codebase:\n")
 	count := 0
 	for file, entry := range gt {
-		if count > 20 { // cap to avoid bloating context
+		if count >= maxFiles || sb.Len() >= maxChars {
 			sb.WriteString("... (truncated, full data in GROUND_TRUTH.json)\n")
 			break
 		}
@@ -209,11 +209,52 @@ func (b *Brain) loadGroundTruth() string {
 		}
 		sb.WriteString(fmt.Sprintf("  %s:\n", file))
 		for _, fn := range entry.Functions {
+			if sb.Len() >= maxChars {
+				break
+			}
 			sb.WriteString(fmt.Sprintf("    func %s(%s) %s\n", fn.Name, fn.Params, fn.Returns))
 		}
 		count++
 	}
 	return sb.String()
+}
+
+// LoadForTier returns brain context sized for the given model tier.
+func (b *Brain) LoadForTier(tier string) string {
+	var parts []string
+
+	if brain := b.readFile("BRAIN.md"); brain != "" {
+		parts = append(parts, "## Project Memory (BRAIN.md)\n"+brain)
+	}
+	if conv := b.readFile("CONVENTIONS.md"); conv != "" {
+		parts = append(parts, "## Project Conventions\n"+conv)
+	}
+	if rejected := b.readFile("REJECTED.md"); rejected != "" {
+		parts = append(parts, "## Previously Rejected Approaches (do NOT suggest these again)\n"+rejected)
+	}
+
+	var maxFiles, maxChars int
+	switch tier {
+	case "trivial", "fast":
+		maxFiles, maxChars = 15, 2000
+	case "code":
+		maxFiles, maxChars = 30, 4000
+	case "reason":
+		maxFiles, maxChars = 50, 8000
+	case "heavy", "max":
+		maxFiles, maxChars = 80, 16000
+	default:
+		maxFiles, maxChars = 15, 2000
+	}
+
+	if gt := b.loadGroundTruthN(maxFiles, maxChars); gt != "" {
+		parts = append(parts, "## Live Code State (GROUND_TRUTH)\n"+gt)
+	}
+
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "\n\n---\n\n")
 }
 
 // Exists reports whether a brain directory exists for this project.

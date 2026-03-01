@@ -3,7 +3,11 @@
 package session
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -12,19 +16,26 @@ import (
 
 // Turn records one exchange in a session.
 type Turn struct {
-	Model            string
-	Tier             router.Tier
-	PromptTokens     int
-	CompletionTokens int
-	HasImage         bool
-	Timestamp        time.Time
+	Model            string      `json:"model"`
+	Tier             router.Tier `json:"tier"`
+	PromptTokens     int         `json:"prompt_tokens"`
+	CompletionTokens int         `json:"completion_tokens"`
+	HasImage         bool        `json:"has_image"`
+	Timestamp        time.Time   `json:"timestamp"`
 }
 
 // Session tracks the whole conversation.
 type Session struct {
-	StartTime time.Time
-	Turns     []Turn
-	Warnings  []string // token waste flags
+	StartTime time.Time `json:"start_time"`
+	Turns     []Turn    `json:"turns"`
+	Warnings  []string  `json:"warnings,omitempty"`
+}
+
+// SavedSession is the on-disk format for session persistence.
+type SavedSession struct {
+	Session
+	Topic   string `json:"topic"`
+	Summary string `json:"summary,omitempty"`
 }
 
 // New creates a fresh session.
@@ -153,4 +164,96 @@ func formatTokens(n int) string {
 		return fmt.Sprintf("%d,%.3d", n/1000, n%1000)
 	}
 	return fmt.Sprintf("%d", n)
+}
+
+// Save persists the session to .mantis/sessions/{timestamp}.json.
+// topic is a short description extracted from the first user message.
+func (s *Session) Save(mantisDir, topic, summary string) error {
+	sessDir := filepath.Join(mantisDir, "sessions")
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		return err
+	}
+
+	saved := SavedSession{
+		Session: *s,
+		Topic:   topic,
+		Summary: summary,
+	}
+	data, err := json.MarshalIndent(saved, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	filename := s.StartTime.Format("2006-01-02_15-04-05") + ".json"
+	path := filepath.Join(sessDir, filename)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return err
+	}
+
+	// Prune old sessions — keep at most 10.
+	return pruneOldSessions(sessDir, 10)
+}
+
+// LoadRecent returns the most recent saved session within maxAge, or nil.
+func LoadRecent(mantisDir string, maxAge time.Duration) (*SavedSession, error) {
+	sessDir := filepath.Join(mantisDir, "sessions")
+	entries, err := os.ReadDir(sessDir)
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) == 0 {
+		return nil, nil
+	}
+
+	// Sort by name descending (timestamp-based names → newest first).
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Name() > entries[j].Name()
+	})
+
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(sessDir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var saved SavedSession
+		if err := json.Unmarshal(data, &saved); err != nil {
+			continue
+		}
+		if time.Since(saved.StartTime) <= maxAge {
+			return &saved, nil
+		}
+		break // oldest-first after sort, so if this one is too old, all are
+	}
+	return nil, nil
+}
+
+func pruneOldSessions(sessDir string, keep int) error {
+	entries, err := os.ReadDir(sessDir)
+	if err != nil {
+		return err
+	}
+
+	var jsonFiles []os.DirEntry
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
+			jsonFiles = append(jsonFiles, e)
+		}
+	}
+
+	if len(jsonFiles) <= keep {
+		return nil
+	}
+
+	// Sort ascending by name (oldest first).
+	sort.Slice(jsonFiles, func(i, j int) bool {
+		return jsonFiles[i].Name() < jsonFiles[j].Name()
+	})
+
+	for i := 0; i < len(jsonFiles)-keep; i++ {
+		_ = os.Remove(filepath.Join(sessDir, jsonFiles[i].Name()))
+	}
+	return nil
 }

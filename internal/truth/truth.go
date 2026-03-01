@@ -145,9 +145,26 @@ func (w *Writer) BuildFull(root string) error {
 }
 
 // ContextSnippet returns a compact text summary for AI system prompt injection.
-// Hard-capped at 2000 characters and 15 files to avoid blowing fast model context windows.
+// Uses default caps suitable for fast models.
 func (w *Writer) ContextSnippet() string {
 	return w.ContextSnippetN(15, 2000)
+}
+
+// ContextSnippetForTier returns a snippet scaled to the model tier's context capacity.
+// Larger tiers get more symbols to reduce hallucination.
+func (w *Writer) ContextSnippetForTier(tier string) string {
+	switch tier {
+	case "trivial", "fast":
+		return w.ContextSnippetN(15, 2000)
+	case "code":
+		return w.ContextSnippetN(30, 4000)
+	case "reason":
+		return w.ContextSnippetN(50, 8000)
+	case "heavy", "max":
+		return w.ContextSnippetN(80, 16000)
+	default:
+		return w.ContextSnippetN(15, 2000)
+	}
 }
 
 // ContextSnippetN returns a snippet capped to maxFiles files and maxChars characters.
@@ -203,6 +220,57 @@ func (w *Writer) SymbolExists(name string) bool {
 		}
 	}
 	return false
+}
+
+// FindClosest returns the closest matching symbol names for a given unknown symbol.
+// Uses simple prefix and substring matching to suggest corrections.
+func (w *Writer) FindClosest(name string, limit int) []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	lower := strings.ToLower(name)
+	var matches []string
+	seen := map[string]bool{}
+
+	// Pass 1: prefix match (highest quality)
+	for _, entry := range w.index {
+		for _, fn := range entry.Functions {
+			if !seen[fn.Name] && strings.HasPrefix(strings.ToLower(fn.Name), lower[:min(len(lower), 3)]) {
+				matches = append(matches, fn.Name)
+				seen[fn.Name] = true
+			}
+		}
+		for _, sym := range entry.ExportedSymbols {
+			if !seen[sym] && strings.HasPrefix(strings.ToLower(sym), lower[:min(len(lower), 3)]) {
+				matches = append(matches, sym)
+				seen[sym] = true
+			}
+		}
+	}
+
+	// Pass 2: substring match
+	if len(matches) < limit {
+		for _, entry := range w.index {
+			for _, fn := range entry.Functions {
+				if !seen[fn.Name] && strings.Contains(strings.ToLower(fn.Name), lower) {
+					matches = append(matches, fn.Name)
+					seen[fn.Name] = true
+				}
+			}
+		}
+	}
+
+	if len(matches) > limit {
+		matches = matches[:limit]
+	}
+	return matches
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // FileCount returns the number of indexed files.

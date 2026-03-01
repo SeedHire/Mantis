@@ -39,7 +39,26 @@ var stopWords = map[string]bool{
 	"describe": true, "expect": true, "test": true,
 }
 
-// Check scans the AI response for symbol references and validates them
+// SuggestCorrections builds a correction string mapping unknown symbols
+// to their closest matches in the ground truth index.
+// Returns empty string if no close matches found.
+func SuggestCorrections(unknownSymbols []string, tw *truth.Writer) string {
+	if tw == nil || len(unknownSymbols) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, sym := range unknownSymbols {
+		closest := tw.FindClosest(sym, 3)
+		if len(closest) > 0 {
+			parts = append(parts, sym+" → did you mean: "+strings.Join(closest, ", ")+"?")
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "\n")
+}
+
 // against the live ground truth index. Only runs if the index has entries.
 func Check(response string, tw *truth.Writer) Result {
 	if tw == nil || tw.FileCount() == 0 {
