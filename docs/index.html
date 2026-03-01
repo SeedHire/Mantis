@@ -3,12 +3,12 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Mantis — Free AI Coding Assistant</title>
+  <title>Mantis — AI that actually knows your codebase</title>
   <link rel="icon" type="image/svg+xml" href="favicon.svg" />
   <link rel="shortcut icon" href="favicon.svg" />
-  <meta name="description" content="Free AI coding assistant. Local-first, persistent memory, codebase intelligence. No API key. No monthly bill." />
-  <meta property="og:title" content="Mantis — Free AI Coding Assistant" />
-  <meta property="og:description" content="Better than Claude Code. $0/month. Runs on Ollama locally or in the cloud." />
+  <meta name="description" content="Free AI coding assistant with persistent memory, impact analysis, temporal intelligence, hallucination guard, and architecture lint. Runs on Ollama — no API key." />
+  <meta property="og:title" content="Mantis — AI that actually knows your codebase" />
+  <meta property="og:description" content="Impact analysis, temporal hotspots, hallucination guard, handoff mode. $0/month. Runs on Ollama." />
   <meta property="og:type" content="website" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -382,6 +382,7 @@
     .tab-pane.active { display: block; }
     .t-out  { color: var(--fg-muted); }
     .t-warn { color: var(--warning); }
+    .t-error { color: var(--error); }
     .t-cmd  { color: var(--fg); }
 
     /* ── Sections ──────────────────────────────────────────────────────── */
@@ -500,6 +501,55 @@
       .hero-logo { font-size: 7px; }
       section, .demo { padding: 60px 0; }
     }
+
+    /* ── Stat bar ───────────────────────────────────────────────────────── */
+    .stat-bar {
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+      padding: 18px 0;
+    }
+    .stat-bar .container {
+      display: flex; justify-content: center; gap: 48px; flex-wrap: wrap;
+    }
+    .stat-item { text-align: center; }
+    .stat-num {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 1.4rem; font-weight: 700;
+      color: var(--copper-lt);
+      display: block;
+    }
+    .stat-label {
+      font-size: .75rem; color: var(--fg-muted);
+      text-transform: uppercase; letter-spacing: .08em;
+    }
+
+    /* ── Command grid ───────────────────────────────────────────────────── */
+    .cmd-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      gap: 10px;
+    }
+    .cmd-row {
+      display: flex; align-items: baseline; gap: 12px;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 8px; padding: .65rem 1rem;
+      font-family: 'JetBrains Mono', monospace; font-size: .82rem;
+    }
+    .cmd-row:hover { border-color: var(--border-hi); }
+    .cmd-name { color: var(--copper-lt); flex-shrink: 0; }
+    .cmd-desc { color: var(--fg-muted); font-size: .78rem; }
+
+    /* ── Feature groups ─────────────────────────────────────────────────── */
+    .feature-group { margin-bottom: 2.5rem; }
+    .feature-group-label {
+      font-size: .72rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .12em; color: var(--copper);
+      margin-bottom: .9rem; display: flex; align-items: center; gap: 8px;
+    }
+    .feature-group-label::after {
+      content: ''; flex: 1; height: 1px; background: var(--border);
+    }
   </style>
 </head>
 <body>
@@ -539,12 +589,12 @@
 
     <h1 class="fade-up d2">
       The AI that actually<br/>
-      <span class="metallic">knows your codebase.</span>
+      <span class="metallic">read your code.</span>
     </h1>
     <p class="fade-up d3">
-      Mantis builds a live dependency graph, remembers your decisions across sessions,
-      routes every query to the right model, and guards against hallucinated APIs.
-      Free. Local-first. Open source.
+      Impact analysis before you break anything. Memory that survives sessions.
+      Hallucination guard that auto-corrects. Architecture lint in CI.
+      All of it free, all of it local.
     </p>
 
     <div class="hero-ctas fade-up d4">
@@ -561,29 +611,28 @@
         <span class="terminal-title">mantis — ~/my-project</span>
       </div>
       <div class="terminal-body">
-        <div><span class="t-green">● Sagar-Darji</span> &nbsp;<span class="t-dim">via GitHub</span></div>
-        <div><span class="t-green">● Ollama Cloud</span> &nbsp;<span class="t-dim">qwen2.5-coder:7b ready</span></div>
-        <div><span class="t-gold">● project memory ready</span> &nbsp;<span class="t-dim">BRAIN.md + 14 decisions</span></div>
-        <div><span class="t-gold">● 187 files indexed</span> &nbsp;<span class="t-dim">graph.db up to date</span></div>
+        <div><span class="t-green">● Sagar-Darji</span> &nbsp;<span class="t-dim">via GitHub · session resumed (12 turns, yesterday)</span></div>
+        <div><span class="t-gold">● BRAIN.md loaded · 14 decisions · 6 rejections</span></div>
+        <div><span class="t-gold">● 187 files indexed · graph.db up to date</span></div>
         <div>&nbsp;</div>
         <div><span class="t-dim">  /file  /vision  /brain  /cost  /reject  /quit</span></div>
         <div>&nbsp;</div>
         <div><span class="t-dim">────────────────────────────────────────────────────────</span></div>
-        <div><span class="t-prompt">❯ </span>what calls processPayment and what breaks if I change it?</div>
-        <div><span class="t-dim">[turn 1 · smart · query · </span><span class="t-copper t-bold">qwen2.5-coder:7b</span><span class="t-dim">]</span></div>
+        <div><span class="t-prompt">❯ </span>refactor processPayment to support partial refunds</div>
+        <div><span class="t-dim">[turn 1 · reason · multi-pass · </span><span class="t-copper t-bold">qwen2.5-coder:7b</span><span class="t-dim">]</span></div>
         <div><span class="t-dim">────────────────────────────────────────────────────────</span></div>
         <div>&nbsp;</div>
-        <div><span class="t-copper t-bold">◈ Mantis</span></div>
+        <div><span class="t-copper t-bold">◈ Mantis</span> &nbsp;<span class="t-dim">[reasoning…]</span></div>
         <div>&nbsp;</div>
-        <div><span class="t-fg">From the dependency graph, </span><span class="t-gold">processPayment</span><span class="t-fg"> has 3 callers:</span></div>
+        <div><span class="t-warn">⚠ Impact: processPayment has 3 callers</span></div>
+        <div>&nbsp; <span class="t-gold">checkout.go:142</span>&nbsp; <span class="t-fg">CheckoutHandler</span> &nbsp;<span class="t-dim">← untested</span></div>
+        <div>&nbsp; <span class="t-gold">retry.go:89</span> &nbsp; &nbsp;<span class="t-fg">RetryFailedPayments</span> &nbsp;<span class="t-dim">← untested</span></div>
+        <div>&nbsp; <span class="t-gold">admin.go:211</span> &nbsp;<span class="t-fg">AdminRefund</span> &nbsp;<span class="t-dim">← covered</span></div>
         <div>&nbsp;</div>
-        <div>&nbsp; <span class="t-gold">checkout.go:142</span> &nbsp; <span class="t-fg">CheckoutHandler()</span></div>
-        <div>&nbsp; <span class="t-gold">retry.go:89</span> &nbsp; &nbsp; &nbsp;<span class="t-fg">RetryFailedPayments()</span></div>
-        <div>&nbsp; <span class="t-gold">admin.go:211</span> &nbsp; &nbsp; <span class="t-fg">AdminRefund()</span></div>
+        <div><span class="t-dim">From BRAIN.md: Redis was rejected for payment state (see REJECTED.md).</span></div>
+        <div><span class="t-fg">Adding </span><span class="t-gold">amount float64</span><span class="t-fg"> param, defaulting to full amount preserves callers…</span></div>
         <div>&nbsp;</div>
-        <div><span class="t-warn">⚠ Changing the signature breaks 3 production paths.</span></div>
-        <div><span class="t-dim">  checkout_test.go covers CheckoutHandler — the other 2 are untested.</span></div>
-        <div>&nbsp;</div>
+        <div><span class="t-green">✓ verified · 0 hallucinated symbols</span></div>
         <div><span class="t-dim">────────────────────────────────────────────────────────</span></div>
         <div><span class="t-prompt">❯ </span><span class="cursor"></span></div>
       </div>
@@ -613,60 +662,190 @@
   </div>
 </div>
 
-<!-- ── Features ──────────────────────────────────────────────────────────── -->
+<!-- ── Stat bar ──────────────────────────────────────────────────────────── -->
+<div class="stat-bar">
+  <div class="container">
+    <div class="stat-item"><span class="stat-num">25+</span><span class="stat-label">CLI commands</span></div>
+    <div class="stat-item"><span class="stat-num">4</span><span class="stat-label">model tiers</span></div>
+    <div class="stat-item"><span class="stat-num">$0</span><span class="stat-label">per month</span></div>
+    <div class="stat-item"><span class="stat-num">Go · TS · Py</span><span class="stat-label">languages</span></div>
+  </div>
+</div>
+
+<!-- ── Demo tabs ─────────────────────────────────────────────────────────── -->
+<section class="demo">
+  <div class="container">
+    <div class="demo-header">
+      <p class="section-label">See it work</p>
+      <h2 class="section-title">Real commands. Real output.</h2>
+    </div>
+    <div class="terminal-tabs">
+      <button class="tab-btn active" onclick="showTab('impact')">impact analysis</button>
+      <button class="tab-btn" onclick="showTab('hotspots')">hotspots</button>
+      <button class="tab-btn" onclick="showTab('lint')">arch lint</button>
+      <button class="tab-btn" onclick="showTab('handoff')">handoff</button>
+    </div>
+    <div class="demo-terminal">
+      <div class="terminal-bar">
+        <span class="dot dot-red"></span>
+        <span class="dot dot-yellow"></span>
+        <span class="dot dot-green"></span>
+        <span class="terminal-title">mantis — ~/my-api</span>
+      </div>
+      <div class="terminal-body">
+
+        <div id="pane-impact" class="tab-pane active">
+          <div><span class="t-prompt">$ </span><span class="t-cmd">mantis impact processPayment</span></div>
+          <div>&nbsp;</div>
+          <div><span class="t-copper t-bold">◈ Impact — processPayment</span></div>
+          <div>&nbsp;</div>
+          <div><span class="t-fg">Direct callers (depth 1)</span></div>
+          <div>&nbsp; <span class="t-gold">checkout.go:142</span>&nbsp; CheckoutHandler &nbsp;<span class="t-warn">⚠ untested</span></div>
+          <div>&nbsp; <span class="t-gold">retry.go:89</span> &nbsp; &nbsp; RetryFailedPayments &nbsp;<span class="t-warn">⚠ untested</span></div>
+          <div>&nbsp; <span class="t-gold">admin.go:211</span> &nbsp; AdminRefund &nbsp;<span class="t-green">✓ covered</span></div>
+          <div>&nbsp;</div>
+          <div><span class="t-fg">Transitive impact (depth 2)</span></div>
+          <div>&nbsp; <span class="t-dim">checkout.go → OrderController → api/orders.go</span></div>
+          <div>&nbsp; <span class="t-dim">retry.go → CronJob → cmd/worker/main.go</span></div>
+          <div>&nbsp;</div>
+          <div><span class="t-warn">⚠ 5 files affected · 2 production paths untested</span></div>
+        </div>
+
+        <div id="pane-hotspots" class="tab-pane">
+          <div><span class="t-prompt">$ </span><span class="t-cmd">mantis hotspots</span></div>
+          <div>&nbsp;</div>
+          <div><span class="t-copper t-bold">◈ Hotspots — last 90 days</span></div>
+          <div>&nbsp;</div>
+          <div><span class="t-warn">HIGH RISK</span></div>
+          <div>&nbsp; <span class="t-gold">internal/repl/repl.go</span> &nbsp;&nbsp; 34 commits · 3 authors · 2 days ago</div>
+          <div>&nbsp; <span class="t-gold">internal/router/router.go</span> &nbsp;21 commits · 2 authors · 5 days ago</div>
+          <div>&nbsp;</div>
+          <div><span class="t-fg">MODERATE</span></div>
+          <div>&nbsp; <span class="t-dim">internal/graph/graph.go</span> &nbsp;&nbsp; 12 commits · 4 authors · 11 days ago</div>
+          <div>&nbsp;</div>
+          <div><span class="t-dim">High churn + single author = bus factor risk.</span></div>
+          <div><span class="t-dim">Run `mantis risky` for single-author danger zones.</span></div>
+        </div>
+
+        <div id="pane-lint" class="tab-pane">
+          <div><span class="t-prompt">$ </span><span class="t-cmd">mantis lint</span></div>
+          <div>&nbsp;</div>
+          <div><span class="t-copper t-bold">◈ Architecture Lint</span></div>
+          <div>&nbsp;</div>
+          <div><span class="t-green">✓ handler layer &nbsp;&nbsp;&nbsp; 0 violations</span></div>
+          <div><span class="t-green">✓ service layer &nbsp;&nbsp; 0 violations</span></div>
+          <div><span class="t-error">✗ api layer &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 2 violations</span></div>
+          <div>&nbsp;</div>
+          <div>&nbsp; <span class="t-gold">api/user.go:42</span> &nbsp; handler imports db directly</div>
+          <div>&nbsp; &nbsp; &nbsp;<span class="t-dim">rule: handlers may not import internal/db</span></div>
+          <div>&nbsp; <span class="t-gold">api/order.go:17</span> &nbsp;handler imports db directly</div>
+          <div>&nbsp; &nbsp; &nbsp;<span class="t-dim">rule: handlers may not import internal/db</span></div>
+          <div>&nbsp;</div>
+          <div><span class="t-dim">Rules defined in .mantisrc.yml · enforce in CI automatically.</span></div>
+        </div>
+
+        <div id="pane-handoff" class="tab-pane">
+          <div><span class="t-prompt">$ </span><span class="t-cmd">mantis handoff</span></div>
+          <div>&nbsp;</div>
+          <div><span class="t-copper t-bold">◈ Writing .mantis/HANDOFF.md…</span></div>
+          <div>&nbsp;</div>
+          <div><span class="t-fg">## Current State</span></div>
+          <div><span class="t-dim">&nbsp; Payment refactor in progress. JWT auth ✓. Rate limiting TODO.</span></div>
+          <div>&nbsp;</div>
+          <div><span class="t-fg">## Key Decisions (last 10)</span></div>
+          <div><span class="t-dim">&nbsp; [2026-02-28] PostgreSQL over MongoDB — better joins for reports</span></div>
+          <div><span class="t-dim">&nbsp; [2026-02-27] Rejected Redis for sessions — complexity not worth it</span></div>
+          <div>&nbsp;</div>
+          <div><span class="t-fg">## Don't Touch</span></div>
+          <div><span class="t-dim">&nbsp; REJECTED: raw SQL in handlers (too brittle, use repository layer)</span></div>
+          <div><span class="t-dim">&nbsp; REJECTED: global config struct (causes race conditions in tests)</span></div>
+          <div>&nbsp;</div>
+          <div><span class="t-green">✓ HANDOFF.md written · share with your team or next AI session</span></div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</section>
 <section id="features">
   <div class="container">
     <p class="section-label">What Mantis does</p>
     <h2 class="section-title">Not a chat wrapper.<br/>A codebase intelligence engine.</h2>
-    <p class="section-sub">Every feature below is live and works today. No vaporware.</p>
+    <p class="section-sub">Every feature below is live and ships today. No vaporware.</p>
 
-    <div class="feature-grid">
-      <div class="feature-card">
-        <div class="feature-icon">🧠</div>
-        <h3>Persistent Project Memory</h3>
-        <p>After every session, Mantis updates <code>BRAIN.md</code>, appends <code>DECISIONS.log</code>, and records failed approaches in <code>REJECTED.md</code>. The AI never re-suggests what you already rejected.</p>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon">🕸️</div>
-        <h3>Live Dependency Graph</h3>
-        <p>Run <code>mantis init</code> once. Mantis builds an AST graph of every symbol, import, and caller in your project — and queries it in plain English.</p>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon">💥</div>
-        <h3>Impact Analysis</h3>
-        <p>Before you touch a function, ask <code>mantis impact &lt;symbol&gt;</code>. Mantis traces every downstream caller and tells you exactly what breaks — before you write a line.</p>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon">🎯</div>
-        <h3>4-Tier Model Routing</h3>
-        <p>Every query is classified — trivial, code, reasoning, or heavy — and sent to the right model automatically. Fast questions get fast models. Hard questions get the big guns.</p>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon">🔍</div>
-        <h3>Hallucination Guard</h3>
-        <p>AI output is cross-checked against <code>GROUND_TRUTH.json</code> — a live index of your real function signatures. Invented names get flagged before you ship them.</p>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon">📐</div>
-        <h3>Architecture Lint</h3>
-        <p>Define layer rules in <code>.mantisrc.yml</code> — e.g. "no handler may import db directly" — and enforce them in CI. Like ESLint, but for your architecture.</p>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon">🔎</div>
-        <h3>NL Codebase Queries</h3>
-        <p>Ask in plain English: <code>what imports auth?</code>, <code>dead code in billing/</code>, <code>circular deps in api layer</code>. Mantis queries the graph and answers directly.</p>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon">💰</div>
-        <h3>Token Cost Tracker</h3>
-        <p>Every session ends with a report showing what you'd have paid on GPT-4o, Claude Sonnet, or Opus — and what you actually paid with Mantis: $0.00.</p>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon">🖼️</div>
-        <h3>Multimodal Input</h3>
-        <p>Drop a screenshot, architecture diagram, or error image with <code>/vision</code>. Works with any vision-capable Ollama model locally or in the cloud.</p>
+    <div class="feature-group">
+      <div class="feature-group-label">Memory &amp; Context</div>
+      <div class="feature-grid">
+        <div class="feature-card">
+          <div class="feature-icon">🧠</div>
+          <h3>Persistent Project Memory</h3>
+          <p>After every session, Mantis updates <code>BRAIN.md</code>, appends <code>DECISIONS.log</code>, and records failed approaches in <code>REJECTED.md</code>. The AI reads all of it on startup — zero re-explaining.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">🔄</div>
+          <h3>Session Resume</h3>
+          <p>Sessions are saved to <code>.mantis/sessions/</code>. Next run picks up exactly where you left off — same context, same thread. Semantic embeddings surface relevant past turns automatically.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">🤝</div>
+          <h3>Handoff Mode</h3>
+          <p>Run <code>mantis handoff</code> to generate a dense <code>HANDOFF.md</code> — current state, key decisions, everything marked "don't touch". Share with your team or your next AI session.</p>
+        </div>
       </div>
     </div>
+
+    <div class="feature-group">
+      <div class="feature-group-label">Codebase Intelligence</div>
+      <div class="feature-grid">
+        <div class="feature-card">
+          <div class="feature-icon">🕸️</div>
+          <h3>Live Dependency Graph</h3>
+          <p>Run <code>mantis init</code> once. Mantis builds an AST graph of every symbol, import, and caller across Go, TypeScript, and Python — queryable in plain English or visualized with <code>mantis graph</code>.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">💥</div>
+          <h3>Impact Analysis</h3>
+          <p>Before you touch a function, <code>mantis impact &lt;symbol&gt;</code> traces every downstream caller, flags untested paths, and tells you exactly what breaks — before you write a line.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">⏱️</div>
+          <h3>Temporal Intelligence</h3>
+          <p>Analyze your git history with <code>mantis hotspots</code>, <code>mantis risky</code>, <code>mantis coupling</code>, and <code>mantis intent</code> — find high-churn danger zones, bus factor risks, and co-change patterns.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">🔎</div>
+          <h3>NL Codebase Queries</h3>
+          <p>Ask in plain English: <em>what imports auth?</em>, <em>dead code in billing/</em>, <em>circular deps in api layer</em>. Mantis queries the live graph and answers directly — no grepping.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">🖥️</div>
+          <h3>TUI Dashboard</h3>
+          <p>Run <code>mantis tui</code> for a full-screen terminal dashboard — live graph stats, session overview, hotspot heatmap, and architecture violations all in one view.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="feature-group">
+      <div class="feature-group-label">Safety &amp; Reliability</div>
+      <div class="feature-grid">
+        <div class="feature-card">
+          <div class="feature-icon">🔍</div>
+          <h3>Hallucination Guard</h3>
+          <p>AI output is checked against a live index of your real function signatures. When an invented symbol is detected, Mantis re-prompts with the correct signatures and returns a fixed answer — automatically.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">📐</div>
+          <h3>Architecture Lint</h3>
+          <p>Define layer rules in <code>.mantisrc.yml</code> — <em>"no handler may import db directly"</em> — and enforce them in CI. Like ESLint, but for your architecture boundaries.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">🎯</div>
+          <h3>4-Tier Model Routing</h3>
+          <p>Every query is classified — trivial, code, reasoning, or heavy — and routed to the right model automatically. Trivial questions get fast models. Hard ones trigger chain-of-thought reasoning.</p>
+        </div>
+      </div>
+    </div>
+
   </div>
 </section>
 
@@ -690,11 +869,13 @@
           <tr><td>Monthly cost</td><td class="price-free highlight-col">$0</td><td class="price-paid">$20+</td><td class="price-paid">$10+</td><td class="price-paid">$20+</td></tr>
           <tr><td>Persistent project memory</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
           <tr><td>Decision &amp; rejection memory</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
+          <tr><td>Session resume</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
           <tr><td>Live dependency graph</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="check">partial</td></tr>
           <tr><td>Impact analysis before editing</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
+          <tr><td>Temporal hotspots &amp; risky files</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
           <tr><td>Architecture lint in CI</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
-          <tr><td>Hallucination guard</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
-          <tr><td>4-tier model routing</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
+          <tr><td>Hallucination guard (self-healing)</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
+          <tr><td>Handoff mode</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
           <tr><td>Runs on local Ollama</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
           <tr><td>Token cost tracker</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
         </tbody>
@@ -735,7 +916,7 @@
       <div>
         <p class="section-label">Project Memory</p>
         <h2 class="section-title">Picks up where you left off.</h2>
-        <p class="section-sub">After every session, Mantis updates <code style="color:var(--copper-lt)">BRAIN.md</code> with what changed, logs your decisions in <code style="color:var(--copper-lt)">DECISIONS.log</code>, and records what failed in <code style="color:var(--copper-lt)">REJECTED.md</code>. The AI reads all of it on startup — so you never repeat a mistake or re-explain your architecture.</p>
+        <p class="section-sub">After every session, Mantis updates <code style="color:var(--copper-lt)">BRAIN.md</code> with what changed, logs your decisions in <code style="color:var(--copper-lt)">DECISIONS.log</code>, and records what failed in <code style="color:var(--copper-lt)">REJECTED.md</code>. The AI reads all of it on startup — so you never repeat a mistake, re-explain your architecture, or lose context between sessions.</p>
       </div>
       <div class="file-tree">
         <div><span class="dir">.mantis/</span></div>
@@ -743,40 +924,44 @@
         <div>&nbsp; <span class="file">CONVENTIONS.md</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← architecture rules</span></div>
         <div>&nbsp; <span class="file">DECISIONS.log</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← timestamped decisions</span></div>
         <div>&nbsp; <span class="file">REJECTED.md</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← approaches that failed</span></div>
+        <div>&nbsp; <span class="file">HANDOFF.md</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← team/AI handoff brief</span></div>
         <div>&nbsp; <span class="file">graph.db</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← AST dependency graph</span></div>
+        <div>&nbsp; <span class="dir">sessions/</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← persisted chat history</span></div>
         <div style="margin-top:.5rem"><span class="dir">.mantisrc.yml</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← CI lint rules</span></div>
       </div>
     </div>
   </div>
 </section>
 
-<!-- ── What's next ───────────────────────────────────────────────────────── -->
+<!-- ── Command reference ──────────────────────────────────────────────────── -->
 <section>
   <div class="container">
-    <p class="section-label">Roadmap</p>
-    <h2 class="section-title">What's coming next.</h2>
-    <p class="section-sub">Actively in development. These ship in the next releases.</p>
-    <div class="steps">
-      <div class="step">
-        <div class="step-num" style="background:rgba(45,212,160,.12);color:var(--success)">→</div>
-        <h3>Chain-of-Thought Reasoning</h3>
-        <p>For complex queries, Mantis will run structured reasoning before answering — showing its thinking, not just the conclusion. Better answers on hard problems.</p>
-      </div>
-      <div class="step">
-        <div class="step-num" style="background:rgba(45,212,160,.12);color:var(--success)">→</div>
-        <h3>Self-Healing Verification</h3>
-        <p>When the hallucination guard flags an invented symbol, Mantis will re-prompt with the real signatures and return a corrected answer — automatically.</p>
-      </div>
-      <div class="step">
-        <div class="step-num" style="background:rgba(45,212,160,.12);color:var(--success)">→</div>
-        <h3>Smart Context Compression</h3>
-        <p>Long conversations stay coherent. Instead of dropping context on overflow, Mantis summarizes older turns and keeps them as compressed memory.</p>
-      </div>
-      <div class="step">
-        <div class="step-num" style="background:rgba(45,212,160,.12);color:var(--success)">→</div>
-        <h3>Session Persistence</h3>
-        <p>Sessions saved to <code>.mantis/sessions/</code>. Next run offers to resume — same context, same thread, zero re-explanation.</p>
-      </div>
+    <p class="section-label">Full CLI</p>
+    <h2 class="section-title">25+ commands. All of them real.</h2>
+    <p class="section-sub">Power users: here's everything Mantis can do out of the box.</p>
+    <div class="cmd-grid">
+      <div class="cmd-row"><span class="cmd-name">mantis</span><span class="cmd-desc">interactive AI chat with session resume + memory</span></div>
+      <div class="cmd-row"><span class="cmd-name">mantis init</span><span class="cmd-desc">build AST dependency graph from your codebase</span></div>
+      <div class="cmd-row"><span class="cmd-name">mantis impact &lt;symbol&gt;</span><span class="cmd-desc">trace callers + show what breaks</span></div>
+      <div class="cmd-row"><span class="cmd-name">mantis find &lt;symbol&gt;</span><span class="cmd-desc">locate any symbol in the graph</span></div>
+      <div class="cmd-row"><span class="cmd-name">mantis context &lt;symbol&gt;</span><span class="cmd-desc">bundle symbol + callers into context block</span></div>
+      <div class="cmd-row"><span class="cmd-name">mantis dead</span><span class="cmd-desc">detect unreachable dead code</span></div>
+      <div class="cmd-row"><span class="cmd-name">mantis circular</span><span class="cmd-desc">find circular dependency cycles</span></div>
+      <div class="cmd-row"><span class="cmd-name">mantis graph</span><span class="cmd-desc">open interactive D3 dependency visualization</span></div>
+      <div class="cmd-row"><span class="cmd-name">mantis lint</span><span class="cmd-desc">enforce architecture rules from .mantisrc.yml</span></div>
+      <div class="cmd-row"><span class="cmd-name">mantis watch</span><span class="cmd-desc">keep graph live as files change</span></div>
+      <div class="cmd-row"><span class="cmd-name">mantis tui</span><span class="cmd-desc">full-screen terminal dashboard</span></div>
+      <div class="cmd-row"><span class="cmd-name">mantis hotspots</span><span class="cmd-desc">highest-churn files from git history</span></div>
+      <div class="cmd-row"><span class="cmd-name">mantis risky</span><span class="cmd-desc">high churn + low bus factor files</span></div>
+      <div class="cmd-row"><span class="cmd-name">mantis coupling [path]</span><span class="cmd-desc">files that always change together</span></div>
+      <div class="cmd-row"><span class="cmd-name">mantis intent [path]</span><span class="cmd-desc">feat/fix/refactor commit timeline</span></div>
+      <div class="cmd-row"><span class="cmd-name">mantis todos</span><span class="cmd-desc">find TODO / FIXME / HACK across codebase</span></div>
+      <div class="cmd-row"><span class="cmd-name">mantis spec-gaps</span><span class="cmd-desc">files with promises but growing bug count</span></div>
+      <div class="cmd-row"><span class="cmd-name">mantis handoff</span><span class="cmd-desc">generate HANDOFF.md for team or AI session</span></div>
+      <div class="cmd-row"><span class="cmd-name">mantis workspace</span><span class="cmd-desc">cross-repo intelligence (init, find, impact)</span></div>
+      <div class="cmd-row"><span class="cmd-name">mantis trace ingest</span><span class="cmd-desc">ingest OTLP / pprof / custom runtime traces</span></div>
+      <div class="cmd-row"><span class="cmd-name">mantis trace hotpaths</span><span class="cmd-desc">hottest code paths from runtime data</span></div>
+      <div class="cmd-row"><span class="cmd-name">mantis trace cold</span><span class="cmd-desc">cold paths — never-hit code at runtime</span></div>
     </div>
   </div>
 </section>
@@ -784,8 +969,8 @@
 <!-- ── CTA ────────────────────────────────────────────────────────────────── -->
 <section class="cta-section">
   <div class="container">
-    <h2><span class="metallic">Start coding for free.</span></h2>
-    <p>No credit card. No account creation. Just GitHub login and you're in.</p>
+    <h2><span class="metallic">One command. All of this. Free.</span></h2>
+    <p>No credit card. No API key. No monthly bill. GitHub login and you're in.</p>
     <a href="#install" class="btn btn-primary">↓ Install Mantis</a>
   </div>
 </section>
