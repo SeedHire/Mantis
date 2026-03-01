@@ -494,10 +494,9 @@
 <!-- ── Nav ───────────────────────────────────────────────────────────────── -->
 <nav>
   <div class="nav-inner container">
-    <div class="nav-brand">◈ mantis <span class="nav-mascot">(o_o)</span></div>
+    <div class="nav-brand"> mantis <span class="nav-mascot">(o_o)</span></div>
     <div class="nav-links">
       <a href="#features" class="hide-mobile">Features</a>
-      <a href="#demo" class="hide-mobile">Demo</a>
       <a href="#install" class="hide-mobile">Install</a>
       <a href="https://github.com/SeedHire/Mantis" target="_blank" class="hide-mobile">GitHub</a>
       <a href="https://github.com/SeedHire/Mantis" target="_blank" class="btn btn-ghost nav-cta">★ Star</a>
@@ -512,11 +511,12 @@
   <div class="container">
 
     <div class="hero-logo-wrap fade-up">
-<pre class="hero-logo">  ███╗   ███╗ █████╗ ███╗   ██╗████████╗██╗███████╗
-  ████╗ ████║██╔══██╗████╗  ██║╚══██╔══╝██║██╔════╝     \   /
-  ██╔████╔██║███████║██╔██╗ ██║   ██║   ██║███████╗      \_/
-  ██║╚██╔╝██║██╔══██║██║╚██╗██║   ██║   ██║╚════██║     (o_o)
-  ██║ ╚═╝ ██║██║  ██║██║ ╚████║   ██║   ██║███████║ <===[|||]===>
+<pre class="hero-logo">  
+  ███╗   ███╗ █████╗ ███╗   ██╗████████╗██╗███████╗
+  ████╗ ████║██╔══██╗████╗  ██║╚══██╔══╝██║██╔════╝      \   /
+  ██╔████╔██║███████║██╔██╗ ██║   ██║   ██║███████╗       \_/
+  ██║╚██╔╝██║██╔══██║██║╚██╗██║   ██║   ██║╚════██║      (o_o)
+  ██║ ╚═╝ ██║██║  ██║██║ ╚████║   ██║   ██║███████║  <===[|||]===>
   ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝   ╚═╝   ╚═╝╚══════╝</pre>
     </div>
 
@@ -553,28 +553,24 @@
         <div><span class="t-green">● Sagar-Darji</span></div>
         <div><span class="t-green">● Ollama Cloud</span></div>
         <div><span class="t-gold">● project memory ready</span></div>
-        <div><span class="t-gold">● 38 files indexed</span></div>
+        <div><span class="t-gold">● 142 files indexed</span></div>
         <div>&nbsp;</div>
         <div><span class="t-dim">  /help  /cost  /brain  /quit</span></div>
         <div>&nbsp;</div>
-        <div><span class="t-prompt">❯</span> /quit</div>
+        <div><span class="t-dim">────────────────────────────────────────────────────────</span></div>
+        <div><span class="t-prompt">❯ </span>why does the auth middleware skip admin routes?</div>
+        <div><span class="t-dim">[turn 1 · fast · general · </span><span class="t-copper t-bold">qwen2.5-coder:7b</span><span class="t-dim">]</span></div>
+        <div><span class="t-dim">────────────────────────────────────────────────────────</span></div>
         <div>&nbsp;</div>
-        <div style="border:1px solid #2E3448;border-radius:6px;padding:10px 14px;display:inline-block;min-width:340px">
-          <div style="color:#8890A8;margin-bottom:6px">SESSION SUMMARY — mantis</div>
-          <div style="border-top:1px solid #2E3448;padding-top:8px">
-            <div><span class="t-dim">Duration&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span><span class="t-fg">10s</span></div>
-            <div><span class="t-dim">Total tokens&nbsp;&nbsp;</span><span class="t-fg">2,841</span></div>
-            <div><span class="t-dim">Turns&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span><span class="t-fg">3</span></div>
-            <div><span class="t-dim">Route&nbsp;&nbsp;</span><span class="t-fg">trivial×0&nbsp; fast×2&nbsp; code×1&nbsp; reason×0</span></div>
-          </div>
-          <div style="border-top:1px solid #2E3448;padding-top:8px;margin-top:6px">
-            <div style="color:#8890A8;margin-bottom:4px">WHAT THIS WOULD HAVE COST WITH PAID APIs</div>
-            <div><span class="t-dim">GPT-4o&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span><span class="t-fg">$0.09</span></div>
-            <div><span class="t-dim">Claude Sonnet&nbsp;</span><span class="t-fg">$0.07</span></div>
-            <div><span class="t-dim">Claude Opus&nbsp;&nbsp;&nbsp;</span><span class="t-fg">$0.31</span></div>
-            <div><span class="t-dim">Mantis cost&nbsp;&nbsp;&nbsp;</span><span class="t-green t-bold">$0.00 ✓</span></div>
-          </div>
-        </div>
+        <div><span class="t-copper t-bold">◈ Mantis</span></div>
+        <div>&nbsp;</div>
+        <div>In <span class="t-gold">src/middleware/auth.ts:34</span>, the <span class="t-gold">skipAuth</span> array</div>
+        <div>includes all routes prefixed with <span class="t-gold">/admin</span> — this was</div>
+        <div>added in commit <span class="t-gold">a3f91b</span> to bypass JWT checks during</div>
+        <div>local dev but was never removed.</div>
+        <div>&nbsp;</div>
+        <div><span class="t-dim">────────────────────────────────────────────────────────</span></div>
+        <div><span class="t-prompt">❯ </span><span class="cursor"></span></div>
       </div>
     </div>
 
@@ -598,47 +594,6 @@
     <div class="install-cmd">
       <code id="cmd-brew">brew install seedhire/tap/mantis</code>
       <button class="copy-btn" onclick="copy('cmd-brew', this)">copy</button>
-    </div>
-  </div>
-</div>
-
-<!-- ── Demo ──────────────────────────────────────────────────────────────── -->
-<div class="demo" id="demo" style="position:relative">
-  <div class="container">
-    <div class="demo-header">
-      <p class="section-label">Live Demo</p>
-      <h2 class="section-title">See it in action.</h2>
-    </div>
-    <div class="demo-terminal">
-      <div class="terminal-bar">
-        <div class="dot dot-red"></div>
-        <div class="dot dot-yellow"></div>
-        <div class="dot dot-green"></div>
-        <span class="terminal-title">mantis — ~/my-project</span>
-      </div>
-      <div class="terminal-body">
-<div><span class="t-green">● Sagar-Darji</span></div>
-<div><span class="t-green">● Ollama Cloud</span></div>
-<div><span class="t-gold">● project memory ready</span></div>
-<div><span class="t-gold">● 142 files indexed</span></div>
-<div>&nbsp;</div>
-<div><span class="t-dim">  /help  /cost  /brain  /quit</span></div>
-<div>&nbsp;</div>
-<div><span class="t-dim">────────────────────────────────────────────────────────</span></div>
-<div><span class="t-prompt">❯ </span>why does the auth middleware skip admin routes?</div>
-<div><span class="t-dim">[turn 1 · fast · general · </span><span class="t-copper t-bold">qwen2.5-coder:7b</span><span class="t-dim">]</span></div>
-<div><span class="t-dim">────────────────────────────────────────────────────────</span></div>
-<div>&nbsp;</div>
-<div><span class="t-copper t-bold">◈ Mantis</span></div>
-<div>&nbsp;</div>
-<div>In <span class="t-gold">src/middleware/auth.ts:34</span>, the <span class="t-gold">skipAuth</span> array</div>
-<div>includes all routes prefixed with <span class="t-gold">/admin</span> — this was</div>
-<div>added in commit <span class="t-gold">a3f91b</span> to bypass JWT checks during</div>
-<div>local dev but was never removed.</div>
-<div>&nbsp;</div>
-<div><span class="t-dim">────────────────────────────────────────────────────────</span></div>
-<div><span class="t-prompt">❯ </span><span class="cursor"></span></div>
-      </div>
     </div>
   </div>
 </div>
