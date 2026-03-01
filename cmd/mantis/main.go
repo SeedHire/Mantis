@@ -676,7 +676,7 @@ func init() {
 	rootCmd.Flags().IntVar(&replBudget, "budget", 0, "Max tokens for this session (0 = unlimited)")
 	rootCmd.Flags().StringVar(&replImage, "image", "", "Image file path for multimodal input")
 
-	rootCmd.AddCommand(contextCmd, watchCmd, findCmd, impactCmd, deadCmd, circularCmd, graphCmd, lintCmd, tuiCmd)
+	rootCmd.AddCommand(initCmd, contextCmd, watchCmd, findCmd, impactCmd, deadCmd, circularCmd, graphCmd, lintCmd, tuiCmd)
 }
 
 func main() {
