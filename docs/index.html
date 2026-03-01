@@ -597,6 +597,7 @@
     <p class="fade-up d3">
       Chat, screenshot analysis, dependency graph, runtime trace analysis,
       cross-repo impact checks, architecture lint, and persistent project memory.
+      Includes 25 built-in skills, plus your own custom skills from <code>.mantis/skills</code>.
       Free to use with Ollama Cloud or fully local with your own models.
     </p>
 
@@ -669,6 +670,7 @@
 <div class="stat-bar">
   <div class="container">
     <div class="stat-item"><span class="stat-num">30+</span><span class="stat-label">CLI commands</span></div>
+    <div class="stat-item"><span class="stat-num">25+</span><span class="stat-label">built-in skills</span></div>
     <div class="stat-item"><span class="stat-num">7 + Vision</span><span class="stat-label">routing tiers</span></div>
     <div class="stat-item"><span class="stat-num">$0</span><span class="stat-label">monthly cost</span></div>
     <div class="stat-item"><span class="stat-num">Go · TS · Py</span><span class="stat-label">language graph</span></div>
@@ -793,6 +795,11 @@
           <div class="feature-icon">🧭</div>
           <h3>Slash Command Workflow</h3>
           <p>Use focused controls like <code>/file</code>, <code>/brain</code>, <code>/decision</code>, <code>/reject</code>, and <code>/cost</code> without leaving the session.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">🧩</div>
+          <h3>25 Built-In Skills + Custom Skills</h3>
+          <p>Mantis ships with 25 built-in specialist skills and also loads any additional markdown skill files you add under <code>.mantis/skills/</code>.</p>
         </div>
       </div>
     </div>
@@ -972,6 +979,7 @@
         <div>&nbsp; <span class="file">HANDOFF.md</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← team/AI handoff brief</span></div>
         <div>&nbsp; <span class="file">graph.db</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← AST dependency graph</span></div>
         <div>&nbsp; <span class="dir">sessions/</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← persisted chat history</span></div>
+        <div>&nbsp; <span class="dir">skills/</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← built-in + custom skill files</span></div>
         <div style="margin-top:.5rem"><span class="dir">.mantisrc.yml</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← CI lint rules</span></div>
       </div>
     </div>
@@ -991,6 +999,7 @@
         <div class="cmd-row"><span class="cmd-name">mantis</span><span class="cmd-desc">interactive AI session with memory and routing</span></div>
         <div class="cmd-row"><span class="cmd-name">mantis "question"</span><span class="cmd-desc">one-shot answer from the terminal</span></div>
         <div class="cmd-row"><span class="cmd-name">mantis --image screenshot.png</span><span class="cmd-desc">multimodal analysis from an image</span></div>
+        <div class="cmd-row"><span class="cmd-name">.mantis/skills/*.md</span><span class="cmd-desc">add custom skills; loaded automatically by task relevance</span></div>
         <div class="cmd-row"><span class="cmd-name">mantis handoff</span><span class="cmd-desc">generate HANDOFF.md for async collaboration</span></div>
       </div>
     </div>

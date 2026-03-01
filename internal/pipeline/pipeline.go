@@ -69,7 +69,7 @@ func Run(
 	res := &Result{}
 
 	// ── Stage 1: PLAN ─────────────────────────────────────────────────────────
-	fmt.Printf("%s  [pipeline · 1/3 · plan · %s]%s\n", pColorDim, planModel, pColorReset)
+	fmt.Printf("%s  ◆ planning   [%s]%s\n", pColorDim, planModel, pColorReset)
 
 	planMsgs := []interface{}{
 		ollama.Message{Role: "system", Content: systemPrompt + planStageSuffix},
@@ -79,7 +79,7 @@ func Run(
 	pt, ct, err := client.StreamChat(ctx, planModel, planMsgs, nil, func(c string) { planBuf.WriteString(c) })
 	if err != nil {
 		// Plan model unavailable — fall back to code model so the pipeline still runs.
-		fmt.Printf("%s  [plan model unavailable, falling back to %s]%s\n", pColorDim, codeModel, pColorReset)
+		fmt.Printf("%s  ⚠ plan model unavailable, falling back to %s%s\n", pColorDim, codeModel, pColorReset)
 		planBuf.Reset()
 		pt, ct, err = client.StreamChat(ctx, codeModel, planMsgs, nil, func(c string) { planBuf.WriteString(c) })
 		if err != nil {
@@ -89,10 +89,10 @@ func Run(
 	res.PlanText = planBuf.String()
 	res.PromptTok += pt
 	res.ComplTok += ct
-	fmt.Printf("%s  [plan done · %d tokens]%s\n", pColorGold, pt+ct, pColorReset)
+	fmt.Printf("%s  ✓ plan ready%s\n", pColorGold, pColorReset)
 
 	// ── Stage 2 + 3: CODE and TESTS in parallel ───────────────────────────────
-	fmt.Printf("%s  [pipeline · 2+3 · code + tests · %s · parallel]%s\n", pColorDim, codeModel, pColorReset)
+	fmt.Printf("%s  ◆ coding + testing   [%s · parallel]%s\n", pColorDim, codeModel, pColorReset)
 
 	type stageOut struct {
 		text   string
@@ -140,10 +140,10 @@ func Run(
 		res.TestText = testOut.text
 		res.PromptTok += testOut.pt
 		res.ComplTok += testOut.ct
+		fmt.Printf("%s  ✓ code ready  ✓ tests ready%s\n", pColorGold, pColorReset)
+	} else {
+		fmt.Printf("%s  ✓ code ready%s\n", pColorGold, pColorReset)
 	}
-
-	fmt.Printf("%s  [code + tests done · %d tokens]%s\n",
-		pColorGold, codeOut.pt+codeOut.ct+testOut.pt+testOut.ct, pColorReset)
 
 	res.Combined = assemble(res.PlanText, res.CodeText, res.TestText)
 	return res, nil

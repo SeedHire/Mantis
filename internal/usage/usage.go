@@ -12,9 +12,9 @@ import (
 
 // Limits for the free tier (approximate Ollama Cloud free tier values).
 const (
-	FreeDailyTokens      = 100_000
-	FreeDailyHeavyCalls  = 3
-	FreeDailyVisionCalls = 5
+	FreeDailyTokens      = 1_000_000
+	FreeDailyHeavyCalls  = 10
+	FreeDailyVisionCalls = 10
 )
 
 // DayUsage tracks usage for a single calendar day.

@@ -364,7 +364,7 @@ func Run(cfg Config) error {
 				totalTok := pRes.PromptTok + pRes.ComplTok
 				fmt.Printf("%s◈ Mantis%s %s[pipeline · plan→code+tests · %d tokens]%s\n",
 					colorCopper+colorBold, colorReset, colorDim, totalTok, colorReset)
-				renderResponse(pRes.Combined)
+				renderResponse(stripFileBlocks(pRes.Combined))
 				if wf := extractAndWriteFiles(pRes.Combined, root); len(wf) > 0 {
 					printWrittenFiles(wf)
 				}
@@ -389,7 +389,7 @@ func Run(cfg Config) error {
 		}
 
 		// Show spinner while model generates, then render formatted output.
-		stopSpin := startSpinner()
+		stopSpin := startSpinner(string(intent.TaskType))
 		streamCtx, streamCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		var rb strings.Builder
 		var promptTok, completionTok int
@@ -411,7 +411,7 @@ func Run(cfg Config) error {
 
 		// Render the full response as formatted markdown.
 		fmt.Printf("%s◈ Mantis%s\n", colorCopper+colorBold, colorReset)
-		renderResponse(rb.String())
+		renderResponse(stripFileBlocks(rb.String()))
 
 		// Write any file code blocks from the response to disk.
 		if wf := extractAndWriteFiles(rb.String(), root); len(wf) > 0 {
@@ -449,7 +449,7 @@ func Run(cfg Config) error {
 					messages[len(messages)-1] = ollama.Message{Role: "assistant", Content: rb2.String()}
 					sess.Add(model, intent.Tier, pt2, ct2, false)
 					fmt.Printf("%s◈ Mantis%s %s(corrected)%s\n", colorCopper+colorBold, colorReset, colorDim, colorReset)
-					renderResponse(rb2.String())
+					renderResponse(stripFileBlocks(rb2.String()))
 					if wf := extractAndWriteFiles(rb2.String(), root); len(wf) > 0 {
 						printWrittenFiles(wf)
 					}
@@ -866,61 +866,89 @@ func renderResponse(content string) {
 }
 
 // startSpinner shows a pulsing indicator while the model generates.
+// taskType controls the lead messages shown first (task-relevant traces),
+// followed by generic humorous messages to keep the user entertained.
 // Returns a stop function that clears the spinner line.
-func startSpinner() func() {
+func startSpinner(taskType string) func() {
 	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-	messages := []string{
-		"generating…",
+
+	// Task-specific lead messages — shown first so they feel responsive.
+	taskLeads := map[string][]string{
+		"implement": {
+			"📐 designing the architecture…",
+			"🏗️  scaffolding structure…",
+			"🔨 writing code…",
+			"🔗 wiring it together…",
+			"📦 packaging the solution…",
+		},
+		"fix": {
+			"🔍 hunting the bug…",
+			"🩺 diagnosing root cause…",
+			"🔧 applying the fix…",
+			"🧪 checking edge cases…",
+		},
+		"refactor": {
+			"🧹 analysing code smells…",
+			"♻️  planning refactor…",
+			"✂️  extracting functions…",
+			"📏 simplifying logic…",
+		},
+		"test": {
+			"🧪 designing test cases…",
+			"✅ covering happy path…",
+			"💥 probing edge cases…",
+			"🎯 checking coverage…",
+		},
+		"explain": {
+			"📖 reading the code…",
+			"🔭 tracing execution…",
+			"💡 synthesising explanation…",
+		},
+		"impact-query": {
+			"🗺️  mapping dependencies…",
+			"🔎 tracing call paths…",
+			"📊 assessing blast radius…",
+		},
+	}
+
+	// Generic messages — appended after task-specific ones.
+	generic := []string{
 		"thinking…",
-		"cooking something up…",
-		"consulting the oracle…",
 		"crunching tokens…",
-		"spelunking the weights…",
 		"pondering deeply…",
 		"assembling thoughts…",
-		"doing the math…",
 		"reasoning through it…",
 		"weaving words…",
-		"flabbering…",
 		"vibing with the model…",
 		"summoning wisdom…",
-		"reading the matrix…",
 		"connecting neurons…",
-		"calculating…",
 		"brewing ideas…",
 		"untangling complexity…",
 		"in the zone…",
 		"asking the void…",
-		"manifesting an answer…",
 		"decoding the universe…",
-		"staring into the abyss…",
-		"having a shower thought…",
-		"waking up the neurons…",
 		"loading big brain…",
 		"deep in thought…",
 		"running on caffeine…",
 		"reverse engineering your question…",
-		"sending ravens…",
-		"checking the ancient scrolls…",
+		"consulting the ancient scrolls…",
 		"consulting Stack Overflow…",
-		"pretending to be smart…",
 		"definitely not googling this…",
-		"vigorously nodding…",
 		"making stuff up confidently…",
 		"downloading more RAM…",
-		"overcooking the noodles…",
-		"typing with one hand…",
 		"blaming the compiler…",
 		"reading the docs (rare)…",
 		"squinting at the code…",
 		"finding signal in the noise…",
-		"refactoring my thoughts…",
-		"git blaming internally…",
-		"pushing to prod (just kidding)…",
 		"rubber ducking…",
 		"entering flow state…",
 		"hallucinating responsibly…",
+		"git blaming internally…",
+		"pushing to prod (just kidding)…",
 	}
+
+	msgs := append(taskLeads[taskType], generic...)
+
 	done := make(chan struct{})
 	go func() {
 		i := 0
@@ -932,11 +960,17 @@ func startSpinner() func() {
 				return
 			case <-time.After(80 * time.Millisecond):
 				fmt.Printf("\r%s%s %s%s",
-					colorDim, frames[i%len(frames)], messages[msgIdx], colorReset)
+					colorDim, frames[i%len(frames)], msgs[msgIdx], colorReset)
 				i++
-				// rotate message every ~2.5 seconds (≈31 ticks of 80ms)
-				if i%31 == 0 {
-					msgIdx = (msgIdx + 1) % len(messages)
+				// advance faster through task leads (~1.5s each), slower through generic (~3s)
+				interval := 19
+				if msgIdx < len(taskLeads[taskType]) {
+					interval = 19
+				} else {
+					interval = 38
+				}
+				if i%interval == 0 {
+					msgIdx = (msgIdx + 1) % len(msgs)
 				}
 			}
 		}

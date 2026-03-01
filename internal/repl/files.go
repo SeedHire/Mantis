@@ -67,13 +67,31 @@ func printWrittenFiles(files []WrittenFile) {
 	if len(files) == 0 {
 		return
 	}
-	fmt.Printf("%s● files written:%s\n", colorGold, colorReset)
 	for _, f := range files {
-		verb := "updated"
-		if f.Created {
-			verb = "created"
+		icon := "✚"
+		verb := "created"
+		if !f.Created {
+			icon = "✎"
+			verb = "updated"
 		}
-		fmt.Printf("%s  %s %s%s\n", colorGreen, verb, f.Path, colorReset)
+		_ = verb
+		fmt.Printf("%s %s %s%s\n", colorGreen+icon, f.Path, colorReset, "")
 	}
 	fmt.Println()
+}
+
+// stripFileBlocks removes fenced code blocks that are tagged with a file path
+// (i.e., blocks that extractAndWriteFiles will write to disk) from a response,
+// replacing them with a compact notice so the terminal output stays clean.
+func stripFileBlocks(response string) string {
+	re := regexp.MustCompile("(?m)^```[a-zA-Z0-9_+-]*[:/ ]([^\\s`]+\\.[^\\s`]+)\\n[\\s\\S]*?\\n```")
+	return re.ReplaceAllStringFunc(response, func(match string) string {
+		// Extract the path from the opening fence line.
+		pathRe := regexp.MustCompile("^```[a-zA-Z0-9_+-]*[:/ ]([^\\s`]+)")
+		sub := pathRe.FindStringSubmatch(match)
+		if len(sub) < 2 {
+			return match
+		}
+		return fmt.Sprintf("> ✎ `%s`", sub[1])
+	})
 }
