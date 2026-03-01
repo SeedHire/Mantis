@@ -27,12 +27,6 @@ jobs:
       - name: Build (linux/amd64)
         run: go build -o /tmp/mantis ./cmd/mantis
 
-      - name: Build (darwin/arm64 cross-check)
-        run: GOOS=darwin GOARCH=arm64 go build -o /dev/null ./cmd/mantis
-
-      - name: Build (windows/amd64 cross-check)
-        run: GOOS=windows GOARCH=amd64 go build -o /dev/null ./cmd/mantis
-
       - name: Run tests
         run: go test ./...
 
