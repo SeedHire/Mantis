@@ -32,19 +32,54 @@ That's it. You're in.
 
 ## Install
 
+### Homebrew (recommended)
+```bash
+brew install seedhire/tap/mantis
+```
+
+### curl script
+```bash
+curl -fsSL https://raw.githubusercontent.com/SeedHire/Mantis/main/install.sh | sh
+```
+
+### go install
 ```bash
 go install github.com/seedhire/mantis/cmd/mantis@latest
 ```
 
-Or build from source:
+### Build from source (local)
 ```bash
-git clone https://github.com/seedhire/mantis
-cd mantis && make install
+git clone https://github.com/SeedHire/Mantis
+cd Mantis
+go build -o mantis ./cmd/mantis
+sudo mv mantis /usr/local/bin/mantis
 ```
 
-Set your Ollama Cloud key (optional — falls back to local Ollama without it):
+Or use the Makefile:
 ```bash
-export OLLAMA_API_KEY=your_key_here
+make install        # builds and installs to /usr/local/bin
+```
+
+---
+
+## Uninstall
+
+### Remove Homebrew install
+```bash
+brew uninstall mantis
+brew untap seedhire/tap          # optional — removes the tap entirely
+```
+
+### Remove local / go install build
+```bash
+# if installed to /usr/local/bin
+sudo rm -f /usr/local/bin/mantis
+
+# if installed via go install
+rm -f ~/go/bin/mantis
+
+# remove all Mantis project memory from a repo (optional)
+rm -rf .mantis .mantisrc.yml
 ```
 
 ---
