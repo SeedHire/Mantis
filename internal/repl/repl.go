@@ -378,7 +378,7 @@ func Run(cfg Config) error {
 				totalTok := pRes.PromptTok + pRes.ComplTok
 				fmt.Printf("%s◈ Mantis%s %s[pipeline · plan→code+tests · %d tokens]%s\n",
 					colorCopper+colorBold, colorReset, colorDim, totalTok, colorReset)
-				renderResponse(stripFileBlocks(pRes.Combined))
+				renderResponse(stripInternalBlocks(stripFileBlocks(pRes.Combined)))
 				if wf := extractAndWriteFiles(pRes.Combined, root); len(wf) > 0 {
 					printWrittenFiles(wf)
 				}
@@ -436,7 +436,7 @@ func Run(cfg Config) error {
 
 		// Render the full response as formatted markdown.
 		fmt.Printf("%s◈ Mantis%s\n", colorCopper+colorBold, colorReset)
-		renderResponse(stripFileBlocks(rb.String()))
+		renderResponse(stripInternalBlocks(stripFileBlocks(rb.String())))
 
 		// Write any file code blocks from the response to disk.
 		// Append a system note so future turns know what's already written.
@@ -504,7 +504,7 @@ func Run(cfg Config) error {
 					messages[len(messages)-1] = ollama.Message{Role: "assistant", Content: rb2.String()}
 					sess.Add(model, intent.Tier, pt2, ct2, false)
 					fmt.Printf("%s◈ Mantis%s %s(corrected)%s\n", colorCopper+colorBold, colorReset, colorDim, colorReset)
-					renderResponse(stripFileBlocks(rb2.String()))
+					renderResponse(stripInternalBlocks(stripFileBlocks(rb2.String())))
 					if wf := extractAndWriteFiles(rb2.String(), root); len(wf) > 0 {
 						printWrittenFiles(wf)
 					}
@@ -539,6 +539,9 @@ func Run(cfg Config) error {
 func runOnce(cfg Config, client *ollama.Client, sess *session.Session,
 	b *brain.Brain, dispatcher *nl.Dispatcher, messages []interface{},
 	tw *truth.Writer, ut *usage.Tracker) error {
+
+	// Normalize terminal error pastes into actionable fix requests.
+	cfg.InitialQuery = normalizeTerminalInput(cfg.InitialQuery)
 
 	hasImage := cfg.ImagePath != ""
 	intent := router.Classify(cfg.InitialQuery, hasImage)
@@ -729,6 +732,10 @@ func buildSystemPrompt(brainCtx, skillsCtx string, tier router.Tier) string {
 - When referencing files, use full paths from the project.
 - If the question is ambiguous, ask one clarifying question before answering.
 - Format code with correct language tags.
+- NEVER end your response with "Would you like me to..." or a numbered menu of options. Just answer completely and stop.
+- NEVER output [Internal analysis] sections or show your reasoning steps. Reason internally, respond with the solution only.
+- When you write a package.json, the very next thing you show MUST be the command: npm install — never skip this.
+- When you write a requirements.txt, follow immediately with: pip install -r requirements.txt
 
 ## File generation
 When writing files, ALWAYS tag the opening fence with the filename using a colon:
@@ -1123,22 +1130,77 @@ func showRouting(intent router.Intent, model string, turn int, isPipeline bool) 
 	if intent.NeedsGraph {
 		graphTag = fmt.Sprintf(" %s[graph]%s", colorGold, colorDim)
 	}
-	confTag := ""
-	if intent.Confidence < 0.75 {
-		confTag = fmt.Sprintf(" %s[low confidence]%s", colorRed, colorDim)
-	}
 	modelStyled := colorCopper + colorBold + model + colorReset + colorDim
 	turnLabel := fmt.Sprintf("turn %d", turn)
 	switch {
 	case intent.Tier == router.TierMax:
-		fmt.Printf("%s[%s · max · ensemble · multi-model%s%s]%s\n", colorDim, turnLabel, graphTag, confTag, colorReset)
+		fmt.Printf("%s[%s · max · ensemble · multi-model%s]%s\n", colorDim, turnLabel, graphTag, colorReset)
 	case isPipeline:
-		fmt.Printf("%s[%s · pipeline · plan→code+tests · %s%s%s]%s\n",
-			colorDim, turnLabel, modelStyled, graphTag, confTag, colorReset)
+		fmt.Printf("%s[%s · pipeline · plan→code+tests · %s%s]%s\n",
+			colorDim, turnLabel, modelStyled, graphTag, colorReset)
 	default:
-		fmt.Printf("%s[%s · %s · %s · %s%s%s]%s\n",
-			colorDim, turnLabel, intent.Tier, intent.TaskType, modelStyled, graphTag, confTag, colorReset)
+		fmt.Printf("%s[%s · %s · %s · %s%s]%s\n",
+			colorDim, turnLabel, intent.Tier, intent.TaskType, modelStyled, graphTag, colorReset)
 	}
+}
+
+// normalizeTerminalInput detects when the user pastes raw terminal output
+// (shell errors, npm/go output) and rewrites it as an explicit fix request so
+// the router picks the right tier and the model knows what to do.
+func normalizeTerminalInput(input string) string {
+	s := strings.TrimSpace(input)
+	if s == "" {
+		return input
+	}
+
+	// Patterns that indicate terminal error output, not a question.
+	terminalErrorPatterns := []struct {
+		marker  string
+		label   string
+	}{
+		{"command not found", "shell error"},
+		{"npm ERR!", "npm error"},
+		{"npm WARN", "npm warning"},
+		{"Error:", "runtime error"},
+		{"error TS", "TypeScript error"},
+		{"error[E", "Rust compiler error"},
+		{"FAILED", "test failure"},
+		{"exit status", "process error"},
+		{"panic:", "Go panic"},
+		{"Traceback (most recent call last)", "Python traceback"},
+		{"SyntaxError:", "syntax error"},
+		{"TypeError:", "type error"},
+		{"ReferenceError:", "reference error"},
+		{"Cannot find module", "module not found"},
+		{"Module not found", "module not found"},
+		{"ENOENT:", "file not found"},
+		{"EADDRINUSE", "port in use"},
+		{"connection refused", "connection error"},
+	}
+
+	lc := strings.ToLower(s)
+	for _, p := range terminalErrorPatterns {
+		if strings.Contains(lc, strings.ToLower(p.marker)) {
+			// Wrap raw terminal output as an explicit fix request.
+			return "Fix this " + p.label + ":\n\n" + s
+		}
+	}
+
+	// Detect bare shell prompts pasted as messages (no actual question).
+	// e.g. "(base) user@host path % " or "user@host:~$"
+	if (strings.HasPrefix(s, "(") || strings.Contains(s[:min(30, len(s))], "@")) &&
+		(strings.Contains(s, " % ") || strings.Contains(s, ":~$") || strings.Contains(s, ":~#")) {
+		return "I ran this command in the terminal. What should I do next?\n\n" + s
+	}
+
+	return input
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func parseTier(s string) router.Tier {
@@ -1393,10 +1455,11 @@ func multiPassReasoning(client *ollama.Client, model string, tier router.Tier, m
 		return messages // Analysis failed — continue with single pass.
 	}
 
-	// Inject analysis as a system-level hint into the conversation.
+	// Inject analysis as a system-level hint — use a neutral label the model
+	// won't imitate in its next response.
 	analysisNote := ollama.Message{
 		Role:    "assistant",
-		Content: "[Internal analysis]\n" + analysis.String(),
+		Content: "[pre-response-thinking]\n" + analysis.String(),
 	}
 	refinedPrompt := ollama.Message{
 		Role:    "user",

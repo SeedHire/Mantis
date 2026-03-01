@@ -112,3 +112,19 @@ return match
 return fmt.Sprintf("> ✎ `%s`", sub[1])
 })
 }
+
+// stripInternalBlocks removes any [Internal analysis] ... sections the model
+// leaks into its final response. These are reasoning artifacts, not output.
+var internalBlockRe = regexp.MustCompile(`(?s)\[Internal analysis\].*?(\n\n|\z)`)
+
+func stripInternalBlocks(s string) string {
+	s = internalBlockRe.ReplaceAllString(s, "")
+	// Also strip any "Would you like me to" trailing menus (4 numbered options).
+	if idx := strings.Index(s, "\nWould you like me to"); idx != -1 {
+		s = strings.TrimRight(s[:idx], "\n ")
+	}
+	if idx := strings.Index(s, "\nWould you like to"); idx != -1 {
+		s = strings.TrimRight(s[:idx], "\n ")
+	}
+	return strings.TrimSpace(s) + "\n"
+}

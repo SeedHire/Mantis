@@ -309,6 +309,13 @@ return Intent{Tier: TierVision, TaskType: "vision", NeedsVision: true, Confidenc
 }
 lower := strings.ToLower(message)
 
+// Terminal error paste — always a fast fix regardless of phrasing.
+for _, sig := range terminalErrorSignatures {
+if strings.Contains(lower, sig) {
+return Intent{Tier: TierFast, TaskType: "fix", NeedsGraph: false, Confidence: 0.90}
+}
+}
+
 // Max/ensemble — runs before all others.
 for _, kw := range maxKeywords {
 if strings.Contains(lower, kw) {
@@ -394,6 +401,32 @@ var trivialKeywords = []string{
 "what is", "what's", "define", "meaning of", "syntax for",
 "typo", "spelling", "rename", "one line", "single line",
 "autocomplete", "complete this",
+}
+
+// terminalErrorSignatures — raw error output pasted from the shell.
+// normalizeTerminalInput() rewrites these as "fix this X error:" first,
+// then Classify() routes them to fast/fix regardless of phrasing.
+var terminalErrorSignatures = []string{
+"command not found",
+"npm err!",
+"npm warn",
+"error ts",        // TypeScript compiler
+"error[e",         // Rust compiler
+"syntaxerror:",
+"typeerror:",
+"referenceerror:",
+"cannot find module",
+"module not found",
+"enoent:",
+"eaddrinuse",
+"traceback (most recent call last)",
+"exit status 1",
+"panic:",
+"fix this shell error",
+"fix this npm error",
+"fix this runtime error",
+"fix this typescript error",
+"fix this python traceback",
 }
 
 var graphKeywords = []string{
