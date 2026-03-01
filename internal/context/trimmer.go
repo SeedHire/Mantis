@@ -1,6 +1,9 @@
 package context
 
-import "sort"
+import (
+	"sort"
+	"strings"
+)
 
 // Section is a chunk of content with a priority for token budget trimming.
 type Section struct {
@@ -17,7 +20,7 @@ func EstimateTokens(text string) int {
 
 // TrimToTokenBudget selects sections that fit within the given token budget.
 // Sections are sorted by priority (highest first). The last included section
-// may be truncated to fit.
+// is truncated at function/block boundaries to avoid mid-statement cuts.
 func TrimToTokenBudget(sections []Section, budget int) []Section {
 	sorted := make([]Section, len(sections))
 	copy(sorted, sections)
@@ -34,11 +37,10 @@ func TrimToTokenBudget(sections []Section, budget int) []Section {
 			result = append(result, s)
 			remaining -= tokens
 		} else if remaining > 0 {
-			// Truncate to fit.
 			maxChars := int(float64(remaining) * 3.5)
 			truncated := s
 			if maxChars < len(s.Content) {
-				truncated.Content = s.Content[:maxChars]
+				truncated.Content = truncateAtBoundary(s.Content, maxChars)
 			}
 			result = append(result, truncated)
 			remaining = 0
@@ -49,4 +51,37 @@ func TrimToTokenBudget(sections []Section, budget int) []Section {
 	}
 
 	return result
+}
+
+// truncateAtBoundary cuts content at a function or block boundary
+// rather than mid-statement. Looks for common boundary markers
+// (func, class, def, function) before the maxChars limit.
+func truncateAtBoundary(content string, maxChars int) string {
+	if maxChars >= len(content) {
+		return content
+	}
+
+	// Search backwards from maxChars for a clean boundary.
+	chunk := content[:maxChars]
+
+	// Try to find function/class boundaries (blank line before func/class/def).
+	markers := []string{"\nfunc ", "\nclass ", "\ndef ", "\nfunction ", "\nexport ", "\ntype "}
+	bestCut := -1
+	for _, m := range markers {
+		if idx := strings.LastIndex(chunk, m); idx > bestCut {
+			bestCut = idx
+		}
+	}
+
+	// If we found a good boundary and it's not too far back (>50% of content), use it.
+	if bestCut > maxChars/2 {
+		return content[:bestCut] + "\n// … truncated"
+	}
+
+	// Fall back to last complete line.
+	if idx := strings.LastIndex(chunk, "\n"); idx > 0 {
+		return content[:idx] + "\n// … truncated"
+	}
+
+	return chunk
 }

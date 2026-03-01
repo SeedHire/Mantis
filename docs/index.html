@@ -538,12 +538,13 @@
     
 
     <h1 class="fade-up d2">
-      AI coding assistant.<br/>
-      <span class="metallic">No bill. No cloud. No limits.</span>
+      The AI that actually<br/>
+      <span class="metallic">knows your codebase.</span>
     </h1>
     <p class="fade-up d3">
-      Mantis runs on Ollama — locally or on the free cloud tier.
-      Persistent memory, codebase intelligence, and zero monthly cost.
+      Mantis builds a live dependency graph, remembers your decisions across sessions,
+      routes every query to the right model, and guards against hallucinated APIs.
+      Free. Local-first. Open source.
     </p>
 
     <div class="hero-ctas fade-up d4">
@@ -560,24 +561,28 @@
         <span class="terminal-title">mantis — ~/my-project</span>
       </div>
       <div class="terminal-body">
-        <div><span class="t-green">● Sagar-Darji</span></div>
-        <div><span class="t-green">● Ollama Cloud</span></div>
-        <div><span class="t-gold">● project memory ready</span></div>
-        <div><span class="t-gold">● 142 files indexed</span></div>
+        <div><span class="t-green">● Sagar-Darji</span> &nbsp;<span class="t-dim">via GitHub</span></div>
+        <div><span class="t-green">● Ollama Cloud</span> &nbsp;<span class="t-dim">qwen2.5-coder:7b ready</span></div>
+        <div><span class="t-gold">● project memory ready</span> &nbsp;<span class="t-dim">BRAIN.md + 14 decisions</span></div>
+        <div><span class="t-gold">● 187 files indexed</span> &nbsp;<span class="t-dim">graph.db up to date</span></div>
         <div>&nbsp;</div>
-        <div><span class="t-dim">  /help  /cost  /brain  /quit</span></div>
+        <div><span class="t-dim">  /file  /vision  /brain  /cost  /reject  /quit</span></div>
         <div>&nbsp;</div>
         <div><span class="t-dim">────────────────────────────────────────────────────────</span></div>
-        <div><span class="t-prompt">❯ </span>why does the auth middleware skip admin routes?</div>
-        <div><span class="t-dim">[turn 1 · fast · general · </span><span class="t-copper t-bold">qwen2.5-coder:7b</span><span class="t-dim">]</span></div>
+        <div><span class="t-prompt">❯ </span>what calls processPayment and what breaks if I change it?</div>
+        <div><span class="t-dim">[turn 1 · smart · query · </span><span class="t-copper t-bold">qwen2.5-coder:7b</span><span class="t-dim">]</span></div>
         <div><span class="t-dim">────────────────────────────────────────────────────────</span></div>
         <div>&nbsp;</div>
         <div><span class="t-copper t-bold">◈ Mantis</span></div>
         <div>&nbsp;</div>
-        <div>In <span class="t-gold">src/middleware/auth.ts:34</span>, the <span class="t-gold">skipAuth</span> array</div>
-        <div>includes all routes prefixed with <span class="t-gold">/admin</span> — this was</div>
-        <div>added in commit <span class="t-gold">a3f91b</span> to bypass JWT checks during</div>
-        <div>local dev but was never removed.</div>
+        <div><span class="t-fg">From the dependency graph, </span><span class="t-gold">processPayment</span><span class="t-fg"> has 3 callers:</span></div>
+        <div>&nbsp;</div>
+        <div>&nbsp; <span class="t-gold">checkout.go:142</span> &nbsp; <span class="t-fg">CheckoutHandler()</span></div>
+        <div>&nbsp; <span class="t-gold">retry.go:89</span> &nbsp; &nbsp; &nbsp;<span class="t-fg">RetryFailedPayments()</span></div>
+        <div>&nbsp; <span class="t-gold">admin.go:211</span> &nbsp; &nbsp; <span class="t-fg">AdminRefund()</span></div>
+        <div>&nbsp;</div>
+        <div><span class="t-warn">⚠ Changing the signature breaks 3 production paths.</span></div>
+        <div><span class="t-dim">  checkout_test.go covers CheckoutHandler — the other 2 are untested.</span></div>
         <div>&nbsp;</div>
         <div><span class="t-dim">────────────────────────────────────────────────────────</span></div>
         <div><span class="t-prompt">❯ </span><span class="cursor"></span></div>
@@ -611,55 +616,55 @@
 <!-- ── Features ──────────────────────────────────────────────────────────── -->
 <section id="features">
   <div class="container">
-    <p class="section-label">Why Mantis</p>
-    <h2 class="section-title">Everything Claude Code has.<br/>Nothing it charges for.</h2>
-    <p class="section-sub">Built for developers who want serious tooling without the $30/month AI tax.</p>
+    <p class="section-label">What Mantis does</p>
+    <h2 class="section-title">Not a chat wrapper.<br/>A codebase intelligence engine.</h2>
+    <p class="section-sub">Every feature below is live and works today. No vaporware.</p>
 
     <div class="feature-grid">
       <div class="feature-card">
         <div class="feature-icon">🧠</div>
         <h3>Persistent Project Memory</h3>
-        <p>Writes a <code>.mantis/BRAIN.md</code> after every session. Remembers architecture decisions, rejected approaches, and patterns — forever.</p>
+        <p>After every session, Mantis updates <code>BRAIN.md</code>, appends <code>DECISIONS.log</code>, and records failed approaches in <code>REJECTED.md</code>. The AI never re-suggests what you already rejected.</p>
       </div>
       <div class="feature-card">
-        <div class="feature-icon">⚡</div>
-        <h3>Codebase Intelligence</h3>
-        <p>Run <code>mantis init</code> once to build a live AST dependency graph. Every question gets only the relevant files — not your whole repo.</p>
+        <div class="feature-icon">🕸️</div>
+        <h3>Live Dependency Graph</h3>
+        <p>Run <code>mantis init</code> once. Mantis builds an AST graph of every symbol, import, and caller in your project — and queries it in plain English.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">💥</div>
+        <h3>Impact Analysis</h3>
+        <p>Before you touch a function, ask <code>mantis impact &lt;symbol&gt;</code>. Mantis traces every downstream caller and tells you exactly what breaks — before you write a line.</p>
       </div>
       <div class="feature-card">
         <div class="feature-icon">🎯</div>
-        <h3>Smart Model Routing</h3>
-        <p>Every message is classified — trivial, fast, code, reasoning, or heavy — and routed to the right model automatically.</p>
+        <h3>4-Tier Model Routing</h3>
+        <p>Every query is classified — trivial, code, reasoning, or heavy — and sent to the right model automatically. Fast questions get fast models. Hard questions get the big guns.</p>
       </div>
       <div class="feature-card">
         <div class="feature-icon">🔍</div>
         <h3>Hallucination Guard</h3>
-        <p>AI output is checked against your actual function signatures in real time. If the model invents a name, Mantis flags it before you act.</p>
+        <p>AI output is cross-checked against <code>GROUND_TRUTH.json</code> — a live index of your real function signatures. Invented names get flagged before you ship them.</p>
       </div>
       <div class="feature-card">
         <div class="feature-icon">📐</div>
         <h3>Architecture Lint</h3>
-        <p>Define rules like "no controller may import from db layer" in <code>.mantisrc.yml</code> and enforce them in CI — like ESLint for your architecture.</p>
+        <p>Define layer rules in <code>.mantisrc.yml</code> — e.g. "no handler may import db directly" — and enforce them in CI. Like ESLint, but for your architecture.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🔎</div>
+        <h3>NL Codebase Queries</h3>
+        <p>Ask in plain English: <code>what imports auth?</code>, <code>dead code in billing/</code>, <code>circular deps in api layer</code>. Mantis queries the graph and answers directly.</p>
       </div>
       <div class="feature-card">
         <div class="feature-icon">💰</div>
         <h3>Token Cost Tracker</h3>
-        <p>At session end, see exactly what you'd have paid with GPT-4o, Claude Sonnet, or Opus — vs $0.00 with Mantis.</p>
+        <p>Every session ends with a report showing what you'd have paid on GPT-4o, Claude Sonnet, or Opus — and what you actually paid with Mantis: $0.00.</p>
       </div>
       <div class="feature-card">
         <div class="feature-icon">🖼️</div>
         <h3>Multimodal Input</h3>
-        <p>Paste a screenshot, architecture diagram, or error image with <code>/vision</code>. Works with any vision-capable Ollama model.</p>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon">🔌</div>
-        <h3>Fully Offline</h3>
-        <p>No data leaves your machine. Code, history, memory — all local. Use Ollama Cloud for convenience or your own GPU for privacy.</p>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon">📊</div>
-        <h3>TUI Dashboard</h3>
-        <p>Run <code>mantis tui</code> for a full terminal dashboard — symbol search, impact analysis, dead code, and architecture lint in one place.</p>
+        <p>Drop a screenshot, architecture diagram, or error image with <code>/vision</code>. Works with any vision-capable Ollama model locally or in the cloud.</p>
       </div>
     </div>
   </div>
@@ -669,7 +674,7 @@
 <section style="background:var(--surface); padding: 96px 0;">
   <div class="container">
     <p class="section-label">Comparison</p>
-    <h2 class="section-title">How Mantis stacks up.</h2>
+    <h2 class="section-title">What you get at $0 vs $20–30/mo.</h2>
     <div class="table-wrap">
       <table>
         <thead>
@@ -684,11 +689,13 @@
         <tbody>
           <tr><td>Monthly cost</td><td class="price-free highlight-col">$0</td><td class="price-paid">$20+</td><td class="price-paid">$10+</td><td class="price-paid">$20+</td></tr>
           <tr><td>Persistent project memory</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
-          <tr><td>Dependency graph</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="check">✓</td></tr>
-          <tr><td>Architecture lint</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
+          <tr><td>Decision &amp; rejection memory</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
+          <tr><td>Live dependency graph</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="check">partial</td></tr>
+          <tr><td>Impact analysis before editing</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
+          <tr><td>Architecture lint in CI</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
           <tr><td>Hallucination guard</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
-          <tr><td>Fully offline</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
-          <tr><td>Smart model routing</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
+          <tr><td>4-tier model routing</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
+          <tr><td>Runs on local Ollama</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
           <tr><td>Token cost tracker</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
         </tbody>
       </table>

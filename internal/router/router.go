@@ -314,8 +314,8 @@ if strings.Contains(lower, kw) {
 return Intent{Tier: TierTrivial, TaskType: "trivial", NeedsGraph: false, Confidence: 0.80}
 }
 }
-// Default: code tier (most queries from devs are code-related).
-return Intent{Tier: TierCode, TaskType: detectTaskType(lower), NeedsGraph: needsGraph(lower), Confidence: 0.70}
+// Default: code tier with low confidence — task template will still guide quality.
+return Intent{Tier: TierCode, TaskType: detectTaskType(lower), NeedsGraph: needsGraph(lower), Confidence: 0.60}
 }
 
 var maxKeywords = []string{

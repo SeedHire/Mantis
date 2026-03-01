@@ -291,6 +291,12 @@ func Run(cfg Config) error {
 		// Proactive context compression — compress old turns before they cause overflow.
 		messages = compressIfNeeded(messages, client)
 
+		// Multi-pass reasoning for complex queries (Reason/Heavy tiers).
+		// Pass 1: silent analysis. Pass 2: solution informed by analysis.
+		if intent.Tier == router.TierReason || intent.Tier == router.TierHeavy {
+			messages = multiPassReasoning(client, model, intent.Tier, messages)
+		}
+
 		// Show spinner while model generates, then render formatted output.
 		stopSpin := startSpinner()
 		streamCtx, streamCancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -859,13 +865,17 @@ func showRouting(intent router.Intent, model string, turn int) {
 	if intent.NeedsGraph {
 		graphTag = fmt.Sprintf(" %s[graph]%s", colorGold, colorDim)
 	}
+	confTag := ""
+	if intent.Confidence < 0.75 {
+		confTag = fmt.Sprintf(" %s[low confidence]%s", colorRed, colorDim)
+	}
 	modelStyled := colorCopper + colorBold + model + colorReset + colorDim
 	turnLabel := fmt.Sprintf("turn %d", turn)
 	if intent.Tier == router.TierMax {
-		fmt.Printf("%s[%s · max · ensemble · multi-model%s]%s\n", colorDim, turnLabel, graphTag, colorReset)
+		fmt.Printf("%s[%s · max · ensemble · multi-model%s%s]%s\n", colorDim, turnLabel, graphTag, confTag, colorReset)
 	} else {
-		fmt.Printf("%s[%s · %s · %s · %s%s]%s\n",
-			colorDim, turnLabel, intent.Tier, intent.TaskType, modelStyled, graphTag, colorReset)
+		fmt.Printf("%s[%s · %s · %s · %s%s%s]%s\n",
+			colorDim, turnLabel, intent.Tier, intent.TaskType, modelStyled, graphTag, confTag, colorReset)
 	}
 }
 
@@ -1083,6 +1093,58 @@ func trimToMinimal(messages []interface{}) []interface{} {
 	}
 	out = append(out, recent...)
 	return out
+}
+
+// multiPassReasoning performs a silent analysis pass before the main response.
+// For complex queries (Reason/Heavy), the model first analyzes constraints and
+// risks, then this analysis is injected as context for the solution pass.
+func multiPassReasoning(client *ollama.Client, model string, tier router.Tier, messages []interface{}) []interface{} {
+	// Extract the last user message.
+	var lastUserContent string
+	for i := len(messages) - 1; i >= 0; i-- {
+		if msg, ok := messages[i].(ollama.Message); ok && msg.Role == "user" {
+			lastUserContent = msg.Content
+			break
+		}
+	}
+	if lastUserContent == "" {
+		return messages
+	}
+
+	analysisPrompt := "Before answering, analyze this request silently:\n" +
+		"1. What are the key constraints?\n" +
+		"2. What information do I need to verify?\n" +
+		"3. What could go wrong with a naive approach?\n" +
+		"4. What's the simplest correct solution?\n\n" +
+		"Provide a brief analysis (3-5 bullet points), not the solution."
+
+	analysisMsgs := make([]interface{}, len(messages))
+	copy(analysisMsgs, messages)
+	analysisMsgs = append(analysisMsgs, ollama.Message{Role: "user", Content: analysisPrompt})
+
+	analysisCtx, analysisCancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer analysisCancel()
+
+	var analysis strings.Builder
+	_, _, err := streamWithFallback(analysisCtx, client, model, tier, analysisMsgs, &analysis)
+	if err != nil || strings.TrimSpace(analysis.String()) == "" {
+		return messages // Analysis failed — continue with single pass.
+	}
+
+	// Inject analysis as a system-level hint into the conversation.
+	analysisNote := ollama.Message{
+		Role:    "assistant",
+		Content: "[Internal analysis]\n" + analysis.String(),
+	}
+	refinedPrompt := ollama.Message{
+		Role:    "user",
+		Content: "Given the analysis above, now provide your complete answer.",
+	}
+
+	result := make([]interface{}, len(messages))
+	copy(result, messages)
+	result = append(result, analysisNote, refinedPrompt)
+	return result
 }
 
 // compressIfNeeded proactively compresses conversation history when it gets too large.

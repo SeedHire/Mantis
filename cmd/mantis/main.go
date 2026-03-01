@@ -820,6 +820,98 @@ func truncPath(p string, maxLen int) string {
 	return "…" + p[len(p)-maxLen+1:]
 }
 
+// ── intent intelligence commands ────────────────────────────────────────────
+
+var intentCmd = &cobra.Command{
+	Use:   "intent [path]",
+	Short: "Show commit intent history for a file (feat/fix/refactor timeline)",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		root, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		summary, err := intel.IntentFor(root, args[0])
+		if err != nil {
+			return err
+		}
+		if len(summary.Intents) == 0 {
+			fmt.Printf("No commit history for %s\n", args[0])
+			return nil
+		}
+
+		fmt.Printf("Intent history for %s:\n", args[0])
+		fmt.Printf("  Features: %d  |  Fixes: %d  |  Refactors: %d  |  Tests: %d\n\n",
+			summary.FeatureCount, summary.FixCount, summary.RefactorCount, summary.TestCount)
+
+		fmt.Printf("%-8s %-10s %-12s %s\n", "HASH", "TYPE", "AUTHOR", "SUMMARY")
+		fmt.Println(strings.Repeat("─", 80))
+		for _, ci := range summary.Intents {
+			refs := ""
+			if len(ci.IssueRefs) > 0 {
+				refs = " " + strings.Join(ci.IssueRefs, ", ")
+			}
+			fmt.Printf("%-8s %-10s %-12s %s%s\n", ci.Hash, ci.Type, truncPath(ci.Author, 12), ci.Summary, refs)
+		}
+		return nil
+	},
+}
+
+var todosCmd = &cobra.Command{
+	Use:   "todos",
+	Short: "Find all TODO/FIXME/HACK/XXX comments in source code",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		root, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		items, err := intel.FindTodos(root)
+		if err != nil {
+			return err
+		}
+		if len(items) == 0 {
+			fmt.Println("No TODO/FIXME/HACK/XXX found. Clean codebase!")
+			return nil
+		}
+		fmt.Printf("%-6s %-45s %5s %s\n", "TYPE", "FILE", "LINE", "COMMENT")
+		fmt.Println(strings.Repeat("─", 100))
+		for _, t := range items {
+			fmt.Printf("%-6s %-45s %5d %s\n", t.Type, truncPath(t.File, 45), t.Line, t.Comment)
+		}
+		fmt.Printf("\nTotal: %d items\n", len(items))
+		return nil
+	},
+}
+
+var specGapsCmd = &cobra.Command{
+	Use:   "spec-gaps",
+	Short: "Find files where features were added but fixes keep piling up",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		root, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		gaps, err := intel.SpecGaps(root, 15)
+		if err != nil {
+			return err
+		}
+		if len(gaps) == 0 {
+			fmt.Println("No spec gaps detected — features are stable.")
+			return nil
+		}
+		fmt.Printf("%-50s %6s %6s %s\n", "FILE", "FEATS", "FIXES", "SIGNAL")
+		fmt.Println(strings.Repeat("─", 80))
+		for _, g := range gaps {
+			signal := "⚠ unstable"
+			if g.FixCount >= g.FeatureCount*2 {
+				signal = "🔴 high risk"
+			}
+			fmt.Printf("%-50s %6d %6d %s\n", truncPath(g.Path, 50), g.FeatureCount, g.FixCount, signal)
+		}
+		return nil
+	},
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 func openDB(root string) (*graph.DB, error) {
@@ -899,7 +991,7 @@ func init() {
 	rootCmd.Flags().IntVar(&replBudget, "budget", 0, "Max tokens for this session (0 = unlimited)")
 	rootCmd.Flags().StringVar(&replImage, "image", "", "Image file path for multimodal input")
 
-	rootCmd.AddCommand(initCmd, contextCmd, watchCmd, findCmd, impactCmd, deadCmd, circularCmd, graphCmd, lintCmd, tuiCmd, handoffCmd, hotspotsCmd, riskyCmd, couplingCmd)
+	rootCmd.AddCommand(initCmd, contextCmd, watchCmd, findCmd, impactCmd, deadCmd, circularCmd, graphCmd, lintCmd, tuiCmd, handoffCmd, hotspotsCmd, riskyCmd, couplingCmd, intentCmd, todosCmd, specGapsCmd)
 
 	hotspotsCmd.Flags().IntVar(&temporalDays, "days", 90, "Look-back period in days")
 	riskyCmd.Flags().IntVar(&temporalDays, "days", 90, "Look-back period in days")
