@@ -27,7 +27,7 @@ Reference actual function names and file paths from the project.`
 	case "implement":
 		return `[Task: Implement]
 1. Start with the interface or function signature.
-2. Then the implementation.
+2. Then the implementation — use ` + "```lang:path/to/file" + ` fences for every file so Mantis writes them to disk automatically.
 3. Then a usage example.
 4. Note any imports or dependencies needed.`
 

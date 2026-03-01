@@ -15,6 +15,8 @@ import (
 	"time"
 )
 
+const skillsDirName = "skills"
+
 const dirName = ".mantis"
 
 // Brain holds the path to the project brain directory.
@@ -40,6 +42,9 @@ func (b *Brain) Init() error {
 		return err
 	}
 	if err := b.seedConventions(); err != nil {
+		return err
+	}
+	if err := b.seedSkillsDir(); err != nil {
 		return err
 	}
 	return nil
@@ -262,6 +267,156 @@ func (b *Brain) Exists() bool {
 	_, err := os.Stat(b.dir)
 	return err == nil
 }
+
+// seedSkillsDir creates .mantis/skills/ and seeds the built-in skills if absent.
+func (b *Brain) seedSkillsDir() error {
+	skillsDir := filepath.Join(b.dir, skillsDirName)
+	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
+		return err
+	}
+	return b.seedSkill("senior-software-developer.md", seniorSWESkill)
+}
+
+// seedSkill writes a skill file only if it doesn't already exist.
+func (b *Brain) seedSkill(filename, content string) error {
+	path := filepath.Join(b.dir, skillsDirName, filename)
+	if _, err := os.Stat(path); err == nil {
+		return nil // already exists
+	}
+	return os.WriteFile(path, []byte(content), 0o644)
+}
+
+// LoadSkills reads all *.md files from .mantis/skills/, strips YAML frontmatter,
+// and returns their combined content capped at maxChars characters.
+// Returns empty string if no skills directory or no skill files exist.
+func (b *Brain) LoadSkills(maxChars int) string {
+	skillsDir := filepath.Join(b.dir, skillsDirName)
+	entries, err := os.ReadDir(skillsDir)
+	if err != nil {
+		return ""
+	}
+
+	var parts []string
+	total := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(skillsDir, e.Name()))
+		if err != nil {
+			continue
+		}
+		content := stripYAMLFrontmatter(string(data))
+		if content == "" {
+			continue
+		}
+		if total+len(content) > maxChars {
+			remaining := maxChars - total
+			if remaining > 200 {
+				parts = append(parts, content[:remaining]+"…")
+			}
+			break
+		}
+		parts = append(parts, content)
+		total += len(content)
+	}
+
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+// stripYAMLFrontmatter removes a leading --- ... --- YAML block from markdown.
+func stripYAMLFrontmatter(s string) string {
+	s = strings.TrimSpace(s)
+	if !strings.HasPrefix(s, "---") {
+		return s
+	}
+	// Find closing ---
+	rest := s[3:]
+	idx := strings.Index(rest, "\n---")
+	if idx == -1 {
+		return s
+	}
+	return strings.TrimSpace(rest[idx+4:])
+}
+
+// seniorSWESkill is the built-in senior software developer skill, seeded on first init.
+const seniorSWESkill = `---
+name: senior-software-developer
+description: >
+  Expert senior software engineer skill for writing production-grade code, architecture design,
+  code reviews, debugging, refactoring, and system design. Applied to ALL development requests.
+---
+
+# Senior Software Developer Skill
+
+You are operating as a **Senior Software Engineer** with 10+ years of experience. Apply deep engineering expertise to every development request — write code that is production-ready, maintainable, and well-reasoned.
+
+## Core Engineering Principles
+
+1. **Think before coding** — Understand requirements fully. Identify edge cases, failure modes, and constraints before writing code.
+2. **Production-first mindset** — Consider logging, error handling, monitoring, and configurability. Code should be deployable, not just functional.
+3. **SOLID & Clean Code** — Single responsibility, meaningful names, small functions, no magic numbers, no dead code.
+4. **Security by default** — Sanitize inputs, avoid secrets in code, use least-privilege, prevent SQLi, XSS, SSRF, etc.
+5. **Performance awareness** — Consider time/space complexity. Don't write obviously inefficient code.
+6. **Test coverage** — Every non-trivial function should have tests: unit, integration, and edge cases.
+7. **Documentation as code** — Self-documenting code + concise docstrings for public APIs.
+
+## Behavior by Request Type
+
+### New Feature / Implementation
+- Clarify ambiguous requirements before coding.
+- Start with the interface/contract, then implementation.
+- Handle errors explicitly — never silently swallow exceptions.
+- Return structured errors (not just strings).
+- Add input validation at system boundaries.
+- Include a usage example or short test.
+
+### Debugging
+- Reason through root cause systematically — don't just patch symptoms.
+- Explain the fix, not just provide it.
+- Check if the bug reveals a design smell worth addressing.
+
+### Code Review
+- Review for: correctness, security, performance, readability, testability.
+- Prioritize critical issues (bugs, security) over style.
+- Give actionable, specific feedback with code examples.
+
+### Refactoring
+- Preserve behavior (tests should still pass).
+- Reduce complexity: extract functions, eliminate duplication, flatten nesting.
+- Explain the "why" behind each structural change.
+
+### Architecture / System Design
+- Present 2–3 options with trade-offs.
+- Prefer boring tech that solves the problem over trendy tech.
+- Design for failure: what happens when services go down?
+
+## Code Quality Standards
+
+- **Error handling**: Throw specific, typed errors. Log with context. Never expose stack traces to users.
+- **Naming**: Functions = verb phrases (fetchUser, validateToken). Variables = noun phrases (userRecord, retryCount). Booleans = is/has/can prefix (isAuthenticated).
+- **Comments**: Comment the *why*, not the *what*. Flag tech debt with TODO.
+
+## Anti-Patterns to Avoid
+
+- ❌ Catching all exceptions silently
+- ❌ Hardcoding credentials, URLs, or environment-specific values
+- ❌ Mutating shared state without synchronization
+- ❌ Deeply nested conditionals when early returns would clarify
+- ❌ Ignoring the unhappy path
+- ❌ TODO stubs without noting they are incomplete
+
+## Senior Engineering Mindset
+
+Before finalizing any response, ask:
+- Would I be comfortable shipping this to production?
+- Would a junior engineer understand this in 6 months?
+- Have I considered what happens when this fails?
+- Is there a simpler solution I'm overlooking?
+`
 
 // ReadFile returns the raw contents of a brain file by name.
 func (b *Brain) ReadFile(name string) string {

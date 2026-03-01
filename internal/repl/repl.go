@@ -122,6 +122,13 @@ func Run(cfg Config) error {
 		fmt.Printf("%s● project memory ready%s\n", colorGold, colorReset)
 	}
 
+	// Load skills — size budget scales with intent tier (applied per-turn below).
+	// Pre-load at max budget; we'll cap per tier when rebuilding the prompt each turn.
+	skillsContext := b.LoadSkills(8000)
+	if skillsContext != "" {
+		fmt.Printf("%s● skills loaded%s\n", colorGold, colorReset)
+	}
+
 	// Semantic embeddings — optional, used for memory retrieval.
 	var embStore *embeddings.Store
 	mantisDir := filepath.Join(root, ".mantis")
@@ -157,7 +164,7 @@ func Run(cfg Config) error {
 	}
 
 	// Conversation history — start with a default system prompt (will be rebuilt per-turn with tier context).
-	systemPrompt := buildSystemPrompt(brainContext, router.TierCode)
+	systemPrompt := buildSystemPrompt(brainContext, skillsContext, router.TierCode)
 	messages := []interface{}{
 		ollama.Message{Role: "system", Content: systemPrompt},
 	}
@@ -259,7 +266,12 @@ func Run(cfg Config) error {
 		printSep()
 
 		// Update system prompt for this tier's reasoning depth.
-		tierPrompt := buildSystemPrompt(brainContext, intent.Tier)
+		// Cap skills context size by tier to avoid overloading small models.
+		tierSkills := skillsContext
+		if intent.Tier <= router.TierFast && len(tierSkills) > 1500 {
+			tierSkills = tierSkills[:1500] + "…"
+		}
+		tierPrompt := buildSystemPrompt(brainContext, tierSkills, intent.Tier)
 		if len(messages) > 0 {
 			messages[0] = ollama.Message{Role: "system", Content: tierPrompt}
 		}
@@ -361,6 +373,11 @@ func Run(cfg Config) error {
 		fmt.Printf("%s◈ Mantis%s\n", colorCopper+colorBold, colorReset)
 		renderResponse(rb.String())
 
+		// Write any file code blocks from the response to disk.
+		if wf := extractAndWriteFiles(rb.String(), root); len(wf) > 0 {
+			printWrittenFiles(wf)
+		}
+
 		messages = append(messages, ollama.Message{Role: "assistant", Content: rb.String()})
 		sess.Add(model, intent.Tier, promptTok, completionTok, hasImage)
 
@@ -393,6 +410,9 @@ func Run(cfg Config) error {
 					sess.Add(model, intent.Tier, pt2, ct2, false)
 					fmt.Printf("%s◈ Mantis%s %s(corrected)%s\n", colorCopper+colorBold, colorReset, colorDim, colorReset)
 					renderResponse(rb2.String())
+					if wf := extractAndWriteFiles(rb2.String(), root); len(wf) > 0 {
+						printWrittenFiles(wf)
+					}
 
 					if vr2 := verify.Check(rb2.String(), truthWriter); !vr2.Clean {
 						fmt.Printf("%s%s%s\n\n", colorRed, vr2.Warning, colorReset)
@@ -574,7 +594,7 @@ func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
 
 // buildSystemPrompt returns the base system prompt (tier-independent).
 // Brain context and tier-specific guidance are appended separately.
-func buildSystemPrompt(brainCtx string, tier router.Tier) string {
+func buildSystemPrompt(brainCtx, skillsCtx string, tier router.Tier) string {
 	var sb strings.Builder
 
 	// ── Core identity & reasoning guidance ────────────────────────────────
@@ -592,7 +612,25 @@ func buildSystemPrompt(brainCtx string, tier router.Tier) string {
 - When referencing files, use full paths from the project.
 - If the question is ambiguous, ask one clarifying question before answering.
 - Format code with correct language tags.
+
+## File generation
+When you create or modify a file, ALWAYS use the filename in the opening fence tag:
+  ` + "```" + `python:app.py
+  <code here>
+  ` + "```" + `
+  ` + "```" + `html:templates/index.html
+  <code here>
+  ` + "```" + `
+Use ` + "`lang:path/to/file`" + ` format (colon-separated). This lets Mantis write the files to disk automatically.
+Every code block that should be a real file MUST use this format.
 `)
+
+	// ── Active skills (engineering expertise loaded from .mantis/skills/) ─────
+	if skillsCtx != "" {
+		sb.WriteString("\n## Engineering Skills\n")
+		sb.WriteString(skillsCtx)
+		sb.WriteString("\n")
+	}
 
 	// ── Tier-specific suffix ──────────────────────────────────────────────
 	switch tier {
