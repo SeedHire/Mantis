@@ -13,8 +13,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-      - name: Install Mantis
-        run: go install github.com/seedhire/mantis/cmd/mantis@latest
+      - name: Install Mantis from source
+        run: CGO_ENABLED=1 go build -o /usr/local/bin/mantis ./cmd/mantis
       - name: Build graph
         run: mantis init --lang ts
       - name: Architecture check
