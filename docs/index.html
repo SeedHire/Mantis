@@ -279,6 +279,7 @@
       min-height: 300px;
     }
     .t-dim    { color: var(--fg-muted); }
+    .t-fg     { color: var(--fg); }
     .t-copper { color: var(--copper-lt); }
     .t-gold   { color: var(--gold); }
     .t-green  { color: var(--success); }
@@ -511,11 +512,11 @@
   <div class="container">
 
     <div class="hero-logo-wrap fade-up">
-<pre class="hero-logo">███╗   ███╗ █████╗ ███╗   ██╗████████╗██╗███████╗
-  ████╗ ████║██╔══██╗████╗  ██║╚══██╔══╝██║██╔════╝               \   /
-  ██╔████╔██║███████║██╔██╗ ██║   ██║   ██║███████╗                \_/
-  ██║╚██╔╝██║██╔══██║██║╚██╗██║   ██║   ██║╚════██║               (o_o)
-  ██║ ╚═╝ ██║██║  ██║██║ ╚████║   ██║   ██║███████║           <===[|||]===>
+<pre class="hero-logo">  ███╗   ███╗ █████╗ ███╗   ██╗████████╗██╗███████╗
+  ████╗ ████║██╔══██╗████╗  ██║╚══██╔══╝██║██╔════╝     \   /
+  ██╔████╔██║███████║██╔██╗ ██║   ██║   ██║███████╗      \_/
+  ██║╚██╔╝██║██╔══██║██║╚██╗██║   ██║   ██║╚════██║     (o_o)
+  ██║ ╚═╝ ██║██║  ██║██║ ╚████║   ██║   ██║███████║ <===[|||]===>
   ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝   ╚═╝   ╚═╝╚══════╝</pre>
     </div>
 
@@ -552,24 +553,28 @@
         <div><span class="t-green">● Sagar-Darji</span></div>
         <div><span class="t-green">● Ollama Cloud</span></div>
         <div><span class="t-gold">● project memory ready</span></div>
-        <div><span class="t-gold">● 142 files indexed</span></div>
+        <div><span class="t-gold">● 38 files indexed</span></div>
         <div>&nbsp;</div>
         <div><span class="t-dim">  /help  /cost  /brain  /quit</span></div>
         <div>&nbsp;</div>
-        <div><span class="t-dim">────────────────────────────────────────────────────────</span></div>
-        <div><span class="t-prompt">❯</span> why does the auth middleware skip admin routes?</div>
-        <div><span class="t-dim">[turn 1 · fast · general · </span><span class="t-copper t-bold">qwen2.5-coder:7b</span><span class="t-dim">]</span></div>
-        <div><span class="t-dim">────────────────────────────────────────────────────────</span></div>
+        <div><span class="t-prompt">❯</span> /quit</div>
         <div>&nbsp;</div>
-        <div><span class="t-copper t-bold">◈ Mantis</span></div>
-        <div>&nbsp;</div>
-        <div>In <span class="t-gold">src/middleware/auth.ts:34</span>, the <span class="t-gold">skipAuth</span> array</div>
-        <div>includes all routes prefixed with <span class="t-gold">/admin</span> — this was</div>
-        <div>added in commit <span class="t-gold">a3f91b</span> to bypass JWT checks during</div>
-        <div>local dev but was never removed.</div>
-        <div>&nbsp;</div>
-        <div><span class="t-dim">────────────────────────────────────────────────────────</span></div>
-        <div><span class="t-prompt">❯</span> <span class="cursor"></span></div>
+        <div style="border:1px solid #2E3448;border-radius:6px;padding:10px 14px;display:inline-block;min-width:340px">
+          <div style="color:#8890A8;margin-bottom:6px">SESSION SUMMARY — mantis</div>
+          <div style="border-top:1px solid #2E3448;padding-top:8px">
+            <div><span class="t-dim">Duration&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span><span class="t-fg">10s</span></div>
+            <div><span class="t-dim">Total tokens&nbsp;&nbsp;</span><span class="t-fg">2,841</span></div>
+            <div><span class="t-dim">Turns&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span><span class="t-fg">3</span></div>
+            <div><span class="t-dim">Route&nbsp;&nbsp;</span><span class="t-fg">trivial×0&nbsp; fast×2&nbsp; code×1&nbsp; reason×0</span></div>
+          </div>
+          <div style="border-top:1px solid #2E3448;padding-top:8px;margin-top:6px">
+            <div style="color:#8890A8;margin-bottom:4px">WHAT THIS WOULD HAVE COST WITH PAID APIs</div>
+            <div><span class="t-dim">GPT-4o&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span><span class="t-fg">$0.09</span></div>
+            <div><span class="t-dim">Claude Sonnet&nbsp;</span><span class="t-fg">$0.07</span></div>
+            <div><span class="t-dim">Claude Opus&nbsp;&nbsp;&nbsp;</span><span class="t-fg">$0.31</span></div>
+            <div><span class="t-dim">Mantis cost&nbsp;&nbsp;&nbsp;</span><span class="t-green t-bold">$0.00 ✓</span></div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -604,13 +609,6 @@
       <p class="section-label">Live Demo</p>
       <h2 class="section-title">See it in action.</h2>
     </div>
-    <div class="terminal-tabs">
-      <button class="tab-btn active" onclick="showTab('chat')">chat</button>
-      <button class="tab-btn" onclick="showTab('init')">init</button>
-      <button class="tab-btn" onclick="showTab('impact')">impact</button>
-      <button class="tab-btn" onclick="showTab('lint')">lint</button>
-      <button class="tab-btn" onclick="showTab('dead')">dead</button>
-    </div>
     <div class="demo-terminal">
       <div class="terminal-bar">
         <div class="dot dot-red"></div>
@@ -619,87 +617,27 @@
         <span class="terminal-title">mantis — ~/my-project</span>
       </div>
       <div class="terminal-body">
-
-        <div class="tab-pane active" id="pane-chat">
-<span class="t-dim">────────────────────────────────────────────────────────</span>
-<span class="t-prompt">❯ </span><span class="t-cmd">refactor the payment service to use async/await instead of callbacks</span>
-<span class="t-dim">[turn 3 · code · general · </span><span class="t-copper">qwen2.5-coder:14b</span><span class="t-dim">]</span>
-<span class="t-dim">────────────────────────────────────────────────────────</span>
-
-<span class="t-copper t-bold">◈ Mantis</span>
-
-Here's the refactored <span class="t-gold">PaymentService</span> using async/await:
-
-<span class="t-gold">src/services/payment.ts</span>
-<span class="t-out">  async processPayment(order: Order): Promise&lt;Receipt&gt; {</span>
-<span class="t-out">    const charge = await stripe.charges.create({ ... });</span>
-<span class="t-out">    return this.buildReceipt(charge);</span>
-<span class="t-out">  }</span>
-
-<span class="t-dim">────────────────────────────────────────────────────────</span>
-<span class="t-prompt">❯ </span><span class="cursor"></span>
-        </div>
-
-        <div class="tab-pane" id="pane-init">
-<span class="t-prompt">❯ </span><span class="t-cmd">mantis init --lang ts</span>
-<span class="t-copper">⚡ Indexing /Users/sagar/my-project...</span>
-<span class="t-green">✓ Indexed 312 files, 4,821 symbols in 3.4s</span>
-
-<span class="t-prompt">❯ </span><span class="t-cmd">mantis find "validateToken" --format tree</span>
-<span class="t-gold">"validateToken"</span>
-<span class="t-out">  └── src/middleware/auth.ts</span>
-<span class="t-out">  └── src/api/routes/users.ts</span>
-<span class="t-out">  └── src/api/routes/payments.ts</span>
-<span class="t-out">  └── src/workers/sessionCleaner.ts</span>
-<span class="t-out">  └── tests/auth.test.ts</span>
-<span class="t-prompt">❯ </span><span class="cursor"></span>
-        </div>
-
-        <div class="tab-pane" id="pane-impact">
-<span class="t-prompt">❯ </span><span class="t-cmd">mantis impact "src/db/connection.ts" --risk</span>
-<span class="t-gold">⚡ Impact Analysis: src/db/connection.ts</span>
-<span class="t-out">────────────────────────────────────────────────────────</span>
-<span class="t-out">Direct importers    (depth 1):  4 files</span>
-<span class="t-out">Indirect dependents (depth 2): 12 files</span>
-<span class="t-out">Total affected: 16 files</span>
-
-<span class="t-red">HIGH RISK:   src/api/routes/index.ts          (score: 9/10)</span>
-<span class="t-red">HIGH RISK:   src/services/auth.ts             (score: 8/10)</span>
-<span class="t-warn">MEDIUM RISK: src/middleware/logging.ts        (score: 6/10)</span>
-<span class="t-warn">MEDIUM RISK: src/workers/cleanup.ts           (score: 5/10)</span>
-<span class="t-green">LOW RISK:    src/utils/healthcheck.ts         (score: 2/10)</span>
-        </div>
-
-        <div class="tab-pane" id="pane-lint">
-<span class="t-prompt">❯ </span><span class="t-cmd">mantis lint --ci</span>
-<span class="t-gold">🔍 Architecture Lint</span>
-<span class="t-out">────────────────────────────────────────────────────────</span>
-<span class="t-out">Checking 5 rules against 312 files...</span>
-
-<span class="t-red">ERROR   src/controllers/user.ts:42</span>
-<span class="t-out">        no-controller-db-access: controllers must not import from src/db/**</span>
-
-<span class="t-warn">WARNING src/utils/formatters.ts:7</span>
-<span class="t-out">        utils-no-services: utility files must not import services</span>
-
-<span class="t-out">────────────────────────────────────────────────────────</span>
-<span class="t-red">1 error, 1 warning  ·  exit code 1</span>
-        </div>
-
-        <div class="tab-pane" id="pane-dead">
-<span class="t-prompt">❯ </span><span class="t-cmd">mantis dead --ignore "**/*.test.ts"</span>
-<span class="t-gold">🔍 Dead Code Analysis</span>
-<span class="t-out">────────────────────────────────────────────────────────</span>
-<span class="t-out">Found 6 unused exported symbols</span>
-
-<span class="t-copper">FUNCTION   src/utils/legacy.ts:12        formatLegacyDate</span>
-<span class="t-copper">FUNCTION   src/utils/legacy.ts:28        parseLegacyId</span>
-<span class="t-copper">CLASS      src/services/v1/OldAuth.ts:1  OldAuthService</span>
-<span class="t-copper">INTERFACE  src/types/deprecated.ts:5    LegacyUser</span>
-<span class="t-copper">FUNCTION   src/helpers/xml.ts:14         parseXMLResponse</span>
-<span class="t-copper">CONST      src/config/flags.ts:3         ENABLE_BETA</span>
-        </div>
-
+<div><span class="t-green">● Sagar-Darji</span></div>
+<div><span class="t-green">● Ollama Cloud</span></div>
+<div><span class="t-gold">● project memory ready</span></div>
+<div><span class="t-gold">● 142 files indexed</span></div>
+<div>&nbsp;</div>
+<div><span class="t-dim">  /help  /cost  /brain  /quit</span></div>
+<div>&nbsp;</div>
+<div><span class="t-dim">────────────────────────────────────────────────────────</span></div>
+<div><span class="t-prompt">❯ </span>why does the auth middleware skip admin routes?</div>
+<div><span class="t-dim">[turn 1 · fast · general · </span><span class="t-copper t-bold">qwen2.5-coder:7b</span><span class="t-dim">]</span></div>
+<div><span class="t-dim">────────────────────────────────────────────────────────</span></div>
+<div>&nbsp;</div>
+<div><span class="t-copper t-bold">◈ Mantis</span></div>
+<div>&nbsp;</div>
+<div>In <span class="t-gold">src/middleware/auth.ts:34</span>, the <span class="t-gold">skipAuth</span> array</div>
+<div>includes all routes prefixed with <span class="t-gold">/admin</span> — this was</div>
+<div>added in commit <span class="t-gold">a3f91b</span> to bypass JWT checks during</div>
+<div>local dev but was never removed.</div>
+<div>&nbsp;</div>
+<div><span class="t-dim">────────────────────────────────────────────────────────</span></div>
+<div><span class="t-prompt">❯ </span><span class="cursor"></span></div>
       </div>
     </div>
   </div>
