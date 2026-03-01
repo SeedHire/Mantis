@@ -149,6 +149,14 @@ mantis workspace impact <symbol>  # cross-repo impact analysis
 mantis workspace stats            # per-repo statistics
 ```
 
+### Runtime trace analysis
+```bash
+mantis trace ingest <file>        # ingest OTLP JSON, pprof text, or custom JSON
+mantis trace hotpaths             # top functions by runtime call frequency
+mantis trace cold                 # structurally important but never called at runtime
+mantis trace weight <symbol>      # runtime-weighted impact (structural depth × call freq)
+```
+
 ### Session management
 ```bash
 mantis handoff             # generate HANDOFF.md for async collaboration
@@ -191,7 +199,7 @@ internal/
   usage/             free-tier usage tracking
   nl/                NLP dispatcher → codebase intelligence tools
   graph/             AST dependency graph (SQLite) + cross-repo workspace
-  intel/             temporal analysis, intent gaps, impact, dead code
+  intel/             temporal analysis, intent gaps, runtime traces, impact
   parser/            tree-sitter parsers (Go, TypeScript, Python)
   linter/            architecture rule enforcement
   tui/               Bubbletea dashboard

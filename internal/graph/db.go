@@ -35,6 +35,16 @@ CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_id);
 CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name);
 CREATE INDEX IF NOT EXISTS idx_nodes_file ON nodes(file_path);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS traces (
+    node_id TEXT NOT NULL,
+    call_count INTEGER DEFAULT 0,
+    total_duration_ms REAL DEFAULT 0,
+    avg_duration_ms REAL DEFAULT 0,
+    source TEXT DEFAULT '',
+    last_ingested INTEGER DEFAULT 0,
+    UNIQUE(node_id, source)
+);
+CREATE INDEX IF NOT EXISTS idx_traces_node ON traces(node_id);
 `
 
 // DB wraps a SQLite database for the dependency graph.

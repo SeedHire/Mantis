@@ -1039,6 +1039,167 @@ var wsStatsCmd = &cobra.Command{
 	},
 }
 
+// ── trace commands ────────────────────────────────────────────────────────────
+
+var traceCmd = &cobra.Command{
+	Use:   "trace",
+	Short: "Runtime trace ingestion and analysis",
+	Long:  "Ingest OpenTelemetry, pprof, or custom trace data to weight impact analysis by actual runtime behavior.",
+}
+
+var traceIngestCmd = &cobra.Command{
+	Use:   "ingest <file>",
+	Short: "Ingest trace data from OTLP JSON, pprof text, or custom JSON",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		root, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		db, err := openDB(root)
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+
+		entries, err := intel.IngestTraceFile(args[0])
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Parsed %d trace entries from %s\n", len(entries), filepath.Base(args[0]))
+
+		matched, unmatched, err := intel.StoreTraces(db.Conn(), entries)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("✓ Matched %d entries to graph nodes (%d unmatched)\n", matched, unmatched)
+		return nil
+	},
+}
+
+var traceHotpathsCmd = &cobra.Command{
+	Use:   "hotpaths",
+	Short: "Show hottest code paths by runtime call frequency",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		root, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		db, err := openDB(root)
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+
+		totalCalls, uniqueNodes, err := intel.TraceSummary(db.Conn())
+		if err != nil {
+			return err
+		}
+		if uniqueNodes == 0 {
+			fmt.Println("No trace data. Run 'mantis trace ingest <file>' first.")
+			return nil
+		}
+		fmt.Printf("Trace data: %d total calls across %d functions\n\n", totalCalls, uniqueNodes)
+
+		stats, err := intel.Hotpaths(db.Conn(), 20)
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("%-8s %-10s %-30s %s\n", "CALLS", "AVG(ms)", "FUNCTION", "FILE")
+		fmt.Println(strings.Repeat("─", 80))
+		for _, s := range stats {
+			fmt.Printf("%-8d %-10.2f %-30s %s\n",
+				s.CallCount, s.AvgDuration, s.Name, truncPath(s.FilePath, 30))
+		}
+		return nil
+	},
+}
+
+var traceColdCmd = &cobra.Command{
+	Use:   "cold",
+	Short: "Show structurally important but runtime-cold code",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		root, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		db, err := openDB(root)
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+
+		stats, err := intel.ColdPaths(db.Conn(), 20)
+		if err != nil {
+			return err
+		}
+		if len(stats) == 0 {
+			fmt.Println("No cold paths found (all traced, or no trace data).")
+			return nil
+		}
+
+		fmt.Printf("Structurally imported but never called at runtime:\n\n")
+		fmt.Printf("%-30s %s\n", "FUNCTION", "FILE")
+		fmt.Println(strings.Repeat("─", 70))
+		for _, s := range stats {
+			fmt.Printf("%-30s %s\n", s.Name, truncPath(s.FilePath, 40))
+		}
+		return nil
+	},
+}
+
+var traceWeightCmd = &cobra.Command{
+	Use:   "weight <symbol>",
+	Short: "Runtime-weighted impact analysis for a symbol",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		root, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		db, err := openDB(root)
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+
+		q := graph.NewQuerier(db)
+		nodes, err := q.FindNodeByName(args[0])
+		if err != nil {
+			return err
+		}
+		if len(nodes) == 0 {
+			return fmt.Errorf("symbol %q not found in graph", args[0])
+		}
+
+		// Run BFS from first matching node.
+		bfs, err := q.BFSReverse(nodes[0].ID, 5)
+		if err != nil {
+			return err
+		}
+
+		weighted, err := intel.WeightedImpact(db.Conn(), bfs)
+		if err != nil {
+			return err
+		}
+		if len(weighted) == 0 {
+			fmt.Println("No impact data found.")
+			return nil
+		}
+
+		fmt.Printf("Runtime-weighted impact of changing %q:\n\n", args[0])
+		fmt.Printf("%-10s %-6s %-8s %-25s %s\n", "WEIGHT", "DEPTH", "CALLS", "FUNCTION", "FILE")
+		fmt.Println(strings.Repeat("─", 85))
+		for _, w := range weighted {
+			fmt.Printf("%-10.1f %-6d %-8d %-25s %s\n",
+				w.RuntimeWeight, w.StructDepth, w.CallCount,
+				w.Name, truncPath(w.FilePath, 30))
+		}
+		return nil
+	},
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 func openDB(root string) (*graph.DB, error) {
@@ -1118,9 +1279,10 @@ func init() {
 	rootCmd.Flags().IntVar(&replBudget, "budget", 0, "Max tokens for this session (0 = unlimited)")
 	rootCmd.Flags().StringVar(&replImage, "image", "", "Image file path for multimodal input")
 
-	rootCmd.AddCommand(initCmd, contextCmd, watchCmd, findCmd, impactCmd, deadCmd, circularCmd, graphCmd, lintCmd, tuiCmd, handoffCmd, hotspotsCmd, riskyCmd, couplingCmd, intentCmd, todosCmd, specGapsCmd, workspaceCmd)
+	rootCmd.AddCommand(initCmd, contextCmd, watchCmd, findCmd, impactCmd, deadCmd, circularCmd, graphCmd, lintCmd, tuiCmd, handoffCmd, hotspotsCmd, riskyCmd, couplingCmd, intentCmd, todosCmd, specGapsCmd, workspaceCmd, traceCmd)
 
 	workspaceCmd.AddCommand(wsInitCmd, wsFindCmd, wsImpactCmd, wsStatsCmd)
+	traceCmd.AddCommand(traceIngestCmd, traceHotpathsCmd, traceColdCmd, traceWeightCmd)
 
 	hotspotsCmd.Flags().IntVar(&temporalDays, "days", 90, "Look-back period in days")
 	riskyCmd.Flags().IntVar(&temporalDays, "days", 90, "Look-back period in days")
