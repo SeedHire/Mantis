@@ -256,10 +256,13 @@ func Run(cfg Config) error {
 			}
 		}
 
-		// Compose user message.
+		// Compose user message with task-type template guidance.
 		userContent := input
+		if tmpl := router.TaskTemplate(intent.TaskType); tmpl != "" {
+			userContent = tmpl + "\n\n" + input
+		}
 		if toolCtx != "" {
-			userContent = toolCtx + "\nUser question: " + input
+			userContent = toolCtx + "\nUser question: " + userContent
 		}
 
 		var userMsg interface{}

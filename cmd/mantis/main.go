@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
@@ -13,6 +15,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 
+	"github.com/seedhire/mantis/internal/brain"
 	"github.com/seedhire/mantis/internal/config"
 	appcontext "github.com/seedhire/mantis/internal/context"
 	"github.com/seedhire/mantis/internal/graph"
@@ -597,6 +600,226 @@ var tuiCmd = &cobra.Command{
 	},
 }
 
+// ── handoff command ──────────────────────────────────────────────────────────
+
+var handoffCmd = &cobra.Command{
+	Use:   "handoff",
+	Short: "Generate a handoff brief for another developer or AI session",
+	Long:  "Reads BRAIN.md, DECISIONS.log, REJECTED.md, CONVENTIONS.md and recent git changes to produce a structured HANDOFF.md.",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		root, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+
+		b := brain.New(root)
+		if !b.Exists() {
+			return fmt.Errorf("no .mantis/ directory — run 'mantis init' first")
+		}
+
+		md := buildHandoff(b, root)
+		outPath := filepath.Join(root, ".mantis", "HANDOFF.md")
+		if err := os.WriteFile(outPath, []byte(md), 0o644); err != nil {
+			return fmt.Errorf("write handoff: %w", err)
+		}
+
+		fmt.Printf("✓ Handoff written to %s\n", outPath)
+		return nil
+	},
+}
+
+func buildHandoff(b *brain.Brain, root string) string {
+	var sb strings.Builder
+	now := time.Now().Format("2006-01-02 15:04")
+
+	sb.WriteString("# Handoff Brief\n")
+	sb.WriteString(fmt.Sprintf("> Generated: %s\n\n", now))
+
+	// Current state from BRAIN.md.
+	if brainMD := b.ReadFile("BRAIN.md"); brainMD != "" {
+		sb.WriteString("## Current State\n\n")
+		sb.WriteString(brainMD)
+		sb.WriteString("\n\n")
+	}
+
+	// Key decisions (last 20 entries from DECISIONS.log).
+	if decisions := b.ReadFile("DECISIONS.log"); decisions != "" {
+		sb.WriteString("## Key Decisions\n\n")
+		lines := strings.Split(decisions, "\n")
+		start := 0
+		if len(lines) > 20 {
+			start = len(lines) - 20
+		}
+		sb.WriteString(strings.Join(lines[start:], "\n"))
+		sb.WriteString("\n\n")
+	}
+
+	// Don't touch — rejected approaches.
+	if rejected := b.ReadFile("REJECTED.md"); rejected != "" {
+		sb.WriteString("## Don't Touch — Rejected Approaches\n\n")
+		sb.WriteString(rejected)
+		sb.WriteString("\n\n")
+	}
+
+	// Architecture rules.
+	if conventions := b.ReadFile("CONVENTIONS.md"); conventions != "" {
+		sb.WriteString("## Architecture Rules\n\n")
+		sb.WriteString(conventions)
+		sb.WriteString("\n\n")
+	}
+
+	// Hot files — recently changed files from git.
+	sb.WriteString("## Hot Files (recently changed)\n\n")
+	hotFiles := getRecentGitChanges(root)
+	if len(hotFiles) > 0 {
+		for _, f := range hotFiles {
+			sb.WriteString(fmt.Sprintf("- %s\n", f))
+		}
+	} else {
+		sb.WriteString("_No recent git changes detected._\n")
+	}
+	sb.WriteString("\n")
+
+	return sb.String()
+}
+
+func getRecentGitChanges(root string) []string {
+	out, err := exec.Command("git", "-C", root, "log", "--oneline", "--name-only", "--pretty=format:", "-10").Output()
+	if err != nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var files []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" && !seen[line] {
+			seen[line] = true
+			files = append(files, line)
+		}
+	}
+	return files
+}
+
+// ── temporal intelligence commands ───────────────────────────────────────────
+
+var temporalDays int
+
+var hotspotsCmd = &cobra.Command{
+	Use:   "hotspots",
+	Short: "Show files with highest churn and change frequency",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		root, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		stats, err := intel.Temporal(root, temporalDays)
+		if err != nil {
+			return err
+		}
+		hotspots := intel.Hotspots(stats, 15)
+		if len(hotspots) == 0 {
+			fmt.Println("No file changes found in the last", temporalDays, "days.")
+			return nil
+		}
+		fmt.Printf("%-50s %7s %7s %8s %6s\n", "FILE", "COMMITS", "AUTHORS", "CHURN", "DAYS")
+		fmt.Println(strings.Repeat("─", 85))
+		for _, f := range hotspots {
+			days := fmt.Sprintf("%d", f.DaysSinceChange)
+			if f.DaysSinceChange < 0 {
+				days = "?"
+			}
+			fmt.Printf("%-50s %7d %7d %8.1f %6s\n", truncPath(f.Path, 50), f.Commits, f.Authors, f.ChurnScore, days)
+		}
+		return nil
+	},
+}
+
+var riskyCmd = &cobra.Command{
+	Use:   "risky",
+	Short: "Show high-churn files with low bus factor (single author)",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		root, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		stats, err := intel.Temporal(root, temporalDays)
+		if err != nil {
+			return err
+		}
+		risky := intel.Risky(stats, 15)
+		if len(risky) == 0 {
+			fmt.Println("No risky files found — good bus factor across the board.")
+			return nil
+		}
+		fmt.Printf("%-50s %7s %8s %s\n", "FILE", "COMMITS", "CHURN", "SOLE AUTHOR")
+		fmt.Println(strings.Repeat("─", 85))
+		for _, f := range risky {
+			author := f.LastAuthor
+			if len(f.AuthorNames) > 0 {
+				author = f.AuthorNames[0]
+			}
+			fmt.Printf("%-50s %7d %8.1f %s\n", truncPath(f.Path, 50), f.Commits, f.ChurnScore, author)
+		}
+		return nil
+	},
+}
+
+var couplingCmd = &cobra.Command{
+	Use:   "coupling [path]",
+	Short: "Show files that frequently change together",
+	Args:  cobra.MaximumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		root, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		stats, err := intel.Temporal(root, temporalDays)
+		if err != nil {
+			return err
+		}
+
+		if len(args) == 1 {
+			coupled := intel.CouplingFor(stats, args[0], 15)
+			if len(coupled) == 0 {
+				fmt.Printf("No coupling data for %s\n", args[0])
+				return nil
+			}
+			fmt.Printf("Files that change with %s:\n\n", args[0])
+			fmt.Printf("%-50s %8s %8s\n", "FILE", "CO-CHGS", "COUPLING")
+			fmt.Println(strings.Repeat("─", 70))
+			for _, c := range coupled {
+				other := c.FileB
+				if other == args[0] {
+					other = c.FileA
+				}
+				fmt.Printf("%-50s %8d %7.0f%%\n", truncPath(other, 50), c.CoChanges, c.Coupling*100)
+			}
+		} else {
+			if len(stats.Coupling) == 0 {
+				fmt.Println("No file coupling detected in the last", temporalDays, "days.")
+				return nil
+			}
+			fmt.Printf("%-40s %-40s %8s\n", "FILE A", "FILE B", "COUPLING")
+			fmt.Println(strings.Repeat("─", 92))
+			limit := 20
+			if len(stats.Coupling) < limit {
+				limit = len(stats.Coupling)
+			}
+			for _, c := range stats.Coupling[:limit] {
+				fmt.Printf("%-40s %-40s %7.0f%%\n", truncPath(c.FileA, 40), truncPath(c.FileB, 40), c.Coupling*100)
+			}
+		}
+		return nil
+	},
+}
+
+func truncPath(p string, maxLen int) string {
+	if len(p) <= maxLen {
+		return p
+	}
+	return "…" + p[len(p)-maxLen+1:]
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 func openDB(root string) (*graph.DB, error) {
@@ -676,7 +899,11 @@ func init() {
 	rootCmd.Flags().IntVar(&replBudget, "budget", 0, "Max tokens for this session (0 = unlimited)")
 	rootCmd.Flags().StringVar(&replImage, "image", "", "Image file path for multimodal input")
 
-	rootCmd.AddCommand(initCmd, contextCmd, watchCmd, findCmd, impactCmd, deadCmd, circularCmd, graphCmd, lintCmd, tuiCmd)
+	rootCmd.AddCommand(initCmd, contextCmd, watchCmd, findCmd, impactCmd, deadCmd, circularCmd, graphCmd, lintCmd, tuiCmd, handoffCmd, hotspotsCmd, riskyCmd, couplingCmd)
+
+	hotspotsCmd.Flags().IntVar(&temporalDays, "days", 90, "Look-back period in days")
+	riskyCmd.Flags().IntVar(&temporalDays, "days", 90, "Look-back period in days")
+	couplingCmd.Flags().IntVar(&temporalDays, "days", 90, "Look-back period in days")
 }
 
 func main() {

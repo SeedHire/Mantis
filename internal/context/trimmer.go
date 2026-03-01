@@ -10,8 +10,9 @@ type Section struct {
 }
 
 // EstimateTokens approximates the token count for a text string.
+// LLaMA-based tokenizers average ~3.5 chars/token for code.
 func EstimateTokens(text string) int {
-	return len(text) / 4
+	return int(float64(len(text)) / 3.5)
 }
 
 // TrimToTokenBudget selects sections that fit within the given token budget.
@@ -33,8 +34,8 @@ func TrimToTokenBudget(sections []Section, budget int) []Section {
 			result = append(result, s)
 			remaining -= tokens
 		} else if remaining > 0 {
-			// Truncate to fit
-			maxChars := remaining * 4
+			// Truncate to fit.
+			maxChars := int(float64(remaining) * 3.5)
 			truncated := s
 			if maxChars < len(s.Content) {
 				truncated.Content = s.Content[:maxChars]

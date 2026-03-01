@@ -77,7 +77,7 @@ func (b *Bundler) Bundle(symbolName string, maxDepth, tokenBudget int) (*Bundle,
 		return nil, err
 	}
 
-	// Build sections for token trimming
+	// Build sections with multi-signal scoring.
 	var sections []Section
 	filesByID := map[string]BundleFile{}
 
@@ -88,7 +88,7 @@ func (b *Bundler) Bundle(symbolName string, maxDepth, tokenBudget int) (*Bundle,
 			continue
 		}
 		content, _ := os.ReadFile(n.FilePath)
-		priority := depthPriority(depth)
+		priority := scoreFile(n.FilePath, depth, string(content))
 		bf := BundleFile{
 			Path:    n.FilePath,
 			Depth:   depth,
@@ -145,17 +145,60 @@ func (b *Bundler) Bundle(symbolName string, maxDepth, tokenBudget int) (*Bundle,
 	}, nil
 }
 
-func depthPriority(depth int) int {
+// scoreFile computes a multi-signal relevance score for context ranking.
+// Higher score = more likely to be kept in the token budget.
+func scoreFile(path string, depth int, content string) int {
+	score := 0
+
+	// Depth signal: closer = higher (10 → 3).
 	switch depth {
 	case 0:
-		return 10
+		score += 10
 	case 1:
-		return 8
+		score += 8
 	case 2:
-		return 5
+		score += 5
 	default:
-		return 3
+		score += 3
 	}
+
+	// File size penalty: large files are less focused.
+	size := len(content)
+	switch {
+	case size > 50000:
+		score -= 3
+	case size > 20000:
+		score -= 2
+	case size > 10000:
+		score -= 1
+	case size < 2000:
+		score += 1 // small, focused files are good
+	}
+
+	// Test file demotion: test files are less relevant unless query is about tests.
+	base := filepath.Base(path)
+	if strings.Contains(base, "_test.") || strings.Contains(base, ".test.") ||
+		strings.Contains(base, ".spec.") || strings.HasSuffix(base, "_test.go") {
+		score -= 4
+	}
+
+	// Config/generated file demotion.
+	lower := strings.ToLower(base)
+	if lower == "package-lock.json" || lower == "yarn.lock" || lower == "go.sum" ||
+		strings.HasSuffix(lower, ".min.js") || strings.HasSuffix(lower, ".generated.go") {
+		score -= 5
+	}
+
+	// Interface/type files boost (likely important for understanding).
+	if strings.Contains(lower, "types") || strings.Contains(lower, "interface") ||
+		strings.Contains(lower, "model") || strings.Contains(lower, "schema") {
+		score += 2
+	}
+
+	if score < 1 {
+		score = 1
+	}
+	return score
 }
 
 // RenderMarkdown renders a context bundle as a Markdown document.
