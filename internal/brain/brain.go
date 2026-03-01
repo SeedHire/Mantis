@@ -7,6 +7,7 @@
 package brain
 
 import (
+	"embed"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -17,7 +18,39 @@ import (
 
 const skillsDirName = "skills"
 
+//go:embed skills/*.md
+var embeddedSkills embed.FS
+
 const dirName = ".mantis"
+
+// taskSkillPriority maps task types to the skill files that should be loaded
+// first, ensuring the most relevant expertise appears within the token budget.
+var taskSkillPriority = map[string][]string{
+	"implement": {
+		"senior-software-developer", "api-designer", "database-architect",
+		"security-analyst", "devops-engineer", "code-reviewer",
+	},
+	"fix": {
+		"debugging-detective", "senior-software-developer", "code-reviewer",
+		"security-analyst",
+	},
+	"refactor": {
+		"senior-software-developer", "code-reviewer", "debugging-detective",
+	},
+	"test": {
+		"senior-software-developer", "code-reviewer", "debugging-detective",
+	},
+	"explain": {
+		"concept-explainer", "technical-writer", "senior-software-developer",
+		"documentation-writer",
+	},
+	"impact-query": {
+		"senior-software-developer", "code-reviewer", "project-planner",
+	},
+	"general": {
+		"senior-software-developer", "concept-explainer", "technical-writer",
+	},
+}
 
 // Brain holds the path to the project brain directory.
 type Brain struct {
@@ -268,36 +301,82 @@ func (b *Brain) Exists() bool {
 	return err == nil
 }
 
-// seedSkillsDir creates .mantis/skills/ and seeds the built-in skills if absent.
+// seedSkillsDir creates .mantis/skills/ and seeds all 25 built-in skills from the
+// embedded FS. Existing files are never overwritten so user edits are preserved.
 func (b *Brain) seedSkillsDir() error {
 	skillsDir := filepath.Join(b.dir, skillsDirName)
 	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
 		return err
 	}
-	return b.seedSkill("senior-software-developer.md", seniorSWESkill)
+
+	entries, err := embeddedSkills.ReadDir("skills")
+	if err != nil {
+		return err
+	}
+
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		dest := filepath.Join(skillsDir, e.Name())
+		if _, err := os.Stat(dest); err == nil {
+			continue // already exists — never overwrite user modifications
+		}
+		data, err := embeddedSkills.ReadFile("skills/" + e.Name())
+		if err != nil {
+			continue
+		}
+		if err := os.WriteFile(dest, data, 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// seedSkill writes a skill file only if it doesn't already exist.
-func (b *Brain) seedSkill(filename, content string) error {
-	path := filepath.Join(b.dir, skillsDirName, filename)
-	if _, err := os.Stat(path); err == nil {
-		return nil // already exists
+// SkillCount returns the number of skill files present in .mantis/skills/.
+func (b *Brain) SkillCount() int {
+	entries, err := os.ReadDir(filepath.Join(b.dir, skillsDirName))
+	if err != nil {
+		return 0
 	}
-	return os.WriteFile(path, []byte(content), 0o644)
+	n := 0
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
+			n++
+		}
+	}
+	return n
 }
 
 // LoadSkills reads all *.md files from .mantis/skills/, strips YAML frontmatter,
 // and returns their combined content capped at maxChars characters.
 // Returns empty string if no skills directory or no skill files exist.
 func (b *Brain) LoadSkills(maxChars int) string {
+	return b.loadSkillsOrdered(nil, maxChars)
+}
+
+// LoadSkillsForTask loads skills most relevant to the given task type first,
+// then fills remaining budget with other skills. This ensures the model gets
+// the right expertise without blowing the context window.
+//
+// taskType values match router.detectTaskType: "implement", "fix", "refactor",
+// "explain", "test", "impact-query", "general".
+func (b *Brain) LoadSkillsForTask(taskType string, maxChars int) string {
+	priority := taskSkillPriority[taskType]
+	return b.loadSkillsOrdered(priority, maxChars)
+}
+
+// loadSkillsOrdered loads skills with priority names first, then the rest.
+func (b *Brain) loadSkillsOrdered(priority []string, maxChars int) string {
 	skillsDir := filepath.Join(b.dir, skillsDirName)
 	entries, err := os.ReadDir(skillsDir)
 	if err != nil {
 		return ""
 	}
 
-	var parts []string
-	total := 0
+	// Build a map of filename → content.
+	available := make(map[string]string, len(entries))
+	var allNames []string
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
 			continue
@@ -310,9 +389,34 @@ func (b *Brain) LoadSkills(maxChars int) string {
 		if content == "" {
 			continue
 		}
+		name := strings.TrimSuffix(e.Name(), ".md")
+		available[name] = content
+		allNames = append(allNames, name)
+	}
+
+	// Build ordered list: priority names first, then the rest.
+	seen := make(map[string]bool)
+	var ordered []string
+	for _, p := range priority {
+		if _, ok := available[p]; ok {
+			ordered = append(ordered, p)
+			seen[p] = true
+		}
+	}
+	for _, n := range allNames {
+		if !seen[n] {
+			ordered = append(ordered, n)
+		}
+	}
+
+	// Collect until maxChars.
+	var parts []string
+	total := 0
+	for _, name := range ordered {
+		content := available[name]
 		if total+len(content) > maxChars {
 			remaining := maxChars - total
-			if remaining > 200 {
+			if remaining > 300 {
 				parts = append(parts, content[:remaining]+"…")
 			}
 			break
@@ -341,82 +445,6 @@ func stripYAMLFrontmatter(s string) string {
 	}
 	return strings.TrimSpace(rest[idx+4:])
 }
-
-// seniorSWESkill is the built-in senior software developer skill, seeded on first init.
-const seniorSWESkill = `---
-name: senior-software-developer
-description: >
-  Expert senior software engineer skill for writing production-grade code, architecture design,
-  code reviews, debugging, refactoring, and system design. Applied to ALL development requests.
----
-
-# Senior Software Developer Skill
-
-You are operating as a **Senior Software Engineer** with 10+ years of experience. Apply deep engineering expertise to every development request — write code that is production-ready, maintainable, and well-reasoned.
-
-## Core Engineering Principles
-
-1. **Think before coding** — Understand requirements fully. Identify edge cases, failure modes, and constraints before writing code.
-2. **Production-first mindset** — Consider logging, error handling, monitoring, and configurability. Code should be deployable, not just functional.
-3. **SOLID & Clean Code** — Single responsibility, meaningful names, small functions, no magic numbers, no dead code.
-4. **Security by default** — Sanitize inputs, avoid secrets in code, use least-privilege, prevent SQLi, XSS, SSRF, etc.
-5. **Performance awareness** — Consider time/space complexity. Don't write obviously inefficient code.
-6. **Test coverage** — Every non-trivial function should have tests: unit, integration, and edge cases.
-7. **Documentation as code** — Self-documenting code + concise docstrings for public APIs.
-
-## Behavior by Request Type
-
-### New Feature / Implementation
-- Clarify ambiguous requirements before coding.
-- Start with the interface/contract, then implementation.
-- Handle errors explicitly — never silently swallow exceptions.
-- Return structured errors (not just strings).
-- Add input validation at system boundaries.
-- Include a usage example or short test.
-
-### Debugging
-- Reason through root cause systematically — don't just patch symptoms.
-- Explain the fix, not just provide it.
-- Check if the bug reveals a design smell worth addressing.
-
-### Code Review
-- Review for: correctness, security, performance, readability, testability.
-- Prioritize critical issues (bugs, security) over style.
-- Give actionable, specific feedback with code examples.
-
-### Refactoring
-- Preserve behavior (tests should still pass).
-- Reduce complexity: extract functions, eliminate duplication, flatten nesting.
-- Explain the "why" behind each structural change.
-
-### Architecture / System Design
-- Present 2–3 options with trade-offs.
-- Prefer boring tech that solves the problem over trendy tech.
-- Design for failure: what happens when services go down?
-
-## Code Quality Standards
-
-- **Error handling**: Throw specific, typed errors. Log with context. Never expose stack traces to users.
-- **Naming**: Functions = verb phrases (fetchUser, validateToken). Variables = noun phrases (userRecord, retryCount). Booleans = is/has/can prefix (isAuthenticated).
-- **Comments**: Comment the *why*, not the *what*. Flag tech debt with TODO.
-
-## Anti-Patterns to Avoid
-
-- ❌ Catching all exceptions silently
-- ❌ Hardcoding credentials, URLs, or environment-specific values
-- ❌ Mutating shared state without synchronization
-- ❌ Deeply nested conditionals when early returns would clarify
-- ❌ Ignoring the unhappy path
-- ❌ TODO stubs without noting they are incomplete
-
-## Senior Engineering Mindset
-
-Before finalizing any response, ask:
-- Would I be comfortable shipping this to production?
-- Would a junior engineer understand this in 6 months?
-- Have I considered what happens when this fails?
-- Is there a simpler solution I'm overlooking?
-`
 
 // ReadFile returns the raw contents of a brain file by name.
 func (b *Brain) ReadFile(name string) string {

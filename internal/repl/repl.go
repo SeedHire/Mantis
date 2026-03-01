@@ -23,6 +23,7 @@ import (
 	"github.com/seedhire/mantis/internal/embeddings"
 	"github.com/seedhire/mantis/internal/nl"
 	"github.com/seedhire/mantis/internal/ollama"
+	"github.com/seedhire/mantis/internal/pipeline"
 	"github.com/seedhire/mantis/internal/router"
 	"github.com/seedhire/mantis/internal/session"
 	"github.com/seedhire/mantis/internal/setup"
@@ -123,10 +124,10 @@ func Run(cfg Config) error {
 	}
 
 	// Load skills — size budget scales with intent tier (applied per-turn below).
-	// Pre-load at max budget; we'll cap per tier when rebuilding the prompt each turn.
-	skillsContext := b.LoadSkills(8000)
-	if skillsContext != "" {
-		fmt.Printf("%s● skills loaded%s\n", colorGold, colorReset)
+	// We only keep the skill count here; actual content is loaded per-turn
+	// using LoadSkillsForTask so the most relevant skills come first.
+	if n := b.SkillCount(); n > 0 {
+		fmt.Printf("%s● %d skills loaded%s\n", colorGold, n, colorReset)
 	}
 
 	// Semantic embeddings — optional, used for memory retrieval.
@@ -164,7 +165,7 @@ func Run(cfg Config) error {
 	}
 
 	// Conversation history — start with a default system prompt (will be rebuilt per-turn with tier context).
-	systemPrompt := buildSystemPrompt(brainContext, skillsContext, router.TierCode)
+	systemPrompt := buildSystemPrompt(brainContext, b.LoadSkillsForTask("implement", 20000), router.TierCode)
 	messages := []interface{}{
 		ollama.Message{Role: "system", Content: systemPrompt},
 	}
@@ -262,15 +263,16 @@ func Run(cfg Config) error {
 		}
 		model := router.ModelFor(intent.Tier)
 		turn++
-		showRouting(intent, model, turn)
+		showRouting(intent, model, turn, pipeline.ShouldRun(intent, input))
 		printSep()
 
 		// Update system prompt for this tier's reasoning depth.
-		// Cap skills context size by tier to avoid overloading small models.
-		tierSkills := skillsContext
-		if intent.Tier <= router.TierFast && len(tierSkills) > 1500 {
-			tierSkills = tierSkills[:1500] + "…"
+		// Load skills relevant to the detected task type; budget scales with tier.
+		skillsBudget := 20000 // chars: ~4–5 priority skills
+		if intent.Tier <= router.TierFast {
+			skillsBudget = 4000 // ~1 skill for trivial/fast turns
 		}
+		tierSkills := b.LoadSkillsForTask(string(intent.TaskType), skillsBudget)
 		tierPrompt := buildSystemPrompt(brainContext, tierSkills, intent.Tier)
 		if len(messages) > 0 {
 			messages[0] = ollama.Message{Role: "system", Content: tierPrompt}
@@ -341,6 +343,44 @@ func Run(cfg Config) error {
 
 		// Proactive context compression — compress old turns before they cause overflow.
 		messages = compressIfNeeded(messages, client)
+
+		// ── Multi-stage SWE pipeline for complex build/implement requests ─────
+		// Triggered before the single-model path so complex tasks get:
+		//   plan (reason model) → code + tests (code model, parallel)
+		if pipeline.ShouldRun(intent, input) {
+			pipelineCtx, pipelineCancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			pRes, pErr := pipeline.Run(
+				pipelineCtx, client, input,
+				buildSystemPrompt(brainContext, tierSkills, intent.Tier),
+				pipeline.Options{AvailableModels: availableModels},
+			)
+			pipelineCancel()
+
+			if pErr != nil {
+				fmt.Printf("%s  [pipeline failed: %v — falling back to single model]%s\n\n",
+					colorRed, pErr, colorReset)
+				// Fall through to single-model path below.
+			} else {
+				totalTok := pRes.PromptTok + pRes.ComplTok
+				fmt.Printf("%s◈ Mantis%s %s[pipeline · plan→code+tests · %d tokens]%s\n",
+					colorCopper+colorBold, colorReset, colorDim, totalTok, colorReset)
+				renderResponse(pRes.Combined)
+				if wf := extractAndWriteFiles(pRes.Combined, root); len(wf) > 0 {
+					printWrittenFiles(wf)
+				}
+				messages = append(messages, ollama.Message{Role: "assistant", Content: pRes.Combined})
+				sess.Add(model, intent.Tier, pRes.PromptTok, pRes.ComplTok, hasImage)
+				if warn := usageTracker.Add(totalTok, true, hasImage); warn != "" {
+					fmt.Printf("%s%s%s\n\n", colorRed, warn, colorReset)
+				}
+				if pRes.PromptTok > 8000 {
+					sess.WarnWaste("large prompt — use /file for specific files, not full directories")
+				}
+				continue
+			}
+		}
+
+		// ── Single-model path (simple queries + pipeline fallback) ────────────
 
 		// Multi-pass reasoning for complex queries (Reason/Heavy tiers).
 		// Pass 1: silent analysis. Pass 2: solution informed by analysis.
@@ -450,7 +490,7 @@ func runOnce(cfg Config, client *ollama.Client, sess *session.Session,
 		intent.Tier = parseTier(cfg.ForceTier)
 	}
 	model := router.ModelFor(intent.Tier)
-	showRouting(intent, model, 1)
+	showRouting(intent, model, 1, pipeline.ShouldRun(intent, cfg.InitialQuery))
 
 	var toolCtx string
 	if intent.NeedsGraph && dispatcher != nil {
@@ -947,7 +987,7 @@ func printFooter() {
 	fmt.Printf("\n%s  /help  /cost  /brain  /quit%s\n\n", colorDim, colorReset)
 }
 
-func showRouting(intent router.Intent, model string, turn int) {
+func showRouting(intent router.Intent, model string, turn int, isPipeline bool) {
 	graphTag := ""
 	if intent.NeedsGraph {
 		graphTag = fmt.Sprintf(" %s[graph]%s", colorGold, colorDim)
@@ -958,9 +998,13 @@ func showRouting(intent router.Intent, model string, turn int) {
 	}
 	modelStyled := colorCopper + colorBold + model + colorReset + colorDim
 	turnLabel := fmt.Sprintf("turn %d", turn)
-	if intent.Tier == router.TierMax {
+	switch {
+	case intent.Tier == router.TierMax:
 		fmt.Printf("%s[%s · max · ensemble · multi-model%s%s]%s\n", colorDim, turnLabel, graphTag, confTag, colorReset)
-	} else {
+	case isPipeline:
+		fmt.Printf("%s[%s · pipeline · plan→code+tests · %s%s%s]%s\n",
+			colorDim, turnLabel, modelStyled, graphTag, confTag, colorReset)
+	default:
 		fmt.Printf("%s[%s · %s · %s · %s%s%s]%s\n",
 			colorDim, turnLabel, intent.Tier, intent.TaskType, modelStyled, graphTag, confTag, colorReset)
 	}
