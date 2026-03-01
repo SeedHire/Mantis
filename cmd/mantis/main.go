@@ -912,6 +912,133 @@ var specGapsCmd = &cobra.Command{
 	},
 }
 
+// ── workspace commands ───────────────────────────────────────────────────────
+
+var workspaceCmd = &cobra.Command{
+	Use:   "workspace",
+	Short: "Cross-repo workspace commands",
+	Long:  "Manage and query across multiple repositories defined in mantis.workspace.yml.",
+}
+
+var wsInitCmd = &cobra.Command{
+	Use:   "init [repo-paths...]",
+	Short: "Create mantis.workspace.yml with the given repo paths",
+	Args:  cobra.MinimumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		root, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+
+		var repos []graph.RepoEntry
+		for _, p := range args {
+			alias := filepath.Base(p)
+			repos = append(repos, graph.RepoEntry{Path: p, Alias: alias})
+		}
+
+		if err := graph.InitWorkspaceConfig(root, repos); err != nil {
+			return err
+		}
+		fmt.Printf("✓ Created mantis.workspace.yml with %d repos\n", len(repos))
+		fmt.Println("  Ensure each repo has been indexed with 'mantis init'.")
+		return nil
+	},
+}
+
+var wsFindCmd = &cobra.Command{
+	Use:   "find <symbol>",
+	Short: "Search for a symbol across all workspace repos",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		root, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		ws, err := graph.OpenWorkspace(root)
+		if err != nil {
+			return err
+		}
+		defer ws.Close()
+
+		results, err := ws.FindAcrossRepos(args[0])
+		if err != nil {
+			return err
+		}
+		if len(results) == 0 {
+			fmt.Printf("No matches for %q across workspace\n", args[0])
+			return nil
+		}
+
+		fmt.Printf("%-12s %-10s %-40s %s\n", "REPO", "TYPE", "FILE", "NAME")
+		fmt.Println(strings.Repeat("─", 85))
+		for _, r := range results {
+			fmt.Printf("%-12s %-10s %-40s %s\n",
+				r.Repo, string(r.Node.Type), truncPath(r.Node.FilePath, 40), r.Node.Name)
+		}
+		return nil
+	},
+}
+
+var wsImpactCmd = &cobra.Command{
+	Use:   "impact <symbol>",
+	Short: "Trace impact of a symbol change across all repos",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		root, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		ws, err := graph.OpenWorkspace(root)
+		if err != nil {
+			return err
+		}
+		defer ws.Close()
+
+		results, err := ws.ImpactAcrossRepos(args[0], 5)
+		if err != nil {
+			return err
+		}
+		if len(results) == 0 {
+			fmt.Printf("No impact found for %q across workspace\n", args[0])
+			return nil
+		}
+
+		fmt.Printf("Impact of changing %q:\n\n", args[0])
+		fmt.Printf("%-12s %-8s %-10s %s\n", "REPO", "DEPTH", "RELATION", "FILE")
+		fmt.Println(strings.Repeat("─", 80))
+		for _, r := range results {
+			fmt.Printf("%-12s %-8d %-10s %s\n",
+				r.Repo, r.Depth, r.Relation, truncPath(r.Node.FilePath, 50))
+		}
+		return nil
+	},
+}
+
+var wsStatsCmd = &cobra.Command{
+	Use:   "stats",
+	Short: "Show statistics for each repo in the workspace",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		root, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		ws, err := graph.OpenWorkspace(root)
+		if err != nil {
+			return err
+		}
+		defer ws.Close()
+
+		stats := ws.GetStats()
+		fmt.Printf("%-15s %8s %8s %8s\n", "REPO", "FILES", "SYMBOLS", "EDGES")
+		fmt.Println(strings.Repeat("─", 45))
+		for _, s := range stats {
+			fmt.Printf("%-15s %8d %8d %8d\n", s.Repo, s.Files, s.Symbols, s.Edges)
+		}
+		fmt.Printf("\nRepos: %d\n", len(stats))
+		return nil
+	},
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 func openDB(root string) (*graph.DB, error) {
@@ -991,7 +1118,9 @@ func init() {
 	rootCmd.Flags().IntVar(&replBudget, "budget", 0, "Max tokens for this session (0 = unlimited)")
 	rootCmd.Flags().StringVar(&replImage, "image", "", "Image file path for multimodal input")
 
-	rootCmd.AddCommand(initCmd, contextCmd, watchCmd, findCmd, impactCmd, deadCmd, circularCmd, graphCmd, lintCmd, tuiCmd, handoffCmd, hotspotsCmd, riskyCmd, couplingCmd, intentCmd, todosCmd, specGapsCmd)
+	rootCmd.AddCommand(initCmd, contextCmd, watchCmd, findCmd, impactCmd, deadCmd, circularCmd, graphCmd, lintCmd, tuiCmd, handoffCmd, hotspotsCmd, riskyCmd, couplingCmd, intentCmd, todosCmd, specGapsCmd, workspaceCmd)
+
+	workspaceCmd.AddCommand(wsInitCmd, wsFindCmd, wsImpactCmd, wsStatsCmd)
 
 	hotspotsCmd.Flags().IntVar(&temporalDays, "days", 90, "Look-back period in days")
 	riskyCmd.Flags().IntVar(&temporalDays, "days", 90, "Look-back period in days")

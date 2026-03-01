@@ -202,61 +202,72 @@ return ""
 }
 
 func pickBySize(available []ollama.ModelInfo, tier Tier) string {
-if len(available) == 0 {
-return ""
-}
-buckets := [5][]ollama.ModelInfo{} // [0]=trivial [1]=fast [2]=code [3]=reason [4]=heavy
-for _, m := range available {
-switch {
-case m.Size <= trivialMax:
-buckets[0] = append(buckets[0], m)
-case m.Size <= fastMax:
-buckets[1] = append(buckets[1], m)
-case m.Size <= codeMax:
-buckets[2] = append(buckets[2], m)
-case m.Size <= reasonMax:
-buckets[3] = append(buckets[3], m)
-default:
-buckets[4] = append(buckets[4], m)
-}
-}
-pick := func(b []ollama.ModelInfo, largest bool) string {
-if len(b) == 0 {
-return ""
-}
-best := b[0]
-for _, m := range b[1:] {
-if (largest && m.Size > best.Size) || (!largest && m.Size < best.Size) {
-best = m
-}
-}
-return best.Name
-}
-switch tier {
-case TierTrivial:
-if m := pick(buckets[0], false); m != "" { return m }
-return pick(buckets[1], false)
-case TierFast:
-if m := pick(buckets[1], true); m != "" { return m }
-return pick(buckets[0], true)
-case TierCode:
-if m := pick(buckets[2], true); m != "" { return m }
-return pick(buckets[1], true)
-case TierReason:
-if m := pick(buckets[3], true); m != "" { return m }
-return pick(buckets[2], true)
-case TierHeavy, TierMax:
-if m := pick(buckets[4], true); m != "" { return m }
-return pick(buckets[3], true)
-case TierVision:
-for _, m := range available {
-n := strings.ToLower(m.Name)
-if strings.Contains(n, "vl") || strings.Contains(n, "vision") || strings.Contains(n, "gemini") {
-return m.Name
-}
-}
-}
-return available[0].Name
+	if len(available) == 0 {
+		return ""
+	}
+	buckets := [5][]ollama.ModelInfo{} // [0]=trivial [1]=fast [2]=code [3]=reason [4]=heavy
+	for _, m := range available {
+		switch {
+		case m.Size <= trivialMax:
+			buckets[0] = append(buckets[0], m)
+		case m.Size <= fastMax:
+			buckets[1] = append(buckets[1], m)
+		case m.Size <= codeMax:
+			buckets[2] = append(buckets[2], m)
+		case m.Size <= reasonMax:
+			buckets[3] = append(buckets[3], m)
+		default:
+			buckets[4] = append(buckets[4], m)
+		}
+	}
+	pick := func(b []ollama.ModelInfo, largest bool) string {
+		if len(b) == 0 {
+			return ""
+		}
+		best := b[0]
+		for _, m := range b[1:] {
+			if (largest && m.Size > best.Size) || (!largest && m.Size < best.Size) {
+				best = m
+			}
+		}
+		return best.Name
+	}
+	// For speed tiers, prefer quantized variants for faster inference.
+	pickQuantized := func(b []ollama.ModelInfo) string {
+		for _, m := range b {
+			if isQuantized(m.Name) {
+				return m.Name
+			}
+		}
+		return ""
+	}
+	switch tier {
+	case TierTrivial:
+		if m := pickQuantized(buckets[0]); m != "" { return m }
+		if m := pick(buckets[0], false); m != "" { return m }
+		return pick(buckets[1], false)
+	case TierFast:
+		if m := pickQuantized(buckets[1]); m != "" { return m }
+		if m := pick(buckets[1], true); m != "" { return m }
+		return pick(buckets[0], true)
+	case TierCode:
+		if m := pick(buckets[2], true); m != "" { return m }
+		return pick(buckets[1], true)
+	case TierReason:
+		if m := pick(buckets[3], true); m != "" { return m }
+		return pick(buckets[2], true)
+	case TierHeavy, TierMax:
+		if m := pick(buckets[4], true); m != "" { return m }
+		return pick(buckets[3], true)
+	case TierVision:
+		for _, m := range available {
+			n := strings.ToLower(m.Name)
+			if strings.Contains(n, "vl") || strings.Contains(n, "vision") || strings.Contains(n, "gemini") {
+				return m.Name
+			}
+		}
+	}
+	return available[0].Name
 }
 
 func ModelFor(tier Tier) string {
@@ -268,6 +279,26 @@ return defaultModels[tier]
 
 func PreferredModels(tier Tier) []string { return preferredModels[tier] }
 func SetResolved(tier Tier, model string) { resolvedModels[tier] = model }
+
+// ResolvedSummary returns a human-readable mapping of tier → resolved model.
+func ResolvedSummary() map[string]string {
+	summary := make(map[string]string)
+	for _, tier := range []Tier{TierTrivial, TierFast, TierCode, TierReason, TierHeavy, TierMax, TierVision} {
+		summary[tier.String()] = ModelFor(tier)
+	}
+	return summary
+}
+
+// isQuantized returns true if the model name suggests a quantized variant (q4, q5, q8, etc).
+func isQuantized(name string) bool {
+	lower := strings.ToLower(name)
+	for _, q := range []string{":q4", ":q5", ":q6", ":q8", "-q4", "-q5", "-q8", "gguf"} {
+		if strings.Contains(lower, q) {
+			return true
+		}
+	}
+	return false
+}
 
 // ── Classifier ────────────────────────────────────────────────────────────────
 

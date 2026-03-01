@@ -105,6 +105,9 @@ func Run(cfg Config) error {
 		if err == nil && len(models) > 0 {
 			availableModels = models
 			router.ResolveAll(models)
+			for tier, model := range router.ResolvedSummary() {
+				fmt.Printf("  %s%-8s%s → %s\n", colorGold, tier, colorReset, model)
+			}
 		}
 	}
 

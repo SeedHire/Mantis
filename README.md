@@ -21,6 +21,10 @@ That's it. You're in.
 | Multimodal | ✓ | ✗ | ✓ |
 | Persistent memory | ✗ | ✗ | ✓ |
 | Knows your codebase | Partial | Partial | **Yes** |
+| Cross-repo graph | ✗ | ✗ | ✓ |
+| Hallucination check | ✗ | ✗ | ✓ |
+| Convention enforcement | ✗ | ✗ | ✓ |
+| Semantic embeddings | ✗ | ✗ | ✓ |
 | Token waste tracker | ✗ | ✗ | ✓ |
 | Local / offline | ✗ | ✗ | ✓ |
 
@@ -71,38 +75,83 @@ mantis --image screenshot.png   # multimodal — paste a screenshot
 
 ## How it works
 
-Mantis runs a **3-tier model router** — every message is classified and sent to the right model:
+Mantis runs a **7-tier model router** — every message is classified by intent and sent to the best available model:
 
-| Tier | Models | Used for |
+| Tier | Used for | Example models |
 |---|---|---|
-| Fast | qwen2.5-coder:1.5b | simple questions, completions |
-| Smart | qwen2.5-coder:7b | bug fixes, refactors (default) |
-| Heavy | llama3.3:70b | system design, multi-file changes |
-| Vision | llava:34b | screenshots, diagrams |
+| Trivial | one-liners, definitions | gemma3:4b |
+| Fast | short code questions | gemma3:12b |
+| Code | implement, debug, refactor | devstral-small-2:24b |
+| Reason | architecture, deep analysis | kimi-k2-thinking |
+| Heavy | multi-file, complex design | devstral-2:123b |
+| Max | ensemble: 3 specialists + synthesis | (auto-selected trio) |
+| Vision | screenshots, diagrams | qwen3-vl |
+
+Models are auto-resolved from your Ollama model list — no manual config needed. Quantized variants are preferred for speed tiers.
 
 ### Project memory
 On first run, Mantis creates `.mantis/` in your project:
 ```
 .mantis/
 ├── BRAIN.md          ← rolling project summary, updated each session
-├── CONVENTIONS.md    ← your architecture rules
+├── CONVENTIONS.md    ← your architecture rules (auto-enforced)
 ├── DECISIONS.log     ← timestamped decisions
 ├── REJECTED.md       ← approaches tried and failed (AI won't repeat them)
-└── GROUND_TRUTH.json ← live function signatures — prevents hallucination
+├── GROUND_TRUTH.json ← live function signatures — prevents hallucination
+└── embeddings.db     ← semantic memory (Ollama + SQLite vector search)
 ```
 
-All plain text. Human-editable. Committable.
+All plain text (except embeddings.db). Human-editable. Committable.
 
-### Codebase intelligence (optional, unlocks automatically)
-If you run `mantis init` in a project, Mantis builds a live AST dependency graph.
-The AI then automatically:
-- Bundles only the relevant files for each question (not your whole repo)
-- Runs impact analysis before proposing any edit
+### Codebase intelligence
+Run `mantis init` once to build a live AST dependency graph. The AI then:
+- Bundles only the relevant files for each question (multi-signal scoring)
+- Runs impact analysis before proposing edits
 - Checks AI output against your real function signatures
 - Enforces your architecture rules on every response
+- Uses multi-pass reasoning for complex questions (analysis → solution)
+- Retrieves semantically relevant context from past sessions
 
 ```bash
 mantis init    # index the project (run once)
+```
+
+---
+
+## CLI Commands
+
+### Intelligence
+```bash
+mantis hotspots            # files with highest churn (change frequency)
+mantis risky               # high-risk files: churn × many authors
+mantis coupling [path]     # files that always change together
+mantis intent <path>       # commit intent timeline (feat/fix/refactor)
+mantis todos               # scan for TODO/FIXME/HACK across codebase
+mantis spec-gaps           # detect mismatches between commit intent and code
+```
+
+### Graph analysis
+```bash
+mantis init                # build dependency graph
+mantis find <symbol>       # locate a function/class/type
+mantis impact <symbol>     # trace what depends on a symbol
+mantis dead                # find unreferenced code
+mantis circular            # detect circular dependencies
+mantis graph               # visualize dependency graph
+mantis lint                # check architecture rules
+```
+
+### Cross-repo workspace
+```bash
+mantis workspace init ~/api ~/frontend ~/shared-lib
+mantis workspace find <symbol>    # search across all repos
+mantis workspace impact <symbol>  # cross-repo impact analysis
+mantis workspace stats            # per-repo statistics
+```
+
+### Session management
+```bash
+mantis handoff             # generate HANDOFF.md for async collaboration
 ```
 
 ---
@@ -115,7 +164,7 @@ At the end of every session:
 │  SESSION SUMMARY — mantis                    │
 ├──────────────────────────────────────────────┤
 │  Total tokens      14,832                    │
-│  Route  fast×3  smart×7  heavy×1             │
+│  Route  fast×3  code×7  heavy×1              │
 ├──────────────────────────────────────────────┤
 │  WHAT THIS WOULD HAVE COST                   │
 │  GPT-4o             $0.22                    │
@@ -130,24 +179,25 @@ At the end of every session:
 ## Project structure
 
 ```
-cmd/mantis/          entry point
+cmd/mantis/          entry point + all CLI commands
 internal/
-  ollama/            Ollama Cloud + local client (streaming)
-  router/            3-tier intent classifier + model selector
-  repl/              interactive AI session (the main product)
+  ollama/            Ollama Cloud + local client (streaming + embeddings)
+  router/            7-tier intent classifier + model selector + task templates
+  repl/              interactive AI session (multi-pass reasoning, compression)
   brain/             persistent project memory (.mantis/)
   truth/             live function signature index (GROUND_TRUTH.json)
-  verify/            hallucination checker
+  verify/            hallucination checker + convention enforcement
   session/           token tracking + cost report
   usage/             free-tier usage tracking
   nl/                NLP dispatcher → codebase intelligence tools
-  graph/             AST dependency graph (SQLite)
-  intel/             impact, find, dead code, circular deps
+  graph/             AST dependency graph (SQLite) + cross-repo workspace
+  intel/             temporal analysis, intent gaps, impact, dead code
   parser/            tree-sitter parsers (Go, TypeScript, Python)
   linter/            architecture rule enforcement
   tui/               Bubbletea dashboard
-  context/           surgical context bundler
+  context/           surgical context bundler (multi-signal scoring)
   viz/               D3 graph visualizer
+  embeddings/        semantic memory (Ollama embed + SQLite cosine search)
 ```
 
 ---
