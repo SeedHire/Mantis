@@ -108,12 +108,4 @@ brews:
     install: |
       bin.install "mantis"
 
-scoops:
-  - name: mantis
-    repository:
-      owner: seedhire
-      name: scoop-bucket
-      token: "{{ .Env.SCOOP_BUCKET_TOKEN }}"
-    homepage: "https://github.com/seedhire/mantis"
-    description: "Local-first codebase intelligence engine"
-    license: MIT
+
