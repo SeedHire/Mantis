@@ -225,3 +225,47 @@ func (c *Client) Ping(ctx context.Context) error {
 	resp.Body.Close()
 	return nil
 }
+
+// EmbedRequest is the payload for /api/embed.
+type EmbedRequest struct {
+	Model string `json:"model"`
+	Input string `json:"input"`
+}
+
+// EmbedResponse holds the embedding vector returned by Ollama.
+type EmbedResponse struct {
+	Embeddings [][]float64 `json:"embeddings"`
+}
+
+// Embed generates an embedding vector for the given text using the specified model.
+func (c *Client) Embed(ctx context.Context, model, text string) ([]float64, error) {
+	body, _ := json.Marshal(EmbedRequest{Model: model, Input: text})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/embed", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("embed: %s — %s", resp.Status, string(b))
+	}
+
+	var result EmbedResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	if len(result.Embeddings) == 0 || len(result.Embeddings[0]) == 0 {
+		return nil, fmt.Errorf("embed: empty embedding returned")
+	}
+	return result.Embeddings[0], nil
+}

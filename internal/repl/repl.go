@@ -20,6 +20,7 @@ import (
 	"golang.org/x/term"
 	"github.com/charmbracelet/glamour"
 	"github.com/seedhire/mantis/internal/brain"
+	"github.com/seedhire/mantis/internal/embeddings"
 	"github.com/seedhire/mantis/internal/nl"
 	"github.com/seedhire/mantis/internal/ollama"
 	"github.com/seedhire/mantis/internal/router"
@@ -118,6 +119,22 @@ func Run(cfg Config) error {
 		fmt.Printf("%s● project memory ready%s\n", colorGold, colorReset)
 	}
 
+	// Semantic embeddings — optional, used for memory retrieval.
+	var embStore *embeddings.Store
+	mantisDir := filepath.Join(root, ".mantis")
+	if es, err := embeddings.Open(mantisDir, client); err == nil {
+		embStore = es
+		defer embStore.Close()
+		// Background index brain files on first run.
+		if embStore.Count() == 0 {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+				defer cancel()
+				_ = embStore.IndexBrainFiles(ctx, mantisDir)
+			}()
+		}
+	}
+
 	// NL dispatcher — codebase intelligence tools, called automatically.
 	dispatcher := nl.New(root)
 	if dispatcher != nil {
@@ -185,7 +202,7 @@ func Run(cfg Config) error {
 	go func() {
 		<-sigCh
 		fmt.Println()
-		endSession(sess, b, messages)
+		endSession(sess, b, messages, embStore)
 		rl.Close()
 		os.Exit(0)
 	}()
@@ -261,6 +278,25 @@ func Run(cfg Config) error {
 		if tmpl := router.TaskTemplate(intent.TaskType); tmpl != "" {
 			userContent = tmpl + "\n\n" + input
 		}
+
+		// Semantic memory retrieval — find relevant past context.
+		if embStore != nil && embStore.Count() > 0 {
+			embCtx, embCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if chunks, err := embStore.Search(embCtx, input, 2); err == nil && len(chunks) > 0 {
+				var memBuf strings.Builder
+				memBuf.WriteString("\n[retrieved_memory]\n")
+				for _, c := range chunks {
+					if c.Score > 0.5 {
+						memBuf.WriteString(fmt.Sprintf("(%s, relevance %.0f%%): %s\n", c.Source, c.Score*100, c.Text))
+					}
+				}
+				if mem := memBuf.String(); len(mem) > 25 {
+					userContent = userContent + "\n" + mem
+				}
+			}
+			embCancel()
+		}
+
 		if toolCtx != "" {
 			userContent = toolCtx + "\nUser question: " + userContent
 		}
@@ -376,7 +412,7 @@ func Run(cfg Config) error {
 		}
 	}
 
-	endSession(sess, b, messages)
+	endSession(sess, b, messages, nil)
 	return nil
 }
 
@@ -644,7 +680,7 @@ func readFileSnippet(path string, maxChars int) string {
 	return s
 }
 
-func endSession(sess *session.Session, b *brain.Brain, messages []interface{}) {
+func endSession(sess *session.Session, b *brain.Brain, messages []interface{}, embStore *embeddings.Store) {
 	printSep()
 	fmt.Println(sess.Report())
 	printSep()
@@ -664,6 +700,16 @@ func endSession(sess *session.Session, b *brain.Brain, messages []interface{}) {
 	mantisDir := filepath.Join(root, ".mantis")
 	if err := sess.Save(mantisDir, topic, summary); err == nil {
 		fmt.Printf("%s● session saved%s\n", colorDim, colorReset)
+	}
+
+	// Embed session summary for semantic retrieval in future sessions.
+	if embStore != nil && summary != "" {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			id := fmt.Sprintf("session-%d", time.Now().Unix())
+			_ = embStore.Add(ctx, id, "session", topic+"\n"+summary)
+		}()
 	}
 }
 
@@ -1305,6 +1351,6 @@ func runWithScanner(cfg Config, client *ollama.Client, sess *session.Session,
 		_ = runOnce(cfg, client, sess, b, dispatcher, messages, tw, ut)
 		cfg.InitialQuery = ""
 	}
-	endSession(sess, b, messages)
+	endSession(sess, b, messages, nil)
 	return nil
 }
