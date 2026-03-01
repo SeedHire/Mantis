@@ -1,0 +1,11 @@
+version: 1
+
+rules:
+  - name: no-circular-dependencies
+    type: built_in
+    severity: error
+
+  - name: max-file-dependencies
+    type: built_in
+    threshold: 20
+    severity: warning

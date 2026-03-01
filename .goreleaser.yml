@@ -1,0 +1,116 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: mantis
+
+before:
+  hooks:
+    - go mod tidy
+    - go vet ./...
+
+builds:
+  - id: mantis
+    main: ./cmd/mantis
+    binary: mantis
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+
+archives:
+  - id: mantis
+    name_template: "mantis_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - LICENSE
+      - .mantisrc.yml
+
+checksum:
+  name_template: "mantis_{{ .Version }}_checksums.txt"
+  algorithm: sha256
+
+release:
+  github:
+    owner: seedhire
+    name: mantis
+  name_template: "v{{ .Version }}"
+  header: |
+    ## Mantis v{{ .Version }}
+
+    Local-first codebase intelligence engine.
+
+    **Install:**
+    ```bash
+    # macOS / Linux (curl)
+    curl -fsSL https://raw.githubusercontent.com/seedhire/mantis/main/install.sh | sh
+
+    # Homebrew
+    brew install mantis-dev/tap/mantis
+
+    # Go
+    go install github.com/seedhire/mantis/cmd/mantis@latest
+    ```
+  footer: |
+    **Full Changelog**: https://github.com/seedhire/mantis/compare/{{ .PreviousTag }}...{{ .Tag }}
+
+changelog:
+  use: github
+  sort: asc
+  groups:
+    - title: "🚀 New Features"
+      regexp: "^feat"
+      order: 0
+    - title: "🐛 Bug Fixes"
+      regexp: "^fix"
+      order: 1
+    - title: "📦 Other"
+      order: 999
+  filters:
+    exclude:
+      - "^docs"
+      - "^chore"
+      - "^ci"
+      - typo
+
+brews:
+  - name: mantis
+    ids:
+      - mantis
+    repository:
+      owner: seedhire
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/seedhire/mantis"
+    description: "Local-first codebase intelligence engine — dependency graph, LLM context, architecture lint"
+    license: "MIT"
+    test: |
+      system "#{bin}/mantis", "--help"
+    install: |
+      bin.install "mantis"
+
+scoop:
+  - name: mantis
+    repository:
+      owner: seedhire
+      name: scoop-bucket
+      token: "{{ .Env.SCOOP_BUCKET_TOKEN }}"
+    homepage: "https://github.com/seedhire/mantis"
+    description: "Local-first codebase intelligence engine"
+    license: MIT

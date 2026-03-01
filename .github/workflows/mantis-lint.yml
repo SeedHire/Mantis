@@ -1,0 +1,21 @@
+name: Architecture Lint
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: Install Mantis
+        run: go install github.com/seedhire/mantis/cmd/mantis@latest
+      - name: Build graph
+        run: mantis init --lang ts
+      - name: Architecture check
+        run: mantis lint --strict --ci

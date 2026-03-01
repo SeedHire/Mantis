@@ -1,0 +1,9 @@
+.mantis/
+bin/
+*.exe
+*.test
+vscode-extension/node_modules/
+vscode-extension/out/
+archive/
+.DS_Store
+supabase/.temp/

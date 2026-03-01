@@ -1,0 +1,156 @@
+// Package session tracks token usage for a single Mantis chat session
+// and produces an end-of-session cost comparison report.
+package session
+
+import (
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/seedhire/mantis/internal/router"
+)
+
+// Turn records one exchange in a session.
+type Turn struct {
+	Model            string
+	Tier             router.Tier
+	PromptTokens     int
+	CompletionTokens int
+	HasImage         bool
+	Timestamp        time.Time
+}
+
+// Session tracks the whole conversation.
+type Session struct {
+	StartTime time.Time
+	Turns     []Turn
+	Warnings  []string // token waste flags
+}
+
+// New creates a fresh session.
+func New() *Session {
+	return &Session{StartTime: time.Now()}
+}
+
+// Add records a completed turn.
+func (s *Session) Add(model string, tier router.Tier, prompt, completion int, hasImage bool) {
+	s.Turns = append(s.Turns, Turn{
+		Model:            model,
+		Tier:             tier,
+		PromptTokens:     prompt,
+		CompletionTokens: completion,
+		HasImage:         hasImage,
+		Timestamp:        time.Now(),
+	})
+}
+
+// WarnWaste appends a token waste warning shown in the final report.
+func (s *Session) WarnWaste(msg string) {
+	s.Warnings = append(s.Warnings, msg)
+}
+
+// Totals returns aggregate token counts.
+func (s *Session) Totals() (prompt, completion, total int) {
+	for _, t := range s.Turns {
+		prompt += t.PromptTokens
+		completion += t.CompletionTokens
+	}
+	total = prompt + completion
+	return
+}
+
+// TierCounts returns how many turns ran at each tier.
+func (s *Session) TierCounts() map[router.Tier]int {
+	counts := map[router.Tier]int{}
+	for _, t := range s.Turns {
+		counts[t.Tier]++
+	}
+	return counts
+}
+
+// imageCalls returns the number of vision turns.
+func (s *Session) imageCalls() int {
+	n := 0
+	for _, t := range s.Turns {
+		if t.HasImage {
+			n++
+		}
+	}
+	return n
+}
+
+// pricing constants in USD per 1k tokens (approximate, 2025).
+const (
+	gpt4oInputPer1k    = 0.0025
+	gpt4oOutputPer1k   = 0.010
+	sonnetInputPer1k   = 0.003
+	sonnetOutputPer1k  = 0.015
+	opusInputPer1k     = 0.015
+	opusOutputPer1k    = 0.075
+)
+
+func estimateCost(promptTok, completionTok int, inputRate, outputRate float64) float64 {
+	return float64(promptTok)/1000*inputRate + float64(completionTok)/1000*outputRate
+}
+
+// Report renders the ASCII session summary box.
+func (s *Session) Report() string {
+	prompt, completion, total := s.Totals()
+	tiers := s.TierCounts()
+	images := s.imageCalls()
+	duration := time.Since(s.StartTime).Round(time.Second)
+
+	gpt4oCost := estimateCost(prompt, completion, gpt4oInputPer1k, gpt4oOutputPer1k)
+	sonnetCost := estimateCost(prompt, completion, sonnetInputPer1k, sonnetOutputPer1k)
+	opusCost := estimateCost(prompt, completion, opusInputPer1k, opusOutputPer1k)
+
+	w := 54
+	line := strings.Repeat("─", w)
+
+	var sb strings.Builder
+	sb.WriteString("\n")
+	sb.WriteString("╭" + line + "╮\n")
+	sb.WriteString(padLine("  SESSION SUMMARY — mantis", w) + "\n")
+	sb.WriteString("├" + line + "┤\n")
+	sb.WriteString(padLine(fmt.Sprintf("  Duration          %s", duration), w) + "\n")
+	sb.WriteString(padLine(fmt.Sprintf("  Total tokens      %s", formatTokens(total)), w) + "\n")
+	sb.WriteString(padLine(fmt.Sprintf("  Turns             %d", len(s.Turns)), w) + "\n")
+	if images > 0 {
+		sb.WriteString(padLine(fmt.Sprintf("  Vision calls      %d", images), w) + "\n")
+	}
+	sb.WriteString(padLine(fmt.Sprintf("  Route  trivial×%d  fast×%d  code×%d  reason×%d  heavy×%d  max×%d",
+		tiers[router.TierTrivial], tiers[router.TierFast], tiers[router.TierCode],
+		tiers[router.TierReason], tiers[router.TierHeavy], tiers[router.TierMax]), w) + "\n")
+	sb.WriteString("├" + line + "┤\n")
+	sb.WriteString(padLine("  WHAT THIS WOULD HAVE COST WITH PAID APIs", w) + "\n")
+	sb.WriteString(padLine(fmt.Sprintf("  GPT-4o             $%.2f", gpt4oCost), w) + "\n")
+	sb.WriteString(padLine(fmt.Sprintf("  Claude Sonnet      $%.2f", sonnetCost), w) + "\n")
+	sb.WriteString(padLine(fmt.Sprintf("  Claude Opus        $%.2f", opusCost), w) + "\n")
+	sb.WriteString(padLine("  Mantis cost        $0.00 ✓", w) + "\n")
+
+	if len(s.Warnings) > 0 {
+		sb.WriteString("├" + line + "┤\n")
+		sb.WriteString(padLine("  TOKEN WASTE DETECTED 🟡", w) + "\n")
+		for _, w2 := range s.Warnings {
+			sb.WriteString(padLine("  · "+w2, w) + "\n")
+		}
+	}
+
+	sb.WriteString("╰" + line + "╯\n")
+	return sb.String()
+}
+
+func padLine(s string, width int) string {
+	runes := []rune(s)
+	if len(runes) >= width {
+		return "│" + string(runes[:width]) + "│"
+	}
+	return "│" + s + strings.Repeat(" ", width-len(runes)) + "│"
+}
+
+func formatTokens(n int) string {
+	if n >= 1000 {
+		return fmt.Sprintf("%d,%.3d", n/1000, n%1000)
+	}
+	return fmt.Sprintf("%d", n)
+}
