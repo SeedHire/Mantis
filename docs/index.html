@@ -712,17 +712,17 @@
       <div class="step">
         <div class="step-num">1</div>
         <h3>Install</h3>
-        <p>Run <code>curl -fsSL .../install.sh | sh</code> or <code>brew install seedhire/tap/mantis</code>. One binary, no dependencies.</p>
+        <p>Run <code>brew install seedhire/tap/mantis</code> or <code>curl -fsSL .../install.sh | sh</code>. One binary, no dependencies.</p>
       </div>
       <div class="step">
         <div class="step-num">2</div>
         <h3>Sign in with GitHub</h3>
-        <p>Mantis opens a browser tab on first run. One click to authorize — no extra account, no billing.</p>
+        <p>Mantis opens a browser tab on first run. One click to authorize — no extra account, no billing setup.</p>
       </div>
       <div class="step">
         <div class="step-num">3</div>
-        <h3>Start coding</h3>
-        <p>Run <code>mantis</code> in any project. Optionally run <code>mantis init</code> to enable codebase intelligence.</p>
+        <h3>Index your project</h3>
+        <p>Run <code>mantis init</code> once in your repo to build the dependency graph. Then just run <code>mantis</code> — it knows your codebase.</p>
       </div>
     </div>
   </div>
@@ -734,17 +734,48 @@
     <div class="memory-layout">
       <div>
         <p class="section-label">Project Memory</p>
-        <h2 class="section-title">It remembers what you built.</h2>
-        <p class="section-sub">After every session Mantis updates <code style="color:var(--copper-lt)">.mantis/BRAIN.md</code> with your decisions, patterns, and rejected ideas. Next session it picks up where you left off.</p>
+        <h2 class="section-title">Picks up where you left off.</h2>
+        <p class="section-sub">After every session, Mantis updates <code style="color:var(--copper-lt)">BRAIN.md</code> with what changed, logs your decisions in <code style="color:var(--copper-lt)">DECISIONS.log</code>, and records what failed in <code style="color:var(--copper-lt)">REJECTED.md</code>. The AI reads all of it on startup — so you never repeat a mistake or re-explain your architecture.</p>
       </div>
       <div class="file-tree">
         <div><span class="dir">.mantis/</span></div>
-        <div>&nbsp; <span class="file">BRAIN.md</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← auto-updated</span></div>
-        <div>&nbsp; <span class="file">graph.db</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← dependency graph</span></div>
-        <div>&nbsp; <span class="file">sessions/</span></div>
-        <div>&nbsp; &nbsp; <span class="file">2026-03-01.md</span></div>
-        <div>&nbsp; &nbsp; <span class="file">2026-02-28.md</span></div>
-        <div style="margin-top:.5rem"><span class="dir">.mantisrc.yml</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← your lint rules</span></div>
+        <div>&nbsp; <span class="file">BRAIN.md</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← rolling project summary</span></div>
+        <div>&nbsp; <span class="file">CONVENTIONS.md</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← architecture rules</span></div>
+        <div>&nbsp; <span class="file">DECISIONS.log</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← timestamped decisions</span></div>
+        <div>&nbsp; <span class="file">REJECTED.md</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← approaches that failed</span></div>
+        <div>&nbsp; <span class="file">graph.db</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← AST dependency graph</span></div>
+        <div style="margin-top:.5rem"><span class="dir">.mantisrc.yml</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← CI lint rules</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── What's next ───────────────────────────────────────────────────────── -->
+<section>
+  <div class="container">
+    <p class="section-label">Roadmap</p>
+    <h2 class="section-title">What's coming next.</h2>
+    <p class="section-sub">Actively in development. These ship in the next releases.</p>
+    <div class="steps">
+      <div class="step">
+        <div class="step-num" style="background:rgba(45,212,160,.12);color:var(--success)">→</div>
+        <h3>Chain-of-Thought Reasoning</h3>
+        <p>For complex queries, Mantis will run structured reasoning before answering — showing its thinking, not just the conclusion. Better answers on hard problems.</p>
+      </div>
+      <div class="step">
+        <div class="step-num" style="background:rgba(45,212,160,.12);color:var(--success)">→</div>
+        <h3>Self-Healing Verification</h3>
+        <p>When the hallucination guard flags an invented symbol, Mantis will re-prompt with the real signatures and return a corrected answer — automatically.</p>
+      </div>
+      <div class="step">
+        <div class="step-num" style="background:rgba(45,212,160,.12);color:var(--success)">→</div>
+        <h3>Smart Context Compression</h3>
+        <p>Long conversations stay coherent. Instead of dropping context on overflow, Mantis summarizes older turns and keeps them as compressed memory.</p>
+      </div>
+      <div class="step">
+        <div class="step-num" style="background:rgba(45,212,160,.12);color:var(--success)">→</div>
+        <h3>Session Persistence</h3>
+        <p>Sessions saved to <code>.mantis/sessions/</code>. Next run offers to resume — same context, same thread, zero re-explanation.</p>
       </div>
     </div>
   </div>
