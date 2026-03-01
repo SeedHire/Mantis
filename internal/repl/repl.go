@@ -113,6 +113,7 @@ func Run(cfg Config) error {
 		_ = b.Init()
 	}
 	brainContext := b.Load()
+	conventions := verify.ParseConventions(b.ReadFile("CONVENTIONS.md"))
 	if brainContext != "" {
 		fmt.Printf("%s● project memory ready%s\n", colorGold, colorReset)
 	}
@@ -284,6 +285,9 @@ func Run(cfg Config) error {
 
 		messages = append(messages, userMsg)
 
+		// Proactive context compression — compress old turns before they cause overflow.
+		messages = compressIfNeeded(messages, client)
+
 		// Show spinner while model generates, then render formatted output.
 		stopSpin := startSpinner()
 		streamCtx, streamCancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -351,6 +355,11 @@ func Run(cfg Config) error {
 			} else {
 				fmt.Printf("%s%s%s\n\n", colorRed, vr.Warning, colorReset)
 			}
+		}
+
+		// Check conventions on AI output.
+		if cr := verify.CheckConventions(rb.String(), conventions); !cr.Clean {
+			fmt.Printf("%s%s%s\n", colorRed, cr.Warning, colorReset)
 		}
 
 		if promptTok > 8000 {
@@ -1071,6 +1080,100 @@ func trimToMinimal(messages []interface{}) []interface{} {
 	}
 	out = append(out, recent...)
 	return out
+}
+
+// compressIfNeeded proactively compresses conversation history when it gets too large.
+// Instead of waiting for a 400 error, it summarizes old turns at ~80% capacity.
+// Estimates tokens as len/3.5 (LLaMA-family average for code).
+func compressIfNeeded(messages []interface{}, client *ollama.Client) []interface{} {
+	// Estimate total tokens in conversation.
+	totalChars := 0
+	for _, m := range messages {
+		if msg, ok := m.(ollama.Message); ok {
+			totalChars += len(msg.Content)
+		} else if img, ok := m.(ollama.ImageMessage); ok {
+			totalChars += len(img.Content)
+		}
+	}
+	estimatedTokens := int(float64(totalChars) / 3.5)
+
+	// Threshold: compress when conversation exceeds ~24K tokens (80% of 32K context).
+	// Most Ollama models have 32K-128K context; this is conservative.
+	const compressThreshold = 24000
+	if estimatedTokens < compressThreshold {
+		return messages
+	}
+
+	// Separate system prompt and conversation turns.
+	var sys interface{}
+	var turns []interface{}
+	for _, m := range messages {
+		if msg, ok := m.(ollama.Message); ok && msg.Role == "system" {
+			sys = m
+		} else {
+			turns = append(turns, m)
+		}
+	}
+
+	// Keep last 6 messages (3 user+assistant pairs), summarize the rest.
+	if len(turns) <= 6 {
+		return messages // not enough to compress
+	}
+
+	oldTurns := turns[:len(turns)-6]
+	recentTurns := turns[len(turns)-6:]
+
+	// Build summary of old turns.
+	var summaryInput strings.Builder
+	summaryInput.WriteString("Summarize this conversation in concise bullet points.\n")
+	summaryInput.WriteString("Focus on: decisions made, code changes discussed, open questions, key findings.\n")
+	summaryInput.WriteString("Keep it under 500 words.\n\n")
+	for _, m := range oldTurns {
+		if msg, ok := m.(ollama.Message); ok {
+			role := msg.Role
+			content := msg.Content
+			if len(content) > 500 {
+				content = content[:500] + "…"
+			}
+			summaryInput.WriteString(fmt.Sprintf("[%s]: %s\n\n", role, content))
+		}
+	}
+
+	// Use a fast model for summarization.
+	summaryModel := router.ModelFor(router.TierFast)
+	summaryMsgs := []interface{}{
+		ollama.Message{Role: "system", Content: "You are a conversation summarizer. Output only bullet points."},
+		ollama.Message{Role: "user", Content: summaryInput.String()},
+	}
+
+	var summaryBuf strings.Builder
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	_, _, err := client.StreamChat(ctx, summaryModel, summaryMsgs, nil,
+		func(chunk string) { summaryBuf.WriteString(chunk) })
+	cancel()
+
+	if err != nil || strings.TrimSpace(summaryBuf.String()) == "" {
+		// Summarization failed — fall back to trimToMinimal behavior.
+		return trimToMinimal(messages)
+	}
+
+	fmt.Printf("%s  [compressed %d turns → summary]%s\n", colorDim, len(oldTurns), colorReset)
+
+	// Rebuild: system + summary + recent turns.
+	var compressed []interface{}
+	if sys != nil {
+		compressed = append(compressed, sys)
+	}
+	compressed = append(compressed, ollama.Message{
+		Role:    "user",
+		Content: "[conversation summary]\n" + summaryBuf.String() + "\n[/conversation summary]",
+	})
+	compressed = append(compressed, ollama.Message{
+		Role:    "assistant",
+		Content: "Understood. I have the conversation context. How can I help?",
+	})
+	compressed = append(compressed, recentTurns...)
+	return compressed
 }
 
 func injectFile(path string, messages *[]interface{}) {

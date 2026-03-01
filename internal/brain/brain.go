@@ -263,6 +263,11 @@ func (b *Brain) Exists() bool {
 	return err == nil
 }
 
+// ReadFile returns the raw contents of a brain file by name.
+func (b *Brain) ReadFile(name string) string {
+	return b.readFile(name)
+}
+
 func (b *Brain) readFile(name string) string {
 	data, err := os.ReadFile(filepath.Join(b.dir, name))
 	if err != nil {
