@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <rect width="32" height="32" rx="7" fill="#08090F"/>
+  <!-- copper border ring -->
+  <rect x="1" y="1" width="30" height="30" rx="6.5" fill="none" stroke="#C87941" stroke-width="1.2" opacity="0.6"/>
+  <!-- (o_o) face -->
+  <text x="16" y="14" font-family="monospace" font-size="9" fill="#E8A96A" text-anchor="middle" dominant-baseline="middle">(o_o)</text>
+  <!-- spear -->
+  <text x="16" y="24" font-family="monospace" font-size="7" fill="#C87941" text-anchor="middle" dominant-baseline="middle">=[|||]=</text>
+</svg>
