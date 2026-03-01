@@ -370,6 +370,11 @@ var heavyKeywords = []string{
 "migrate", "explain the whole", "explain all", "codebase",
 "multi-file", "across all", "every file", "full project", "from scratch",
 "plan the", "strategy for",
+// Multi-file project builds
+"build a", "build an", "build me", "create a full", "create an app",
+"clone", "scaffold", "full stack", "full-stack", "entire app",
+"rest api", "graphql api", "microservice", "backend for",
+"set up a", "setup project", "initialize project",
 }
 
 var codeKeywords = []string{

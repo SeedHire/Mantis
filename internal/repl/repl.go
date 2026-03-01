@@ -27,6 +27,7 @@ import (
 	"github.com/seedhire/mantis/internal/router"
 	"github.com/seedhire/mantis/internal/session"
 	"github.com/seedhire/mantis/internal/setup"
+	"github.com/seedhire/mantis/internal/telemetry"
 	"github.com/seedhire/mantis/internal/truth"
 	"github.com/seedhire/mantis/internal/usage"
 	"github.com/seedhire/mantis/internal/verify"
@@ -155,6 +156,15 @@ func Run(cfg Config) error {
 	// Session tracker.
 	sess := session.New()
 	usageTracker := usage.New()
+	tlog := telemetry.New()
+	sessID := fmt.Sprintf("%d", time.Now().UnixMilli())
+	// Attach GitHub user and show telemetry notice once.
+	if creds != nil && creds.GitHubUser != "" {
+		tlog.SetUser(creds.GitHubUser, "v0.3.0")
+	}
+	if !tlog.IsDisabled() {
+		fmt.Printf("%s● telemetry on · /telemetry off to disable%s\n", colorDim, colorReset)
+	}
 
 	// Ground truth — auto-index in background on first run.
 	truthWriter := truth.New(root)
@@ -184,6 +194,8 @@ func Run(cfg Config) error {
 		readline.PcItem("/vision"),
 		readline.PcItem("/reset"),
 		readline.PcItem("/cost"),
+		readline.PcItem("/stats"),
+		readline.PcItem("/telemetry"),
 		readline.PcItem("/brain"),
 		readline.PcItem("/save"),
 		readline.PcItem("/models"),
@@ -213,6 +225,7 @@ func Run(cfg Config) error {
 	go func() {
 		<-sigCh
 		fmt.Println()
+		tlog.Flush()
 		endSession(sess, b, messages, embStore)
 		rl.Close()
 		os.Exit(0)
@@ -263,6 +276,7 @@ func Run(cfg Config) error {
 		}
 		model := router.ModelFor(intent.Tier)
 		turn++
+		turnStart := time.Now()
 		showRouting(intent, model, turn, pipeline.ShouldRun(intent, input))
 		printSep()
 
@@ -405,6 +419,17 @@ func Run(cfg Config) error {
 
 		if streamErr != nil {
 			fmt.Printf("\n%s⚠ %v%s\n\n", colorRed, streamErr, colorReset)
+			tlog.Log(telemetry.Event{
+				SessionID:    sessID,
+				Turn:         turn,
+				Tier:         intent.Tier.String(),
+				TaskType:     string(intent.TaskType),
+				Confidence:   intent.Confidence,
+				Model:        model,
+				LatencyMS:    time.Since(turnStart).Milliseconds(),
+				InputSnippet: input,
+				Error:        streamErr.Error(),
+			})
 			messages = messages[:len(messages)-1]
 			continue
 		}
@@ -414,12 +439,42 @@ func Run(cfg Config) error {
 		renderResponse(stripFileBlocks(rb.String()))
 
 		// Write any file code blocks from the response to disk.
-		if wf := extractAndWriteFiles(rb.String(), root); len(wf) > 0 {
+		// Append a system note so future turns know what's already written.
+		wf := extractAndWriteFiles(rb.String(), root)
+		if len(wf) > 0 {
 			printWrittenFiles(wf)
+			var fileList []string
+			for _, f := range wf {
+				fileList = append(fileList, f.Path)
+			}
+			rb.WriteString(fmt.Sprintf(
+				"\n\n[Mantis wrote these files to disk: %s. Do not regenerate them unless explicitly asked.]",
+				strings.Join(fileList, ", "),
+			))
 		}
 
 		messages = append(messages, ollama.Message{Role: "assistant", Content: rb.String()})
 		sess.Add(model, intent.Tier, promptTok, completionTok, hasImage)
+
+		// Log turn to telemetry.
+		var writtenPaths []string
+		for _, f := range wf {
+			writtenPaths = append(writtenPaths, f.Path)
+		}
+		tlog.Log(telemetry.Event{
+			SessionID:    sessID,
+			Turn:         turn,
+			Tier:         intent.Tier.String(),
+			TaskType:     string(intent.TaskType),
+			Confidence:   intent.Confidence,
+			Model:        model,
+			Pipeline:     pipeline.ShouldRun(intent, input),
+			PromptTok:    promptTok,
+			ComplTok:     completionTok,
+			LatencyMS:    time.Since(turnStart).Milliseconds(),
+			FilesWritten: writtenPaths,
+			InputSnippet: input,
+		})
 
 		if warn := usageTracker.Add(promptTok+completionTok,
 			intent.Tier == router.TierHeavy, hasImage); warn != "" {
@@ -475,6 +530,7 @@ func Run(cfg Config) error {
 		}
 	}
 
+	tlog.Flush()
 	endSession(sess, b, messages, nil)
 	return nil
 }
@@ -558,6 +614,27 @@ func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
 		fmt.Printf("%s● context cleared (brain memory kept)%s\n\n", colorGold, colorReset)
 	case "/cost":
 		fmt.Println(sess.Report())
+	case "/stats":
+		fmt.Printf("%s╭─ Telemetry Stats ─────────────────────────────────╮%s\n", colorCopper+colorBold, colorReset)
+		fmt.Print(telemetry.Report(""))
+		fmt.Printf("%s╰────────────────────────────────────────────────────╯%s\n\n", colorCopper+colorBold, colorReset)
+	case "/telemetry":
+		arg := ""
+		if len(parts) > 1 {
+			arg = parts[1]
+		}
+		switch arg {
+		case "off":
+			if err := telemetry.Disable(); err == nil {
+				fmt.Printf("%s● telemetry disabled — data stays local only%s\n\n", colorGold, colorReset)
+			}
+		case "on":
+			if err := telemetry.Enable(); err == nil {
+				fmt.Printf("%s● telemetry enabled — usage data helps improve routing%s\n\n", colorGold, colorReset)
+			}
+		default:
+			fmt.Printf("%s/telemetry on%s  — enable upload\n%s/telemetry off%s — disable upload (local only)\n\n", colorDim, colorReset, colorDim, colorReset)
+		}
 	case "/brain":
 		content := b.ReadBrain()
 		if content == "" {
@@ -654,15 +731,33 @@ func buildSystemPrompt(brainCtx, skillsCtx string, tier router.Tier) string {
 - Format code with correct language tags.
 
 ## File generation
-When you create or modify a file, ALWAYS use the filename in the opening fence tag:
-  ` + "```" + `python:app.py
-  <code here>
+When writing files, ALWAYS tag the opening fence with the filename using a colon:
+
+  ` + "```" + `python:src/app.py
+  # code here
   ` + "```" + `
-  ` + "```" + `html:templates/index.html
-  <code here>
+  ` + "```" + `typescript:src/index.ts
+  // code here
   ` + "```" + `
-Use ` + "`lang:path/to/file`" + ` format (colon-separated). This lets Mantis write the files to disk automatically.
-Every code block that should be a real file MUST use this format.
+  ` + "```" + `makefile:Makefile
+  # code here
+  ` + "```" + `
+  ` + "```" + `dockerfile:Dockerfile
+  # code here
+  ` + "```" + `
+  ` + "```" + `yaml:docker-compose.yml
+  # code here
+  ` + "```" + `
+  ` + "```" + `bash:.env.example
+  # code here
+  ` + "```" + `
+
+Rules:
+- Use ` + "`lang:filename`" + ` for EVERY file — this is how Mantis writes them to disk.
+- Extensionless files (Makefile, Dockerfile, Procfile) use ` + "`makefile:Makefile`" + ` format.
+- Dot-files (.env, .gitignore) use ` + "`bash:.env`" + ` or ` + "`text:.gitignore`" + `.
+- NEVER use indented code blocks (4-space indent) for files — they won't be written to disk.
+- After all files, confirm: "✓ Created X files: Makefile, src/app.py, ..."
 `)
 
 	// ── Active skills (engineering expertise loaded from .mantis/skills/) ─────
@@ -1007,6 +1102,8 @@ func printHelp() {
   /vision <path>     load an image (screenshot, diagram, error)
   /reset             clear conversation (keeps brain memory)
   /cost              token savings report
+  /stats             usage analytics (tiers, latency, files)
+  /telemetry on|off  enable / disable anonymous usage upload
   /brain             show project memory
   /save              save session to project memory now
   /model <tier>      switch tier: trivial · fast · code · reason · heavy · max

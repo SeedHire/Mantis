@@ -344,48 +344,7 @@
     .copy-btn:hover { color: var(--copper); background: rgba(200,121,65,.1); }
     .install-sep { color: var(--fg-soft); font-size: 14px; padding: 3px 8px; }
 
-    /* ── Demo terminal (tabbed) ────────────────────────────────────────── */
-    .demo { background: var(--surface); padding: 96px 0; }
-    .demo::before {
-      content: '';
-      position: absolute; left: 0; right: 0; height: 1px;
-      background: linear-gradient(90deg, transparent, rgba(200,121,65,.3), transparent);
-    }
-    .demo-header { margin-bottom: 48px; }
-    .terminal-tabs {
-      display: flex; gap: 4px; flex-wrap: wrap;
-    }
-    .tab-btn {
-      background: var(--surface2); border: 1px solid var(--border);
-      color: var(--fg-muted); font-family: 'JetBrains Mono', monospace;
-      font-size: 12px; font-weight: 500;
-      padding: 8px 20px; border-radius: 9px 9px 0 0;
-      cursor: pointer; border-bottom: none;
-      transition: color .2s, background .2s, border-color .2s;
-    }
-    .tab-btn.active {
-      background: var(--surface3); color: var(--copper-lt);
-      border-color: var(--border-hi); border-bottom: 1px solid var(--surface3);
-      text-shadow: 0 0 12px rgba(232,169,106,.35);
-    }
-    .tab-btn:hover:not(.active) { color: var(--fg-soft); background: var(--surface3); }
-    .demo-terminal {
-      background: var(--surface3); border: 1px solid var(--border-hi);
-      border-radius: 0 14px 14px 14px; overflow: hidden;
-      box-shadow: 0 8px 48px rgba(0,0,0,.6), var(--glow-copper);
-    }
-    .demo-terminal .terminal-bar {
-      background: rgba(255,255,255,.025); border-bottom: 1px solid var(--border);
-    }
-    .demo-terminal .terminal-body {
-      padding: 26px 28px; min-height: 260px;
-    }
-    .tab-pane { display: none; }
-    .tab-pane.active { display: block; }
-    .t-out  { color: var(--fg-muted); }
     .t-warn { color: var(--warning); }
-    .t-error { color: var(--error); }
-    .t-cmd  { color: var(--fg); }
 
     /* ── Sections ──────────────────────────────────────────────────────── */
     section { padding: 96px 0; }
@@ -501,7 +460,7 @@
       .nav-links .hide-mobile { display: none; }
       .hero { padding: 90px 1rem 60px; }
       .hero-logo { font-size: 7px; }
-      section, .demo { padding: 60px 0; }
+      section { padding: 60px 0; }
     }
 
     /* ── Stat bar ───────────────────────────────────────────────────────── */
@@ -677,101 +636,6 @@
   </div>
 </div>
 
-<!-- ── Demo tabs ─────────────────────────────────────────────────────────── -->
-<section class="demo">
-  <div class="container">
-    <div class="demo-header">
-      <p class="section-label">See it work</p>
-      <h2 class="section-title">Real commands. Real output.</h2>
-    </div>
-    <div class="terminal-tabs">
-      <button class="tab-btn active" onclick="showTab('impact')">impact analysis</button>
-      <button class="tab-btn" onclick="showTab('hotspots')">hotspots</button>
-      <button class="tab-btn" onclick="showTab('lint')">arch lint</button>
-      <button class="tab-btn" onclick="showTab('handoff')">handoff</button>
-    </div>
-    <div class="demo-terminal">
-      <div class="terminal-bar">
-        <span class="dot dot-red"></span>
-        <span class="dot dot-yellow"></span>
-        <span class="dot dot-green"></span>
-        <span class="terminal-title">mantis — ~/my-api</span>
-      </div>
-      <div class="terminal-body">
-
-        <div id="pane-impact" class="tab-pane active">
-          <div><span class="t-prompt">$ </span><span class="t-cmd">mantis impact processPayment</span></div>
-          <div>&nbsp;</div>
-          <div><span class="t-copper t-bold">◈ Impact — processPayment</span></div>
-          <div>&nbsp;</div>
-          <div><span class="t-fg">Direct callers (depth 1)</span></div>
-          <div>&nbsp; <span class="t-gold">checkout.go:142</span>&nbsp; CheckoutHandler &nbsp;<span class="t-warn">⚠ untested</span></div>
-          <div>&nbsp; <span class="t-gold">retry.go:89</span> &nbsp; &nbsp; RetryFailedPayments &nbsp;<span class="t-warn">⚠ untested</span></div>
-          <div>&nbsp; <span class="t-gold">admin.go:211</span> &nbsp; AdminRefund &nbsp;<span class="t-green">✓ covered</span></div>
-          <div>&nbsp;</div>
-          <div><span class="t-fg">Transitive impact (depth 2)</span></div>
-          <div>&nbsp; <span class="t-dim">checkout.go → OrderController → api/orders.go</span></div>
-          <div>&nbsp; <span class="t-dim">retry.go → CronJob → cmd/worker/main.go</span></div>
-          <div>&nbsp;</div>
-          <div><span class="t-warn">⚠ 5 files affected · 2 production paths untested</span></div>
-        </div>
-
-        <div id="pane-hotspots" class="tab-pane">
-          <div><span class="t-prompt">$ </span><span class="t-cmd">mantis hotspots</span></div>
-          <div>&nbsp;</div>
-          <div><span class="t-copper t-bold">◈ Hotspots — last 90 days</span></div>
-          <div>&nbsp;</div>
-          <div><span class="t-warn">HIGH RISK</span></div>
-          <div>&nbsp; <span class="t-gold">internal/repl/repl.go</span> &nbsp;&nbsp; 34 commits · 3 authors · 2 days ago</div>
-          <div>&nbsp; <span class="t-gold">internal/router/router.go</span> &nbsp;21 commits · 2 authors · 5 days ago</div>
-          <div>&nbsp;</div>
-          <div><span class="t-fg">MODERATE</span></div>
-          <div>&nbsp; <span class="t-dim">internal/graph/graph.go</span> &nbsp;&nbsp; 12 commits · 4 authors · 11 days ago</div>
-          <div>&nbsp;</div>
-          <div><span class="t-dim">High churn + single author = bus factor risk.</span></div>
-          <div><span class="t-dim">Run `mantis risky` for single-author danger zones.</span></div>
-        </div>
-
-        <div id="pane-lint" class="tab-pane">
-          <div><span class="t-prompt">$ </span><span class="t-cmd">mantis lint</span></div>
-          <div>&nbsp;</div>
-          <div><span class="t-copper t-bold">◈ Architecture Lint</span></div>
-          <div>&nbsp;</div>
-          <div><span class="t-green">✓ handler layer &nbsp;&nbsp;&nbsp; 0 violations</span></div>
-          <div><span class="t-green">✓ service layer &nbsp;&nbsp; 0 violations</span></div>
-          <div><span class="t-error">✗ api layer &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; 2 violations</span></div>
-          <div>&nbsp;</div>
-          <div>&nbsp; <span class="t-gold">api/user.go:42</span> &nbsp; handler imports db directly</div>
-          <div>&nbsp; &nbsp; &nbsp;<span class="t-dim">rule: handlers may not import internal/db</span></div>
-          <div>&nbsp; <span class="t-gold">api/order.go:17</span> &nbsp;handler imports db directly</div>
-          <div>&nbsp; &nbsp; &nbsp;<span class="t-dim">rule: handlers may not import internal/db</span></div>
-          <div>&nbsp;</div>
-          <div><span class="t-dim">Rules defined in .mantisrc.yml · enforce in CI automatically.</span></div>
-        </div>
-
-        <div id="pane-handoff" class="tab-pane">
-          <div><span class="t-prompt">$ </span><span class="t-cmd">mantis handoff</span></div>
-          <div>&nbsp;</div>
-          <div><span class="t-copper t-bold">◈ Writing .mantis/HANDOFF.md…</span></div>
-          <div>&nbsp;</div>
-          <div><span class="t-fg">## Current State</span></div>
-          <div><span class="t-dim">&nbsp; Payment refactor in progress. JWT auth ✓. Rate limiting TODO.</span></div>
-          <div>&nbsp;</div>
-          <div><span class="t-fg">## Key Decisions (last 10)</span></div>
-          <div><span class="t-dim">&nbsp; [2026-02-28] PostgreSQL over MongoDB — better joins for reports</span></div>
-          <div><span class="t-dim">&nbsp; [2026-02-27] Rejected Redis for sessions — complexity not worth it</span></div>
-          <div>&nbsp;</div>
-          <div><span class="t-fg">## Don't Touch</span></div>
-          <div><span class="t-dim">&nbsp; REJECTED: raw SQL in handlers (too brittle, use repository layer)</span></div>
-          <div><span class="t-dim">&nbsp; REJECTED: global config struct (causes race conditions in tests)</span></div>
-          <div>&nbsp;</div>
-          <div><span class="t-green">✓ HANDOFF.md written · share with your team or next AI session</span></div>
-        </div>
-
-      </div>
-    </div>
-  </div>
-</section>
 <section id="features">
   <div class="container">
     <p class="section-label">Platform Overview</p>
@@ -1075,12 +939,6 @@
     setTimeout(() => btn.textContent = orig, 1800);
   }
 
-  function showTab(name) {
-    document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
-    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-    document.getElementById('pane-' + name).classList.add('active');
-    event.currentTarget.classList.add('active');
-  }
 </script>
 </body>
 </html>
