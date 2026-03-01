@@ -10,7 +10,7 @@
   <meta property="og:type" content="website" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -18,17 +18,24 @@
       --copper:      #C87941;
       --copper-lt:   #E8A96A;
       --copper-dk:   #7A3E10;
+      --copper-pale: #F5D9BB;
       --gold:        #F0C040;
-      --bg:          #0C0E14;
-      --surface:     #12151E;
-      --surface2:    #1A1E2A;
-      --border:      #272B38;
-      --border-hi:   #3A3F52;
+      --bg:          #08090F;
+      --surface:     #0E1018;
+      --surface2:    #151820;
+      --surface3:    #1C2030;
+      --border:      #1E2230;
+      --border-hi:   #2E3448;
       --fg:          #E8EAF2;
-      --fg-muted:    #6E7491;
+      --fg-muted:    #5A5F7A;
+      --fg-soft:     #8890A8;
       --success:     #2DD4A0;
       --warning:     #F0A030;
       --error:       #F05060;
+      --radius:      10px;
+      --glow-copper: 0 0 60px rgba(200,121,65,.18), 0 0 120px rgba(200,121,65,.07);
+      --glow-sm:     0 0 24px rgba(200,121,65,.22);
+      --shadow-card: 0 4px 24px rgba(0,0,0,.45), 0 1px 4px rgba(0,0,0,.3);
     }
 
     html { scroll-behavior: smooth; }
@@ -36,260 +43,444 @@
     body {
       background: var(--bg);
       color: var(--fg);
-      font-family: 'Inter', sans-serif;
+      font-family: 'Space Grotesk', 'Inter', system-ui, sans-serif;
+      font-size: 16px;
       line-height: 1.6;
       overflow-x: hidden;
+      -webkit-font-smoothing: antialiased;
     }
 
-    /* ── Nav ─────────────────────────────────────────────────────────── */
+    /* Subtle grain */
+    body::after {
+      content: '';
+      position: fixed; inset: 0;
+      pointer-events: none; z-index: 9999;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23n)' opacity='0.028'/%3E%3C/svg%3E");
+      opacity: .5;
+    }
+
+    a { color: var(--copper-lt); text-decoration: none; }
+    a:hover { color: var(--gold); }
+    code, pre, .mono { font-family: 'JetBrains Mono', 'Fira Code', monospace; }
+
+    .container { max-width: 1100px; margin: 0 auto; padding: 0 28px; }
+
+    /* ── Metallic text ─────────────────────────────────────────────────── */
+    .metallic {
+      background: linear-gradient(135deg, #C87941 0%, #F0C040 28%, #E8A96A 50%, #C87941 72%, #F5D9BB 100%);
+      background-size: 200% 200%;
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      animation: sheen 6s ease-in-out infinite;
+    }
+    @keyframes sheen {
+      0%,100% { background-position: 0% 50%; }
+      50%      { background-position: 100% 50%; }
+    }
+
+    /* ── Fade-up animations ────────────────────────────────────────────── */
+    .fade-up { opacity: 0; transform: translateY(22px); animation: fadeUp .7s ease forwards; }
+    .d1 { animation-delay: .1s; }
+    .d2 { animation-delay: .22s; }
+    .d3 { animation-delay: .34s; }
+    .d4 { animation-delay: .46s; }
+    @keyframes fadeUp {
+      to { opacity: 1; transform: none; }
+    }
+
+    /* ── Nav ───────────────────────────────────────────────────────────── */
     nav {
       position: fixed; top: 0; left: 0; right: 0; z-index: 100;
-      background: rgba(12,14,20,0.85);
-      backdrop-filter: blur(12px);
+      background: rgba(8,9,15,0.88);
+      backdrop-filter: blur(20px) saturate(180%);
       border-bottom: 1px solid var(--border);
+    }
+    nav::after {
+      content: '';
+      position: absolute;
+      bottom: 0; left: 0; right: 0; height: 1px;
+      background: linear-gradient(90deg, transparent, var(--copper-dk), var(--copper), var(--copper-dk), transparent);
+      opacity: .5;
+    }
+    .nav-inner {
       display: flex; align-items: center; justify-content: space-between;
-      padding: 0 2rem; height: 60px;
+      height: 62px;
     }
-    .nav-logo {
+    .nav-brand {
+      display: flex; align-items: center; gap: 8px;
       font-family: 'JetBrains Mono', monospace;
-      font-weight: 600; font-size: 1.1rem;
+      font-weight: 700; font-size: 16px; letter-spacing: .06em;
       color: var(--copper);
-      text-decoration: none;
-      display: flex; align-items: center; gap: 0.5rem;
     }
-    .nav-logo span { color: var(--fg-muted); font-weight: 400; font-size: 0.85rem; }
-    .nav-links { display: flex; align-items: center; gap: 1.5rem; }
+    .nav-links {
+      display: flex; align-items: center; gap: 28px; list-style: none;
+    }
     .nav-links a {
-      color: var(--fg-muted); text-decoration: none; font-size: 0.9rem;
-      transition: color 0.2s;
+      color: var(--fg-soft); font-size: 14px; font-weight: 500;
+      transition: color .2s;
     }
     .nav-links a:hover { color: var(--fg); }
     .btn {
-      display: inline-flex; align-items: center; gap: 0.4rem;
-      padding: 0.45rem 1.1rem; border-radius: 6px;
-      font-size: 0.875rem; font-weight: 600; text-decoration: none;
-      transition: all 0.2s; cursor: pointer; border: none;
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 9px 22px; border-radius: var(--radius);
+      font-family: 'Space Grotesk', system-ui, sans-serif;
+      font-weight: 600; font-size: 14px;
+      cursor: pointer; transition: all .18s; border: none; text-decoration: none;
     }
+    .btn:hover { transform: translateY(-2px); }
     .btn-primary {
-      background: var(--copper); color: #0C0E14;
+      background: linear-gradient(135deg, var(--copper) 0%, #d4884a 100%);
+      color: #090607;
+      box-shadow: 0 4px 20px rgba(200,121,65,.35);
     }
-    .btn-primary:hover { background: var(--copper-lt); }
+    .btn-primary:hover {
+      box-shadow: 0 8px 36px rgba(200,121,65,.5);
+      color: #090607;
+    }
     .btn-ghost {
-      background: transparent; color: var(--fg-muted);
-      border: 1px solid var(--border);
+      background: transparent; color: var(--fg-soft);
+      border: 1px solid var(--border-hi);
     }
-    .btn-ghost:hover { border-color: var(--border-hi); color: var(--fg); }
+    .btn-ghost:hover { border-color: var(--copper); color: var(--copper-lt); }
+    .nav-cta {
+      padding: 7px 18px !important; font-size: 13px !important;
+    }
 
-    /* ── Hero ────────────────────────────────────────────────────────── */
+    /* ── Hero ──────────────────────────────────────────────────────────── */
     .hero {
-      padding: 140px 2rem 80px;
+      padding: 110px 0 80px;
       text-align: center;
       position: relative;
       overflow: hidden;
     }
+
+    /* Dot grid */
     .hero::before {
       content: '';
       position: absolute; inset: 0;
-      background: radial-gradient(ellipse 60% 40% at 50% 0%, rgba(200,121,65,0.12), transparent 70%);
+      background-image: radial-gradient(circle, rgba(200,121,65,.12) 1px, transparent 1px);
+      background-size: 40px 40px;
+      mask-image: radial-gradient(ellipse 900px 500px at 50% 50%, black 0%, transparent 80%);
+      -webkit-mask-image: radial-gradient(ellipse 900px 500px at 50% 50%, black 0%, transparent 80%);
+      animation: gridPulse 8s ease-in-out infinite;
       pointer-events: none;
     }
-    .badge {
-      display: inline-flex; align-items: center; gap: 0.4rem;
-      background: rgba(200,121,65,0.12); border: 1px solid rgba(200,121,65,0.3);
-      color: var(--copper-lt); border-radius: 20px;
-      padding: 0.3rem 0.9rem; font-size: 0.8rem; font-weight: 500;
-      margin-bottom: 1.5rem;
+    /* Copper bloom */
+    .hero-bloom {
+      position: absolute; top: -200px; left: 50%;
+      transform: translateX(-50%);
+      width: 900px; height: 700px;
+      background: radial-gradient(ellipse at 50% 30%,
+        rgba(200,121,65,.15) 0%, rgba(200,121,65,.06) 35%, transparent 70%);
+      pointer-events: none;
     }
-    .badge-dot { width: 6px; height: 6px; background: var(--success); border-radius: 50%; animation: pulse 2s infinite; }
-    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+    @keyframes gridPulse {
+      0%,100% { opacity: .4; }
+      50%      { opacity: .75; }
+    }
+
+    /* ASCII banner */
+    .hero-logo-wrap {
+      position: relative; display: inline-block; margin-bottom: 4px;
+    }
+    .hero-logo-wrap::before {
+      content: '';
+      position: absolute; inset: -20px;
+      background: radial-gradient(ellipse 80% 60% at 50% 50%, rgba(200,121,65,.18) 0%, transparent 70%);
+      pointer-events: none; border-radius: 20px;
+    }
+    .hero-logo {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: clamp(6px, 1.3vw, 12px);
+      line-height: 1.22;
+      color: var(--copper);
+      white-space: pre;
+      display: inline-block;
+      text-shadow: 0 0 30px rgba(200,121,65,.55), 0 0 60px rgba(200,121,65,.25);
+      letter-spacing: 0;
+      filter: brightness(1.1);
+    }
+    .hero-mascot {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: clamp(9px, 1.1vw, 12px);
+      line-height: 1.5;
+      color: var(--copper-lt);
+      white-space: pre;
+      display: inline-block;
+      text-shadow: 0 0 20px rgba(232,169,106,.4);
+      margin-bottom: 40px;
+    }
+
+    /* Version pill */
+    .hero-version {
+      display: inline-flex; align-items: center; gap: 8px;
+      background: rgba(200,121,65,.08);
+      border: 1px solid rgba(200,121,65,.25);
+      border-radius: 100px; padding: 4px 14px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px; color: var(--copper-lt);
+      letter-spacing: .06em; margin-bottom: 24px;
+    }
+    .hero-version-dot {
+      width: 6px; height: 6px;
+      background: var(--success); border-radius: 50%;
+      box-shadow: 0 0 8px var(--success);
+      animation: blink 2s ease-in-out infinite;
+    }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
 
     .hero h1 {
-      font-size: clamp(2.5rem, 6vw, 4.5rem);
-      font-weight: 800; line-height: 1.1;
-      letter-spacing: -0.03em;
-      margin-bottom: 1.25rem;
+      font-size: clamp(2.2rem, 5vw, 3.8rem);
+      font-weight: 700; line-height: 1.12;
+      letter-spacing: -0.03em; margin-bottom: 1.1rem;
     }
-    .hero h1 em { font-style: normal; color: var(--copper); }
     .hero p {
-      font-size: clamp(1rem, 2vw, 1.2rem);
-      color: var(--fg-muted); max-width: 560px; margin: 0 auto 2.5rem;
+      font-size: clamp(1rem, 1.8vw, 1.15rem);
+      color: var(--fg-soft); max-width: 540px;
+      margin: 0 auto 2.5rem;
     }
-    .hero-ctas { display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap; margin-bottom: 3rem; }
-    .hero-ctas .btn { font-size: 1rem; padding: 0.65rem 1.5rem; }
+    .hero-ctas {
+      display: flex; gap: 12px;
+      justify-content: center; flex-wrap: wrap;
+      margin-bottom: 3.5rem;
+    }
 
-    /* ── Terminal ────────────────────────────────────────────────────── */
+    /* ── Hero terminal ─────────────────────────────────────────────────── */
     .terminal-wrap {
-      max-width: 680px; margin: 0 auto;
-      border-radius: 12px; overflow: hidden;
+      max-width: 700px; margin: 0 auto;
+      border-radius: 14px; overflow: hidden;
       border: 1px solid var(--border-hi);
-      box-shadow: 0 32px 80px rgba(0,0,0,0.6), 0 0 0 1px rgba(200,121,65,0.08);
+      box-shadow: 0 32px 80px rgba(0,0,0,.65), 0 0 0 1px rgba(200,121,65,.08), var(--glow-copper);
     }
     .terminal-bar {
       background: var(--surface2);
-      padding: 0.75rem 1rem;
-      display: flex; align-items: center; gap: 0.5rem;
+      padding: 11px 16px;
+      display: flex; align-items: center; gap: 7px;
     }
-    .dot { width: 12px; height: 12px; border-radius: 50%; }
-    .dot-red { background: #FF5F57; }
-    .dot-yellow { background: #FFBD2E; }
-    .dot-green { background: #28CA41; }
-    .terminal-title { flex: 1; text-align: center; font-size: 0.75rem; color: var(--fg-muted); font-family: 'JetBrains Mono', monospace; }
-    .terminal-body {
-      background: #090B10;
-      padding: 1.25rem 1.5rem;
+    .dot { width: 13px; height: 13px; border-radius: 50%; }
+    .dot-red    { background: #FF5F57; box-shadow: 0 0 6px rgba(255,95,87,.4); }
+    .dot-yellow { background: #FEBC2E; box-shadow: 0 0 6px rgba(254,188,46,.3); }
+    .dot-green  { background: #28C840; box-shadow: 0 0 6px rgba(40,200,64,.3); }
+    .terminal-title {
+      flex: 1; text-align: center;
+      font-size: 11.5px; color: var(--fg-muted);
       font-family: 'JetBrains Mono', monospace;
-      font-size: 0.85rem; line-height: 1.7;
-      min-height: 280px;
+    }
+    .terminal-body {
+      background: #070910;
+      padding: 22px 26px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 13px; line-height: 1.85;
+      min-height: 300px;
     }
     .t-dim    { color: var(--fg-muted); }
-    .t-copper { color: var(--copper); }
+    .t-copper { color: var(--copper-lt); }
     .t-gold   { color: var(--gold); }
     .t-green  { color: var(--success); }
     .t-red    { color: var(--error); }
     .t-bold   { font-weight: 600; }
     .t-prompt { color: var(--copper); font-weight: 600; }
-    .cursor   { display: inline-block; width: 9px; height: 1.1em; background: var(--copper); vertical-align: text-bottom; animation: blink 1.1s step-end infinite; margin-left: 2px; }
-    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+    .cursor {
+      display: inline-block; width: 8px; height: 1em;
+      background: var(--copper); vertical-align: text-bottom;
+      animation: blink 1.1s step-end infinite; margin-left: 2px;
+    }
 
-    /* ── Install strip ───────────────────────────────────────────────── */
+    /* ── Install strip ─────────────────────────────────────────────────── */
     .install-strip {
       background: var(--surface);
       border-top: 1px solid var(--border);
       border-bottom: 1px solid var(--border);
-      padding: 2rem;
-      text-align: center;
+      padding: 26px 0;
+      position: relative;
     }
-    .install-strip p { color: var(--fg-muted); font-size: 0.85rem; margin-bottom: 0.75rem; }
-    .install-box {
-      display: inline-flex; align-items: center; gap: 0.75rem;
-      background: var(--surface2); border: 1px solid var(--border-hi);
-      border-radius: 8px; padding: 0.75rem 1.25rem;
-      font-family: 'JetBrains Mono', monospace; font-size: 0.9rem;
-      color: var(--fg); cursor: pointer; position: relative;
+    .install-strip::before {
+      content: '';
+      position: absolute; top: 0; left: 0; right: 0; height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(200,121,65,.4), transparent);
     }
-    .install-box .cmd-prefix { color: var(--fg-muted); }
+    .install-strip .container {
+      display: flex; align-items: center; gap: 14px;
+      flex-wrap: wrap; justify-content: center;
+    }
+    .install-label {
+      font-size: 11px; font-weight: 600;
+      text-transform: uppercase; letter-spacing: .1em; color: var(--fg-muted);
+    }
+    .install-cmd {
+      display: flex; align-items: center; gap: 12px;
+      background: var(--bg); border: 1px solid var(--border-hi);
+      border-radius: 8px; padding: 9px 16px; transition: border-color .2s;
+    }
+    .install-cmd:hover { border-color: var(--copper-dk); }
+    .install-cmd code { color: var(--success); font-size: 12.5px; }
     .copy-btn {
-      background: var(--border); border: none; border-radius: 4px;
-      color: var(--fg-muted); cursor: pointer; padding: 0.2rem 0.5rem;
-      font-size: 0.75rem; transition: all 0.2s;
+      background: none; border: none; cursor: pointer;
+      color: var(--fg-muted); font-size: 12px; padding: 3px 8px;
+      border-radius: 4px; transition: color .2s, background .2s;
+      font-family: 'Space Grotesk', system-ui, sans-serif;
     }
-    .copy-btn:hover { background: var(--border-hi); color: var(--fg); }
-    .install-alts { margin-top: 1rem; color: var(--fg-muted); font-size: 0.8rem; }
-    .install-alts a { color: var(--copper-lt); text-decoration: none; }
-    .install-alts a:hover { text-decoration: underline; }
+    .copy-btn:hover { color: var(--copper); background: rgba(200,121,65,.1); }
+    .install-sep { color: var(--border-hi); font-size: 14px; }
 
-    /* ── Section ─────────────────────────────────────────────────────── */
-    section { padding: 80px 2rem; max-width: 1100px; margin: 0 auto; }
+    /* ── Demo terminal (tabbed) ────────────────────────────────────────── */
+    .demo { background: var(--surface); padding: 96px 0; }
+    .demo::before {
+      content: '';
+      position: absolute; left: 0; right: 0; height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(200,121,65,.3), transparent);
+    }
+    .demo-header { margin-bottom: 48px; }
+    .terminal-tabs {
+      display: flex; gap: 4px; flex-wrap: wrap;
+    }
+    .tab-btn {
+      background: var(--surface2); border: 1px solid var(--border);
+      color: var(--fg-muted); font-family: 'JetBrains Mono', monospace;
+      font-size: 12px; font-weight: 500;
+      padding: 8px 20px; border-radius: 9px 9px 0 0;
+      cursor: pointer; border-bottom: none;
+      transition: color .2s, background .2s, border-color .2s;
+    }
+    .tab-btn.active {
+      background: var(--surface3); color: var(--copper-lt);
+      border-color: var(--border-hi); border-bottom: 1px solid var(--surface3);
+      text-shadow: 0 0 12px rgba(232,169,106,.35);
+    }
+    .tab-btn:hover:not(.active) { color: var(--fg-soft); background: var(--surface3); }
+    .demo-terminal {
+      background: var(--surface3); border: 1px solid var(--border-hi);
+      border-radius: 0 14px 14px 14px; overflow: hidden;
+      box-shadow: 0 8px 48px rgba(0,0,0,.6), var(--glow-copper);
+    }
+    .demo-terminal .terminal-bar {
+      background: rgba(255,255,255,.025); border-bottom: 1px solid var(--border);
+    }
+    .demo-terminal .terminal-body {
+      padding: 26px 28px; min-height: 260px;
+    }
+    .tab-pane { display: none; }
+    .tab-pane.active { display: block; }
+    .t-out  { color: var(--fg-muted); }
+    .t-warn { color: var(--warning); }
+    .t-cmd  { color: var(--fg); }
+
+    /* ── Sections ──────────────────────────────────────────────────────── */
+    section { padding: 96px 0; }
     .section-label {
-      font-size: 0.75rem; font-weight: 600; letter-spacing: 0.1em;
-      text-transform: uppercase; color: var(--copper); margin-bottom: 0.75rem;
+      font-size: 11px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .14em; color: var(--copper); margin-bottom: 14px;
     }
     .section-title {
-      font-size: clamp(1.75rem, 3.5vw, 2.5rem);
-      font-weight: 800; line-height: 1.15; letter-spacing: -0.02em;
-      margin-bottom: 1rem;
+      font-size: clamp(1.75rem, 3.5vw, 2.6rem);
+      font-weight: 700; line-height: 1.15;
+      letter-spacing: -.025em; margin-bottom: 16px;
     }
-    .section-sub { color: var(--fg-muted); max-width: 520px; font-size: 1rem; margin-bottom: 3rem; }
+    .section-sub {
+      font-size: 1rem; color: var(--fg-soft);
+      max-width: 520px; line-height: 1.75; margin-bottom: 3rem;
+    }
 
-    /* ── Feature grid ────────────────────────────────────────────────── */
+    /* ── Feature grid ──────────────────────────────────────────────────── */
     .feature-grid {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-      gap: 1px;
-      background: var(--border);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      overflow: hidden;
+      gap: 1px; background: var(--border);
+      border: 1px solid var(--border); border-radius: 14px; overflow: hidden;
     }
     .feature-card {
-      background: var(--surface);
-      padding: 1.75rem;
-      transition: background 0.2s;
+      background: var(--surface); padding: 1.75rem;
+      transition: background .2s;
     }
     .feature-card:hover { background: var(--surface2); }
-    .feature-icon { font-size: 1.5rem; margin-bottom: 0.75rem; }
-    .feature-card h3 { font-size: 1rem; font-weight: 700; margin-bottom: 0.4rem; }
-    .feature-card p { font-size: 0.875rem; color: var(--fg-muted); line-height: 1.6; }
+    .feature-icon { font-size: 1.5rem; margin-bottom: .75rem; }
+    .feature-card h3 { font-size: .95rem; font-weight: 700; margin-bottom: .4rem; }
+    .feature-card p { font-size: .875rem; color: var(--fg-soft); line-height: 1.6; }
 
-    /* ── Comparison table ────────────────────────────────────────────── */
-    .table-wrap { overflow-x: auto; border-radius: 12px; border: 1px solid var(--border); }
-    table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+    /* ── Comparison table ──────────────────────────────────────────────── */
+    .table-wrap {
+      overflow-x: auto; border-radius: 14px;
+      border: 1px solid var(--border);
+    }
+    table { width: 100%; border-collapse: collapse; font-size: .9rem; }
     thead { background: var(--surface2); }
-    th { padding: 1rem 1.25rem; text-align: left; font-weight: 700; color: var(--fg-muted); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    th {
+      padding: 1rem 1.25rem; text-align: left; font-weight: 700;
+      color: var(--fg-muted); font-size: .75rem;
+      text-transform: uppercase; letter-spacing: .05em;
+    }
     th:not(:first-child) { text-align: center; }
-    td { padding: 0.9rem 1.25rem; border-top: 1px solid var(--border); }
+    td { padding: .9rem 1.25rem; border-top: 1px solid var(--border); }
     td:not(:first-child) { text-align: center; }
-    tr:hover td { background: rgba(255,255,255,0.02); }
+    tr:hover td { background: rgba(255,255,255,.02); }
     .check { color: var(--success); font-size: 1.1rem; }
     .cross { color: var(--fg-muted); font-size: 1.1rem; }
     .highlight-col { color: var(--gold); font-weight: 700; }
     .price-free { color: var(--success); font-weight: 700; }
     .price-paid { color: var(--fg-muted); }
 
-    /* ── How it works ────────────────────────────────────────────────── */
+    /* ── How it works ──────────────────────────────────────────────────── */
     .steps { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 1.5rem; }
-    .step { position: relative; padding: 1.5rem; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; }
+    .step {
+      position: relative; padding: 1.5rem;
+      background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    }
     .step-num {
       display: inline-flex; align-items: center; justify-content: center;
       width: 32px; height: 32px; border-radius: 8px;
-      background: rgba(200,121,65,0.15); color: var(--copper);
-      font-weight: 700; font-size: 0.9rem; margin-bottom: 0.75rem;
+      background: rgba(200,121,65,.15); color: var(--copper);
+      font-weight: 700; font-size: .9rem; margin-bottom: .75rem;
     }
-    .step h3 { font-size: 0.95rem; font-weight: 700; margin-bottom: 0.4rem; }
-    .step p { font-size: 0.85rem; color: var(--fg-muted); }
-    .step code { font-family: 'JetBrains Mono', monospace; color: var(--copper-lt); font-size: 0.8rem; background: var(--surface2); padding: 0.15rem 0.35rem; border-radius: 4px; }
+    .step h3 { font-size: .95rem; font-weight: 700; margin-bottom: .4rem; }
+    .step p { font-size: .85rem; color: var(--fg-soft); }
+    .step code { font-family: 'JetBrains Mono', monospace; color: var(--copper-lt); font-size: .8rem; background: var(--surface2); padding: .15rem .35rem; border-radius: 4px; }
 
-    /* ── Commands grid ───────────────────────────────────────────────── */
-    .cmd-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 0.75rem; }
-    .cmd-item { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; display: flex; gap: 1rem; align-items: flex-start; }
-    .cmd-item code { font-family: 'JetBrains Mono', monospace; color: var(--copper-lt); font-size: 0.8rem; white-space: nowrap; padding-top: 0.1rem; }
-    .cmd-item p { font-size: 0.83rem; color: var(--fg-muted); line-height: 1.5; }
-
-    /* ── Memory section ──────────────────────────────────────────────── */
+    /* ── Memory section ────────────────────────────────────────────────── */
     .memory-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 3rem; align-items: center; }
     @media (max-width: 700px) { .memory-layout { grid-template-columns: 1fr; } }
-    .file-tree { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1.25rem 1.5rem; font-family: 'JetBrains Mono', monospace; font-size: 0.82rem; line-height: 2; }
+    .file-tree {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 10px; padding: 1.25rem 1.5rem;
+      font-family: 'JetBrains Mono', monospace; font-size: .82rem; line-height: 2;
+    }
     .file-tree .dir  { color: var(--copper); }
     .file-tree .file { color: var(--fg-muted); }
-    .file-tree .note { color: var(--fg-muted); font-size: 0.75rem; }
 
-    /* ── CTA ─────────────────────────────────────────────────────────── */
+    /* ── CTA ───────────────────────────────────────────────────────────── */
     .cta-section {
-      text-align: center;
-      padding: 80px 2rem 100px;
+      text-align: center; padding: 80px 0 100px;
       position: relative;
     }
     .cta-section::before {
       content: '';
       position: absolute; inset: 0;
-      background: radial-gradient(ellipse 50% 60% at 50% 100%, rgba(200,121,65,0.1), transparent 70%);
+      background: radial-gradient(ellipse 50% 60% at 50% 100%, rgba(200,121,65,.1), transparent 70%);
       pointer-events: none;
     }
-    .cta-section h2 { font-size: clamp(2rem, 4vw, 3rem); font-weight: 800; margin-bottom: 1rem; }
-    .cta-section p { color: var(--fg-muted); max-width: 480px; margin: 0 auto 2rem; }
-    .cta-section .btn { font-size: 1.05rem; padding: 0.75rem 2rem; }
+    .cta-section h2 { font-size: clamp(1.8rem, 4vw, 2.8rem); font-weight: 700; margin-bottom: 1rem; }
+    .cta-section p { color: var(--fg-soft); max-width: 480px; margin: 0 auto 2rem; }
+    .cta-section .btn { font-size: 1rem; padding: .75rem 2rem; }
 
-    /* ── Footer ──────────────────────────────────────────────────────── */
+    /* ── Footer ────────────────────────────────────────────────────────── */
     footer {
       border-top: 1px solid var(--border);
-      padding: 2rem;
+      padding: 2rem 28px;
       display: flex; justify-content: space-between; align-items: center;
       flex-wrap: wrap; gap: 1rem;
       max-width: 1100px; margin: 0 auto;
-      color: var(--fg-muted); font-size: 0.85rem;
+      color: var(--fg-muted); font-size: .85rem;
     }
-    footer a { color: var(--fg-muted); text-decoration: none; }
+    footer a { color: var(--fg-muted); }
     footer a:hover { color: var(--copper-lt); }
-    footer .footer-links { display: flex; gap: 1.5rem; }
+    .footer-links { display: flex; gap: 1.5rem; }
 
-    /* ── Divider ─────────────────────────────────────────────────────── */
-    .divider { border: none; border-top: 1px solid var(--border); }
-
-    /* ── Responsive ──────────────────────────────────────────────────── */
+    /* ── Responsive ────────────────────────────────────────────────────── */
     @media (max-width: 640px) {
-      nav { padding: 0 1rem; }
       .nav-links .hide-mobile { display: none; }
-      section { padding: 60px 1rem; }
+      .hero { padding: 90px 1rem 60px; }
+      .hero-logo { font-size: 6px; }
+      section, .demo { padding: 60px 0; }
     }
   </style>
 </head>
@@ -297,327 +488,392 @@
 
 <!-- ── Nav ───────────────────────────────────────────────────────────────── -->
 <nav>
-  <a class="nav-logo" href="#">◈ mantis <span>v0.1</span></a>
-  <div class="nav-links">
-    <a href="#features" class="hide-mobile">Features</a>
-    <a href="#install" class="hide-mobile">Install</a>
-    <a href="https://github.com/seedhire/mantis" target="_blank" class="hide-mobile">GitHub</a>
-    <a href="https://github.com/seedhire/mantis" target="_blank" class="btn btn-ghost">★ Star</a>
-    <a href="#install" class="btn btn-primary">Get started</a>
+  <div class="nav-inner container">
+    <div class="nav-brand">◈ MANTIS</div>
+    <div class="nav-links">
+      <a href="#features" class="hide-mobile">Features</a>
+      <a href="#demo" class="hide-mobile">Demo</a>
+      <a href="#install" class="hide-mobile">Install</a>
+      <a href="https://github.com/SeedHire/Mantis" target="_blank" class="hide-mobile">GitHub</a>
+      <a href="https://github.com/SeedHire/Mantis" target="_blank" class="btn btn-ghost nav-cta">★ Star</a>
+      <a href="#install" class="btn btn-primary nav-cta">Get started</a>
+    </div>
   </div>
 </nav>
 
 <!-- ── Hero ──────────────────────────────────────────────────────────────── -->
 <div class="hero">
-  <div class="badge"><span class="badge-dot"></span> Open source · MIT · Free forever</div>
-  <h1>AI coding assistant.<br/><em>No bill. No cloud. No limits.</em></h1>
-  <p>Mantis runs on Ollama — locally or on the free cloud tier. Persistent memory, codebase intelligence, and zero monthly cost.</p>
-  <div class="hero-ctas">
-    <a href="#install" class="btn btn-primary">↓ Install in 10 seconds</a>
-    <a href="https://github.com/seedhire/mantis" target="_blank" class="btn btn-ghost">View on GitHub →</a>
-  </div>
+  <div class="hero-bloom"></div>
+  <div class="container">
 
-  <div class="terminal-wrap">
-    <div class="terminal-bar">
-      <span class="dot dot-red"></span>
-      <span class="dot dot-yellow"></span>
-      <span class="dot dot-green"></span>
-      <span class="terminal-title">mantis — ~/my-project</span>
+    <div class="hero-logo-wrap fade-up">
+<pre class="hero-logo">███╗   ███╗ █████╗ ███╗   ██╗████████╗██╗███████╗
+████╗ ████║██╔══██╗████╗  ██║╚══██╔══╝██║██╔════╝
+██╔████╔██║███████║██╔██╗ ██║   ██║   ██║███████╗
+██║╚██╔╝██║██╔══██║██║╚██╗██║   ██║   ██║╚════██║
+██║ ╚═╝ ██║██║  ██║██║ ╚████║   ██║   ██║███████║
+╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝   ╚═╝   ╚═╝╚══════╝</pre>
     </div>
-    <div class="terminal-body">
-      <div><span class="t-green">● Sagar-Darji</span></div>
-      <div><span class="t-green">● Ollama Cloud</span></div>
-      <div><span class="t-gold">● project memory ready</span></div>
-      <div><span class="t-gold">● 142 files indexed</span></div>
-      <div>&nbsp;</div>
-      <div><span class="t-dim">  /help  /cost  /brain  /quit</span></div>
-      <div>&nbsp;</div>
-      <div><span class="t-dim">──────────────────────────────────────────────────────────</span></div>
-      <div><span class="t-prompt">❯</span> <span>why does the auth middleware skip admin routes?</span></div>
-      <div><span class="t-dim">[turn 1 · fast · general · </span><span class="t-copper t-bold">qwen2.5-coder:7b</span><span class="t-dim">]</span></div>
-      <div><span class="t-dim">──────────────────────────────────────────────────────────</span></div>
-      <div>&nbsp;</div>
-      <div><span class="t-copper t-bold">◈ Mantis</span></div>
-      <div>&nbsp;</div>
-      <div>In <span class="t-gold">src/middleware/auth.ts:34</span>, the <span class="t-gold">skipAuth</span> array</div>
-      <div>includes all routes prefixed with <span class="t-gold">/admin</span> — this</div>
-      <div>was added in commit <span class="t-gold">a3f91b</span> to bypass JWT checks</div>
-      <div>during local dev but was never removed.</div>
-      <div>&nbsp;</div>
-      <div><span class="t-dim">──────────────────────────────────────────────────────────</span></div>
-      <div><span class="t-prompt">❯</span> <span class="cursor"></span></div>
+
+<pre class="hero-mascot fade-up d1">     \   /
+      \_/
+     (o_o)
+ <===[|||]==></pre>
+
+    <div class="fade-up d1">
+      <div class="hero-version">
+        <span class="hero-version-dot"></span>
+        v0.1.0 · now in public beta
+      </div>
+    </div>
+
+    <h1 class="fade-up d2">
+      AI coding assistant.<br/>
+      <span class="metallic">No bill. No cloud. No limits.</span>
+    </h1>
+    <p class="fade-up d3">
+      Mantis runs on Ollama — locally or on the free cloud tier.
+      Persistent memory, codebase intelligence, and zero monthly cost.
+    </p>
+
+    <div class="hero-ctas fade-up d4">
+      <a href="#install" class="btn btn-primary">↓ Install in 10 seconds</a>
+      <a href="https://github.com/SeedHire/Mantis" target="_blank" class="btn btn-ghost">View on GitHub →</a>
+    </div>
+
+    <!-- Hero terminal -->
+    <div class="terminal-wrap fade-up d4">
+      <div class="terminal-bar">
+        <span class="dot dot-red"></span>
+        <span class="dot dot-yellow"></span>
+        <span class="dot dot-green"></span>
+        <span class="terminal-title">mantis — ~/my-project</span>
+      </div>
+      <div class="terminal-body">
+        <div><span class="t-green">● Sagar-Darji</span></div>
+        <div><span class="t-green">● Ollama Cloud</span></div>
+        <div><span class="t-gold">● project memory ready</span></div>
+        <div><span class="t-gold">● 142 files indexed</span></div>
+        <div>&nbsp;</div>
+        <div><span class="t-dim">  /help  /cost  /brain  /quit</span></div>
+        <div>&nbsp;</div>
+        <div><span class="t-dim">────────────────────────────────────────────────────────</span></div>
+        <div><span class="t-prompt">❯</span> why does the auth middleware skip admin routes?</div>
+        <div><span class="t-dim">[turn 1 · fast · general · </span><span class="t-copper t-bold">qwen2.5-coder:7b</span><span class="t-dim">]</span></div>
+        <div><span class="t-dim">────────────────────────────────────────────────────────</span></div>
+        <div>&nbsp;</div>
+        <div><span class="t-copper t-bold">◈ Mantis</span></div>
+        <div>&nbsp;</div>
+        <div>In <span class="t-gold">src/middleware/auth.ts:34</span>, the <span class="t-gold">skipAuth</span> array</div>
+        <div>includes all routes prefixed with <span class="t-gold">/admin</span> — this was</div>
+        <div>added in commit <span class="t-gold">a3f91b</span> to bypass JWT checks during</div>
+        <div>local dev but was never removed.</div>
+        <div>&nbsp;</div>
+        <div><span class="t-dim">────────────────────────────────────────────────────────</span></div>
+        <div><span class="t-prompt">❯</span> <span class="cursor"></span></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ── Install strip ─────────────────────────────────────────────────────── -->
+<div class="install-strip" id="install">
+  <div class="container">
+    <span class="install-label">Quick install</span>
+    <div class="install-cmd">
+      <code id="cmd-curl">curl -fsSL https://raw.githubusercontent.com/SeedHire/Mantis/main/install.sh | sh</code>
+      <button class="copy-btn" onclick="copy('cmd-curl', this)">copy</button>
+    </div>
+    <span class="install-sep">or</span>
+    <div class="install-cmd">
+      <code id="cmd-go">go install github.com/seedhire/mantis/cmd/mantis@latest</code>
+      <button class="copy-btn" onclick="copy('cmd-go', this)">copy</button>
+    </div>
+    <span class="install-sep">or</span>
+    <div class="install-cmd">
+      <code id="cmd-brew">brew install seedhire/tap/mantis</code>
+      <button class="copy-btn" onclick="copy('cmd-brew', this)">copy</button>
     </div>
   </div>
 </div>
 
-<!-- ── Install ────────────────────────────────────────────────────────────── -->
-<div class="install-strip" id="install">
-  <p>macOS · Linux · Windows — no setup wizard, no account required</p>
-  <div class="install-box" id="install-cmd">
-    <span class="cmd-prefix">$</span>
-    <span id="cmd-text">curl -fsSL https://raw.githubusercontent.com/seedhire/mantis/main/install.sh | sh</span>
-    <button class="copy-btn" onclick="copyInstall()">copy</button>
-  </div>
-  <div class="install-alts">
-    or &nbsp;
-    <a href="https://github.com/seedhire/mantis#install">brew install mantis-dev/tap/mantis</a>
-    &nbsp;·&nbsp;
-    <a href="https://github.com/seedhire/mantis#install">go install github.com/seedhire/mantis/cmd/mantis@latest</a>
+<!-- ── Demo ──────────────────────────────────────────────────────────────── -->
+<div class="demo" id="demo" style="position:relative">
+  <div class="container">
+    <div class="demo-header">
+      <p class="section-label">Live Demo</p>
+      <h2 class="section-title">See it in action.</h2>
+    </div>
+    <div class="terminal-tabs">
+      <button class="tab-btn active" onclick="showTab('chat')">chat</button>
+      <button class="tab-btn" onclick="showTab('init')">init</button>
+      <button class="tab-btn" onclick="showTab('impact')">impact</button>
+      <button class="tab-btn" onclick="showTab('lint')">lint</button>
+      <button class="tab-btn" onclick="showTab('dead')">dead</button>
+    </div>
+    <div class="demo-terminal">
+      <div class="terminal-bar">
+        <div class="dot dot-red"></div>
+        <div class="dot dot-yellow"></div>
+        <div class="dot dot-green"></div>
+        <span class="terminal-title">mantis — ~/my-project</span>
+      </div>
+      <div class="terminal-body">
+
+        <div class="tab-pane active" id="pane-chat">
+<span class="t-dim">────────────────────────────────────────────────────────</span>
+<span class="t-prompt">❯ </span><span class="t-cmd">refactor the payment service to use async/await instead of callbacks</span>
+<span class="t-dim">[turn 3 · code · general · </span><span class="t-copper">qwen2.5-coder:14b</span><span class="t-dim">]</span>
+<span class="t-dim">────────────────────────────────────────────────────────</span>
+
+<span class="t-copper t-bold">◈ Mantis</span>
+
+Here's the refactored <span class="t-gold">PaymentService</span> using async/await:
+
+<span class="t-gold">src/services/payment.ts</span>
+<span class="t-out">  async processPayment(order: Order): Promise&lt;Receipt&gt; {</span>
+<span class="t-out">    const charge = await stripe.charges.create({ ... });</span>
+<span class="t-out">    return this.buildReceipt(charge);</span>
+<span class="t-out">  }</span>
+
+<span class="t-dim">────────────────────────────────────────────────────────</span>
+<span class="t-prompt">❯ </span><span class="cursor"></span>
+        </div>
+
+        <div class="tab-pane" id="pane-init">
+<span class="t-prompt">❯ </span><span class="t-cmd">mantis init --lang ts</span>
+<span class="t-copper">⚡ Indexing /Users/sagar/my-project...</span>
+<span class="t-green">✓ Indexed 312 files, 4,821 symbols in 3.4s</span>
+
+<span class="t-prompt">❯ </span><span class="t-cmd">mantis find "validateToken" --format tree</span>
+<span class="t-gold">"validateToken"</span>
+<span class="t-out">  └── src/middleware/auth.ts</span>
+<span class="t-out">  └── src/api/routes/users.ts</span>
+<span class="t-out">  └── src/api/routes/payments.ts</span>
+<span class="t-out">  └── src/workers/sessionCleaner.ts</span>
+<span class="t-out">  └── tests/auth.test.ts</span>
+<span class="t-prompt">❯ </span><span class="cursor"></span>
+        </div>
+
+        <div class="tab-pane" id="pane-impact">
+<span class="t-prompt">❯ </span><span class="t-cmd">mantis impact "src/db/connection.ts" --risk</span>
+<span class="t-gold">⚡ Impact Analysis: src/db/connection.ts</span>
+<span class="t-out">────────────────────────────────────────────────────────</span>
+<span class="t-out">Direct importers    (depth 1):  4 files</span>
+<span class="t-out">Indirect dependents (depth 2): 12 files</span>
+<span class="t-out">Total affected: 16 files</span>
+
+<span class="t-red">HIGH RISK:   src/api/routes/index.ts          (score: 9/10)</span>
+<span class="t-red">HIGH RISK:   src/services/auth.ts             (score: 8/10)</span>
+<span class="t-warn">MEDIUM RISK: src/middleware/logging.ts        (score: 6/10)</span>
+<span class="t-warn">MEDIUM RISK: src/workers/cleanup.ts           (score: 5/10)</span>
+<span class="t-green">LOW RISK:    src/utils/healthcheck.ts         (score: 2/10)</span>
+        </div>
+
+        <div class="tab-pane" id="pane-lint">
+<span class="t-prompt">❯ </span><span class="t-cmd">mantis lint --ci</span>
+<span class="t-gold">🔍 Architecture Lint</span>
+<span class="t-out">────────────────────────────────────────────────────────</span>
+<span class="t-out">Checking 5 rules against 312 files...</span>
+
+<span class="t-red">ERROR   src/controllers/user.ts:42</span>
+<span class="t-out">        no-controller-db-access: controllers must not import from src/db/**</span>
+
+<span class="t-warn">WARNING src/utils/formatters.ts:7</span>
+<span class="t-out">        utils-no-services: utility files must not import services</span>
+
+<span class="t-out">────────────────────────────────────────────────────────</span>
+<span class="t-red">1 error, 1 warning  ·  exit code 1</span>
+        </div>
+
+        <div class="tab-pane" id="pane-dead">
+<span class="t-prompt">❯ </span><span class="t-cmd">mantis dead --ignore "**/*.test.ts"</span>
+<span class="t-gold">🔍 Dead Code Analysis</span>
+<span class="t-out">────────────────────────────────────────────────────────</span>
+<span class="t-out">Found 6 unused exported symbols</span>
+
+<span class="t-copper">FUNCTION   src/utils/legacy.ts:12        formatLegacyDate</span>
+<span class="t-copper">FUNCTION   src/utils/legacy.ts:28        parseLegacyId</span>
+<span class="t-copper">CLASS      src/services/v1/OldAuth.ts:1  OldAuthService</span>
+<span class="t-copper">INTERFACE  src/types/deprecated.ts:5    LegacyUser</span>
+<span class="t-copper">FUNCTION   src/helpers/xml.ts:14         parseXMLResponse</span>
+<span class="t-copper">CONST      src/config/flags.ts:3         ENABLE_BETA</span>
+        </div>
+
+      </div>
+    </div>
   </div>
 </div>
 
 <!-- ── Features ──────────────────────────────────────────────────────────── -->
 <section id="features">
-  <div class="section-label">Why Mantis</div>
-  <h2 class="section-title">Everything Claude Code has.<br/>Nothing it charges for.</h2>
-  <p class="section-sub">Built for developers who want serious tooling without the $30/month AI tax.</p>
+  <div class="container">
+    <p class="section-label">Why Mantis</p>
+    <h2 class="section-title">Everything Claude Code has.<br/>Nothing it charges for.</h2>
+    <p class="section-sub">Built for developers who want serious tooling without the $30/month AI tax.</p>
 
-  <div class="feature-grid">
-    <div class="feature-card">
-      <div class="feature-icon">🧠</div>
-      <h3>Persistent Project Memory</h3>
-      <p>Mantis writes a <code style="font-family:monospace;color:var(--copper-lt)">.mantis/BRAIN.md</code> after every session. It remembers your architecture decisions, rejected approaches, and patterns — forever.</p>
-    </div>
-    <div class="feature-card">
-      <div class="feature-icon">⚡</div>
-      <h3>Codebase Intelligence</h3>
-      <p>Run <code style="font-family:monospace;color:var(--copper-lt)">mantis init</code> once to build a live AST dependency graph. Every question gets only the relevant files injected — not your whole repo.</p>
-    </div>
-    <div class="feature-card">
-      <div class="feature-icon">🎯</div>
-      <h3>Smart Model Routing</h3>
-      <p>Every message is classified — trivial, fast, code, reasoning, or heavy — and routed to the right model automatically. No wasted tokens on simple questions.</p>
-    </div>
-    <div class="feature-card">
-      <div class="feature-icon">🔍</div>
-      <h3>Hallucination Guard</h3>
-      <p>AI output is checked against your actual function signatures in real time. If the model invents a function name, Mantis flags it before you act on it.</p>
-    </div>
-    <div class="feature-card">
-      <div class="feature-icon">📐</div>
-      <h3>Architecture Lint</h3>
-      <p>Define rules like "no controller may import from db layer" in <code style="font-family:monospace;color:var(--copper-lt)">.mantisrc.yml</code> and enforce them in CI — just like ESLint but for your architecture.</p>
-    </div>
-    <div class="feature-card">
-      <div class="feature-icon">💰</div>
-      <h3>Token Cost Tracker</h3>
-      <p>At the end of every session, see exactly what you would have paid with GPT-4o, Claude Sonnet, or Claude Opus — vs the $0.00 you spent with Mantis.</p>
-    </div>
-    <div class="feature-card">
-      <div class="feature-icon">🖼️</div>
-      <h3>Multimodal Input</h3>
-      <p>Paste a screenshot, architecture diagram, or error image with <code style="font-family:monospace;color:var(--copper-lt)">/vision</code> or the <code style="font-family:monospace;color:var(--copper-lt)">--image</code> flag. Works with any vision-capable Ollama model.</p>
-    </div>
-    <div class="feature-card">
-      <div class="feature-icon">🔌</div>
-      <h3>Fully Offline</h3>
-      <p>No data leaves your machine. Your code, your history, your memory — all local. Use Ollama Cloud for convenience or your own GPU for absolute privacy.</p>
-    </div>
-    <div class="feature-card">
-      <div class="feature-icon">📊</div>
-      <h3>TUI Dashboard</h3>
-      <p>Run <code style="font-family:monospace;color:var(--copper-lt)">mantis tui</code> for a full terminal dashboard — symbol search, impact analysis, dead code, and architecture lint in one place.</p>
+    <div class="feature-grid">
+      <div class="feature-card">
+        <div class="feature-icon">🧠</div>
+        <h3>Persistent Project Memory</h3>
+        <p>Writes a <code>.mantis/BRAIN.md</code> after every session. Remembers architecture decisions, rejected approaches, and patterns — forever.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">⚡</div>
+        <h3>Codebase Intelligence</h3>
+        <p>Run <code>mantis init</code> once to build a live AST dependency graph. Every question gets only the relevant files — not your whole repo.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🎯</div>
+        <h3>Smart Model Routing</h3>
+        <p>Every message is classified — trivial, fast, code, reasoning, or heavy — and routed to the right model automatically.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🔍</div>
+        <h3>Hallucination Guard</h3>
+        <p>AI output is checked against your actual function signatures in real time. If the model invents a name, Mantis flags it before you act.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">📐</div>
+        <h3>Architecture Lint</h3>
+        <p>Define rules like "no controller may import from db layer" in <code>.mantisrc.yml</code> and enforce them in CI — like ESLint for your architecture.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">💰</div>
+        <h3>Token Cost Tracker</h3>
+        <p>At session end, see exactly what you'd have paid with GPT-4o, Claude Sonnet, or Opus — vs $0.00 with Mantis.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🖼️</div>
+        <h3>Multimodal Input</h3>
+        <p>Paste a screenshot, architecture diagram, or error image with <code>/vision</code>. Works with any vision-capable Ollama model.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🔌</div>
+        <h3>Fully Offline</h3>
+        <p>No data leaves your machine. Code, history, memory — all local. Use Ollama Cloud for convenience or your own GPU for privacy.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">📊</div>
+        <h3>TUI Dashboard</h3>
+        <p>Run <code>mantis tui</code> for a full terminal dashboard — symbol search, impact analysis, dead code, and architecture lint in one place.</p>
+      </div>
     </div>
   </div>
 </section>
-
-<hr class="divider" />
 
 <!-- ── Comparison ─────────────────────────────────────────────────────────── -->
-<section>
-  <div class="section-label">Comparison</div>
-  <h2 class="section-title">The honest comparison.</h2>
-  <p class="section-sub">We're not trying to be diplomatic about this.</p>
-
-  <div class="table-wrap">
-    <table>
-      <thead>
-        <tr>
-          <th>Feature</th>
-          <th>Claude Code</th>
-          <th>GitHub Copilot</th>
-          <th class="highlight-col">◈ Mantis</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr>
-          <td>Monthly cost</td>
-          <td class="price-paid">~$30 API</td>
-          <td class="price-paid">$10/mo</td>
-          <td class="price-free highlight-col">$0</td>
-        </tr>
-        <tr>
-          <td>Multimodal (screenshots)</td>
-          <td class="check">✓</td>
-          <td class="cross">✗</td>
-          <td class="check highlight-col">✓</td>
-        </tr>
-        <tr>
-          <td>Persistent project memory</td>
-          <td class="cross">✗</td>
-          <td class="cross">✗</td>
-          <td class="check highlight-col">✓</td>
-        </tr>
-        <tr>
-          <td>Full codebase awareness</td>
-          <td>Partial</td>
-          <td>Partial</td>
-          <td class="check highlight-col">✓ (AST graph)</td>
-        </tr>
-        <tr>
-          <td>Hallucination detection</td>
-          <td class="cross">✗</td>
-          <td class="cross">✗</td>
-          <td class="check highlight-col">✓</td>
-        </tr>
-        <tr>
-          <td>Token cost tracker</td>
-          <td class="cross">✗</td>
-          <td class="cross">✗</td>
-          <td class="check highlight-col">✓</td>
-        </tr>
-        <tr>
-          <td>Architecture lint (CI)</td>
-          <td class="cross">✗</td>
-          <td class="cross">✗</td>
-          <td class="check highlight-col">✓</td>
-        </tr>
-        <tr>
-          <td>Local / offline</td>
-          <td class="cross">✗</td>
-          <td class="cross">✗</td>
-          <td class="check highlight-col">✓</td>
-        </tr>
-        <tr>
-          <td>Open source</td>
-          <td class="cross">✗</td>
-          <td class="cross">✗</td>
-          <td class="check highlight-col">✓ MIT</td>
-        </tr>
-      </tbody>
-    </table>
+<section style="background:var(--surface); padding: 96px 0;">
+  <div class="container">
+    <p class="section-label">Comparison</p>
+    <h2 class="section-title">How Mantis stacks up.</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Feature</th>
+            <th class="highlight-col">Mantis</th>
+            <th>Claude Code</th>
+            <th>GitHub Copilot</th>
+            <th>Cursor</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>Monthly cost</td><td class="price-free highlight-col">$0</td><td class="price-paid">$20+</td><td class="price-paid">$10+</td><td class="price-paid">$20+</td></tr>
+          <tr><td>Persistent project memory</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
+          <tr><td>Dependency graph</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="check">✓</td></tr>
+          <tr><td>Architecture lint</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
+          <tr><td>Hallucination guard</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
+          <tr><td>Fully offline</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
+          <tr><td>Smart model routing</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
+          <tr><td>Token cost tracker</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
+        </tbody>
+      </table>
+    </div>
   </div>
 </section>
-
-<hr class="divider" />
 
 <!-- ── How it works ───────────────────────────────────────────────────────── -->
 <section>
-  <div class="section-label">Getting started</div>
-  <h2 class="section-title">Up and running in 3 steps.</h2>
-  <p class="section-sub">No account. No API key. Just install and go.</p>
-
-  <div class="steps">
-    <div class="step">
-      <div class="step-num">1</div>
-      <h3>Install Mantis</h3>
-      <p>One curl command installs the binary for macOS, Linux, or Windows.</p>
-      <br/>
-      <code>curl -fsSL …/install.sh | sh</code>
-    </div>
-    <div class="step">
-      <div class="step-num">2</div>
-      <h3>Start Ollama</h3>
-      <p>Install <a href="https://ollama.com" style="color:var(--copper-lt)">Ollama</a> locally or get a free cloud key at <a href="https://ollama.com/cloud" style="color:var(--copper-lt)">ollama.com/cloud</a>. No credit card needed.</p>
-      <br/>
-      <code>ollama serve</code>
-    </div>
-    <div class="step">
-      <div class="step-num">3</div>
-      <h3>Index your project</h3>
-      <p>Run <code>mantis init</code> once in your project root to build the AST graph. Then just type <code>mantis</code>.</p>
-      <br/>
-      <code>mantis init &amp;&amp; mantis</code>
+  <div class="container">
+    <p class="section-label">Get started</p>
+    <h2 class="section-title">Up and running in 3 steps.</h2>
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <h3>Install</h3>
+        <p>Run <code>curl -fsSL .../install.sh | sh</code> or <code>brew install seedhire/tap/mantis</code>. One binary, no dependencies.</p>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <h3>Sign in with GitHub</h3>
+        <p>Mantis opens a browser tab on first run. One click to authorize — no extra account, no billing.</p>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <h3>Start coding</h3>
+        <p>Run <code>mantis</code> in any project. Optionally run <code>mantis init</code> to enable codebase intelligence.</p>
+      </div>
     </div>
   </div>
 </section>
-
-<hr class="divider" />
-
-<!-- ── Slash commands ─────────────────────────────────────────────────────── -->
-<section>
-  <div class="section-label">Slash commands</div>
-  <h2 class="section-title">Powerful commands, simple interface.</h2>
-  <p class="section-sub">Everything you need is one slash away.</p>
-
-  <div class="cmd-grid">
-    <div class="cmd-item"><code>/file &lt;path&gt;</code><p>Inject a file into the conversation context — precise and token-efficient.</p></div>
-    <div class="cmd-item"><code>/vision &lt;img&gt;</code><p>Analyze a screenshot, error dialog, or architecture diagram.</p></div>
-    <div class="cmd-item"><code>/brain</code><p>View the accumulated project memory Mantis has built up over your sessions.</p></div>
-    <div class="cmd-item"><code>/save</code><p>Force-save the current session to project memory right now.</p></div>
-    <div class="cmd-item"><code>/cost</code><p>Show the session token report — what you used vs what it would have cost elsewhere.</p></div>
-    <div class="cmd-item"><code>/reset</code><p>Clear conversation history while keeping all brain memory intact.</p></div>
-    <div class="cmd-item"><code>/decision</code><p>Log an architecture decision. Mantis will reference it in future sessions.</p></div>
-    <div class="cmd-item"><code>/reject</code><p>Mark the last suggestion as a rejected approach so Mantis never repeats it.</p></div>
-  </div>
-</section>
-
-<hr class="divider" />
 
 <!-- ── Memory ─────────────────────────────────────────────────────────────── -->
-<section>
-  <div class="memory-layout">
-    <div>
-      <div class="section-label">Project Memory</div>
-      <h2 class="section-title">It remembers. Across every session.</h2>
-      <p style="color:var(--fg-muted);margin-bottom:1.5rem">Mantis writes plain text files you can read, edit, and commit. No proprietary format, no vendor lock-in.</p>
-      <ul style="list-style:none;display:flex;flex-direction:column;gap:0.75rem">
-        <li style="display:flex;gap:0.75rem;align-items:flex-start"><span style="color:var(--success);margin-top:2px">✓</span><span style="color:var(--fg-muted)"><strong style="color:var(--fg)">BRAIN.md</strong> — rolling project summary, updated each session</span></li>
-        <li style="display:flex;gap:0.75rem;align-items:flex-start"><span style="color:var(--success);margin-top:2px">✓</span><span style="color:var(--fg-muted)"><strong style="color:var(--fg)">DECISIONS.log</strong> — timestamped architecture decisions</span></li>
-        <li style="display:flex;gap:0.75rem;align-items:flex-start"><span style="color:var(--success);margin-top:2px">✓</span><span style="color:var(--fg-muted)"><strong style="color:var(--fg)">REJECTED.md</strong> — approaches the AI tried and you rejected</span></li>
-        <li style="display:flex;gap:0.75rem;align-items:flex-start"><span style="color:var(--success);margin-top:2px">✓</span><span style="color:var(--fg-muted)"><strong style="color:var(--fg)">GROUND_TRUTH.json</strong> — live function signatures for hallucination checking</span></li>
-      </ul>
-    </div>
-    <div class="file-tree">
-      <div><span class="dir">.mantis/</span></div>
-      <div>&nbsp;&nbsp;<span class="file">├── BRAIN.md</span> &nbsp;<span class="note">← rolling context</span></div>
-      <div>&nbsp;&nbsp;<span class="file">├── CONVENTIONS.md</span> &nbsp;<span class="note">← your rules</span></div>
-      <div>&nbsp;&nbsp;<span class="file">├── DECISIONS.log</span> &nbsp;<span class="note">← timestamped</span></div>
-      <div>&nbsp;&nbsp;<span class="file">├── REJECTED.md</span> &nbsp;<span class="note">← don't repeat</span></div>
-      <div>&nbsp;&nbsp;<span class="file">└── GROUND_TRUTH.json</span></div>
-      <div>&nbsp;</div>
-      <div><span class="t-dim"># All plain text. Human-editable.</span></div>
-      <div><span class="t-dim"># Safe to commit. No vendor lock-in.</span></div>
+<section style="background:var(--surface); padding: 96px 0;">
+  <div class="container">
+    <div class="memory-layout">
+      <div>
+        <p class="section-label">Project Memory</p>
+        <h2 class="section-title">It remembers what you built.</h2>
+        <p class="section-sub">After every session Mantis updates <code style="color:var(--copper-lt)">.mantis/BRAIN.md</code> with your decisions, patterns, and rejected ideas. Next session it picks up where you left off.</p>
+      </div>
+      <div class="file-tree">
+        <div><span class="dir">.mantis/</span></div>
+        <div>&nbsp; <span class="file">BRAIN.md</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← auto-updated</span></div>
+        <div>&nbsp; <span class="file">graph.db</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← dependency graph</span></div>
+        <div>&nbsp; <span class="file">sessions/</span></div>
+        <div>&nbsp; &nbsp; <span class="file">2026-03-01.md</span></div>
+        <div>&nbsp; &nbsp; <span class="file">2026-02-28.md</span></div>
+        <div style="margin-top:.5rem"><span class="dir">.mantisrc.yml</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← your lint rules</span></div>
+      </div>
     </div>
   </div>
 </section>
 
 <!-- ── CTA ────────────────────────────────────────────────────────────────── -->
-<div class="cta-section">
-  <h2>Start coding smarter.<br/>Keep your money.</h2>
-  <p>Join developers who've stopped paying for AI tools that charge by the token.</p>
-  <a href="#install" class="btn btn-primary">Install Mantis — it's free →</a>
-</div>
+<section class="cta-section">
+  <div class="container">
+    <h2><span class="metallic">Start coding for free.</span></h2>
+    <p>No credit card. No account creation. Just GitHub login and you're in.</p>
+    <a href="#install" class="btn btn-primary">↓ Install Mantis</a>
+  </div>
+</section>
 
 <!-- ── Footer ────────────────────────────────────────────────────────────── -->
 <footer>
-  <span>◈ Mantis — MIT License — Built with ❤️ for developers</span>
+  <span>◈ Mantis · built by <a href="https://github.com/Sagar-Darji" target="_blank">Sagar Darji</a></span>
   <div class="footer-links">
-    <a href="https://github.com/seedhire/mantis" target="_blank">GitHub</a>
-    <a href="https://github.com/seedhire/mantis/issues" target="_blank">Issues</a>
-    <a href="https://github.com/seedhire/mantis/blob/main/README.md" target="_blank">Docs</a>
-    <a href="https://ollama.com/cloud" target="_blank">Ollama Cloud</a>
+    <a href="https://github.com/SeedHire/Mantis" target="_blank">GitHub</a>
+    <a href="https://github.com/SeedHire/Mantis/issues" target="_blank">Issues</a>
+    <a href="https://github.com/SeedHire/Mantis/blob/main/README.md" target="_blank">Docs</a>
   </div>
 </footer>
 
 <script>
-  function copyInstall() {
-    const text = document.getElementById('cmd-text').textContent;
-    navigator.clipboard.writeText(text).then(() => {
-      const btn = document.querySelector('.copy-btn');
-      btn.textContent = 'copied!';
-      btn.style.color = 'var(--success)';
-      setTimeout(() => { btn.textContent = 'copy'; btn.style.color = ''; }, 2000);
-    });
+  function copy(id, btn) {
+    navigator.clipboard.writeText(document.getElementById(id).textContent);
+    const orig = btn.textContent;
+    btn.textContent = 'copied!';
+    setTimeout(() => btn.textContent = orig, 1800);
   }
 
-  // Smooth scroll for anchor links
-  document.querySelectorAll('a[href^="#"]').forEach(a => {
-    a.addEventListener('click', e => {
-      const target = document.querySelector(a.getAttribute('href'));
-      if (target) { e.preventDefault(); target.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
-    });
-  });
+  function showTab(name) {
+    document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById('pane-' + name).classList.add('active');
+    event.currentTarget.classList.add('active');
+  }
 </script>
 </body>
 </html>
