@@ -165,6 +165,11 @@ type GlobalKeys struct {
 	Tab3     key.Binding
 	Tab4     key.Binding
 	Tab5     key.Binding
+	Tab6     key.Binding
+	Tab7     key.Binding
+	Tab8     key.Binding
+	Tab9     key.Binding
+	Tab0     key.Binding
 }
 
 var Keys = GlobalKeys{
@@ -176,11 +181,16 @@ var Keys = GlobalKeys{
 	Tab3:     key.NewBinding(key.WithKeys("3"), key.WithHelp("3", "impact")),
 	Tab4:     key.NewBinding(key.WithKeys("4"), key.WithHelp("4", "lint")),
 	Tab5:     key.NewBinding(key.WithKeys("5"), key.WithHelp("5", "dead code")),
+	Tab6:     key.NewBinding(key.WithKeys("6"), key.WithHelp("6", "hotspots")),
+	Tab7:     key.NewBinding(key.WithKeys("7"), key.WithHelp("7", "traces")),
+	Tab8:     key.NewBinding(key.WithKeys("8"), key.WithHelp("8", "workspace")),
+	Tab9:     key.NewBinding(key.WithKeys("9"), key.WithHelp("9", "brain")),
+	Tab0:     key.NewBinding(key.WithKeys("0"), key.WithHelp("0", "router")),
 }
 
 // HelpText renders the bottom help bar.
 func HelpText(extra ...string) string {
-	hints := append(extra, "tab / shift+tab  navigate", "1-5  jump", "q  quit")
+	hints := append(extra, "tab / shift+tab  navigate", "1-9,0  jump", "q  quit")
 	out := ""
 	for i, h := range hints {
 		if i > 0 {

@@ -154,7 +154,9 @@
       padding: 7px 18px !important; font-size: 13px !important;
     }
 
-    /* ── Hero ──────────────────────────────────────────────────────────── */
+    /* Fix nav specificity: .nav-links a overrides .btn-primary color */
+    .nav-links a.btn-primary { color: #fff; }
+    .nav-links a.btn-primary:hover { color: #fff; }
     .hero {
       padding: 110px 0 80px;
       text-align: center;
@@ -340,7 +342,7 @@
       font-family: 'Space Grotesk', system-ui, sans-serif;
     }
     .copy-btn:hover { color: var(--copper); background: rgba(200,121,65,.1); }
-    .install-sep { color: var(--border-hi); font-size: 14px; }
+    .install-sep { color: var(--fg-soft); font-size: 14px; padding: 3px 8px; }
 
     /* ── Demo terminal (tabbed) ────────────────────────────────────────── */
     .demo { background: var(--surface); padding: 96px 0; }
@@ -426,7 +428,7 @@
     thead { background: var(--surface2); }
     th {
       padding: 1rem 1.25rem; text-align: left; font-weight: 700;
-      color: var(--fg-muted); font-size: .75rem;
+      color: var(--fg-soft); font-size: .75rem;
       text-transform: uppercase; letter-spacing: .05em;
     }
     th:not(:first-child) { text-align: center; }
@@ -437,7 +439,7 @@
     .cross { color: var(--fg-muted); font-size: 1.1rem; }
     .highlight-col { color: var(--gold); font-weight: 700; }
     .price-free { color: var(--success); font-weight: 700; }
-    .price-paid { color: var(--fg-muted); }
+    .price-paid { color: var(--fg-soft); }
 
     /* ── How it works ──────────────────────────────────────────────────── */
     .steps { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 1.5rem; }
@@ -464,7 +466,7 @@
       font-family: 'JetBrains Mono', monospace; font-size: .82rem; line-height: 2;
     }
     .file-tree .dir  { color: var(--copper); }
-    .file-tree .file { color: var(--fg-muted); }
+    .file-tree .file { color: var(--fg-soft); }
 
     /* ── CTA ───────────────────────────────────────────────────────────── */
     .cta-section {
@@ -488,9 +490,9 @@
       display: flex; justify-content: space-between; align-items: center;
       flex-wrap: wrap; gap: 1rem;
       max-width: 1100px; margin: 0 auto;
-      color: var(--fg-muted); font-size: .85rem;
+      color: var(--fg-soft); font-size: .85rem;
     }
-    footer a { color: var(--fg-muted); }
+    footer a { color: var(--fg-soft); }
     footer a:hover { color: var(--copper-lt); }
     .footer-links { display: flex; gap: 1.5rem; }
 
@@ -520,7 +522,7 @@
       display: block;
     }
     .stat-label {
-      font-size: .75rem; color: var(--fg-muted);
+      font-size: .75rem; color: var(--fg-soft);
       text-transform: uppercase; letter-spacing: .08em;
     }
 
@@ -538,7 +540,7 @@
     }
     .cmd-row:hover { border-color: var(--border-hi); }
     .cmd-name { color: var(--copper-lt); flex-shrink: 0; }
-    .cmd-desc { color: var(--fg-muted); font-size: .78rem; }
+    .cmd-desc { color: var(--fg-soft); font-size: .78rem; }
 
     /* ── Feature groups ─────────────────────────────────────────────────── */
     .feature-group { margin-bottom: 2.5rem; }

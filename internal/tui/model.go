@@ -19,10 +19,23 @@ const (
 	tabImpact
 	tabLint
 	tabDead
+	tabHotspots
+	tabTraces
+	tabWorkspace
+	tabBrain
+	tabRouter
 	tabCount
 )
 
-var tabNames = []string{"Dashboard", "Search", "Impact", "Lint", "Dead Code"}
+var tabNames = []string{
+	"Dashboard", "Search", "Impact", "Lint", "Dead",
+	"Hotspots", "Traces", "Workspace", "Brain", "Router",
+}
+
+var tabIcons = []string{
+	"◈", "🔍", "⚡", "⬡", "◌",
+	"🔥", "📊", "🌐", "🧠", "🎯",
+}
 
 // ── Root model ────────────────────────────────────────────────────────────────
 
@@ -38,6 +51,11 @@ type Model struct {
 	impact    ImpactModel
 	lint      LintModel
 	dead      DeadModel
+	hotspots  HotspotsModel
+	traces    TracesModel
+	workspace WorkspaceModel
+	brain     BrainModel
+	router    RouterModel
 }
 
 // New creates the root TUI model.
@@ -50,6 +68,11 @@ func New(db *graph.DB, root string) Model {
 		impact:    NewImpactModel(db),
 		lint:      NewLintModel(db, root),
 		dead:      NewDeadModel(db),
+		hotspots:  NewHotspotsModel(root),
+		traces:    NewTracesModel(db),
+		workspace: NewWorkspaceModel(root),
+		brain:     NewBrainModel(root),
+		router:    NewRouterModel(),
 	}
 	m.dead.SetDB(db)
 	return m
@@ -62,6 +85,11 @@ func (m Model) Init() tea.Cmd {
 		m.impact.Init(),
 		m.lint.Init(),
 		m.dead.Init(),
+		m.hotspots.Init(),
+		m.traces.Init(),
+		m.workspace.Init(),
+		m.brain.Init(),
+		m.router.Init(),
 	)
 }
 
@@ -72,15 +100,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		contentH := m.height - 4 // subtract tab bar + help line
+		contentH := m.height - 4
 		m.search.SetSize(m.width, contentH)
 		m.impact.SetSize(m.width, contentH)
 		m.lint.SetSize(m.width, contentH)
 		m.dead.SetSize(m.width, contentH)
+		m.hotspots.SetSize(m.width, contentH)
+		m.traces.SetSize(m.width, contentH)
+		m.workspace.SetSize(m.width, contentH)
+		m.brain.SetSize(m.width, contentH)
+		m.router.SetSize(m.width, contentH)
 		m.dashboard.width = m.width
 
 	case tea.KeyMsg:
-		// Global navigation — don't intercept if a text input has focus
 		switch {
 		case key.Matches(msg, Keys.Quit):
 			return m, tea.Quit
@@ -98,38 +130,41 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeTab = tabLint
 		case key.Matches(msg, Keys.Tab5):
 			m.activeTab = tabDead
+		case key.Matches(msg, Keys.Tab6):
+			m.activeTab = tabHotspots
+		case key.Matches(msg, Keys.Tab7):
+			m.activeTab = tabTraces
+		case key.Matches(msg, Keys.Tab8):
+			m.activeTab = tabWorkspace
+		case key.Matches(msg, Keys.Tab9):
+			m.activeTab = tabBrain
+		case key.Matches(msg, Keys.Tab0):
+			m.activeTab = tabRouter
 		}
 	}
 
-	// Route messages to the active screen (and all screens for window resize)
-	switch msg.(type) {
-	case tea.WindowSizeMsg:
-		var c tea.Cmd
-		m.dashboard, c = m.dashboard.Update(msg)
-		cmds = append(cmds, c)
-		m.search, c = m.search.Update(msg)
-		cmds = append(cmds, c)
-		m.impact, c = m.impact.Update(msg)
-		cmds = append(cmds, c)
-		m.lint, c = m.lint.Update(msg)
-		cmds = append(cmds, c)
-		m.dead, c = m.dead.Update(msg)
-		cmds = append(cmds, c)
-
-	default:
-		// Non-window messages go to ALL screens (so background loads work)
-		var c tea.Cmd
-		m.dashboard, c = m.dashboard.Update(msg)
-		cmds = append(cmds, c)
-		m.search, c = m.search.Update(msg)
-		cmds = append(cmds, c)
-		m.impact, c = m.impact.Update(msg)
-		cmds = append(cmds, c)
-		m.lint, c = m.lint.Update(msg)
-		cmds = append(cmds, c)
-		m.dead, c = m.dead.Update(msg)
-		cmds = append(cmds, c)
-	}
+	// Route messages to ALL screens (for background loads + window resize)
+	var c tea.Cmd
+	m.dashboard, c = m.dashboard.Update(msg)
+	cmds = append(cmds, c)
+	m.search, c = m.search.Update(msg)
+	cmds = append(cmds, c)
+	m.impact, c = m.impact.Update(msg)
+	cmds = append(cmds, c)
+	m.lint, c = m.lint.Update(msg)
+	cmds = append(cmds, c)
+	m.dead, c = m.dead.Update(msg)
+	cmds = append(cmds, c)
+	m.hotspots, c = m.hotspots.Update(msg)
+	cmds = append(cmds, c)
+	m.traces, c = m.traces.Update(msg)
+	cmds = append(cmds, c)
+	m.workspace, c = m.workspace.Update(msg)
+	cmds = append(cmds, c)
+	m.brain, c = m.brain.Update(msg)
+	cmds = append(cmds, c)
+	m.router, c = m.router.Update(msg)
+	cmds = append(cmds, c)
 
 	return m, tea.Batch(cmds...)
 }
@@ -138,10 +173,8 @@ func (m Model) View() string {
 	tabBar := m.renderTabBar()
 	content := m.renderActiveTab()
 
-	// Bottom help bar stretched to terminal width
 	help := StyleHelp.Width(m.width).Render(HelpText())
 
-	// Pad content to fill terminal height
 	contentLines := strings.Count(content, "\n") + 1
 	tabBarLines := 2
 	helpLines := 1
@@ -156,28 +189,40 @@ func (m Model) View() string {
 func (m Model) renderTabBar() string {
 	var tabs []string
 	for i, name := range tabNames {
+		// Use 1-9 then 0 for tab 10
+		numStr := fmt.Sprintf("%d", i+1)
+		if i == 9 {
+			numStr = "0"
+		}
 		num := lipgloss.NewStyle().
 			Foreground(colorCopperDark).
 			Bold(true).
-			Render(fmt.Sprintf("%d", i+1))
+			Render(numStr)
+
+		// Shorter labels for compact tab bar
+		shortName := name
+		if m.width < 120 {
+			shortName = tabShort(i)
+		}
+
 		if i == m.activeTab {
 			label := lipgloss.NewStyle().
 				Bold(true).
 				Foreground(colorBG).
 				Background(colorCopper).
-				Padding(0, 3).
-				Render(num + " " + name)
+				Padding(0, 1).
+				Render(num + " " + shortName)
 			tabs = append(tabs, label)
 		} else {
 			label := lipgloss.NewStyle().
 				Foreground(colorFgMuted).
 				Background(colorSurface).
-				Padding(0, 3).
-				Render(num + " " + name)
+				Padding(0, 1).
+				Render(num + " " + shortName)
 			tabs = append(tabs, label)
 		}
 	}
-	// Right-side branding
+
 	brand := lipgloss.NewStyle().
 		Foreground(colorCopper).
 		Background(colorSurface).
@@ -186,7 +231,6 @@ func (m Model) renderTabBar() string {
 		Render("◈ MANTIS")
 
 	bar := lipgloss.JoinHorizontal(lipgloss.Top, tabs...)
-	// Pad between tabs and brand
 	barWidth := lipgloss.Width(bar)
 	brandWidth := lipgloss.Width(brand)
 	pad := m.width - barWidth - brandWidth
@@ -201,6 +245,14 @@ func (m Model) renderTabBar() string {
 	return full + "\n"
 }
 
+func tabShort(idx int) string {
+	shorts := []string{"Home", "Find", "Imp", "Lint", "Dead", "Hot", "Trace", "WS", "Brain", "Route"}
+	if idx < len(shorts) {
+		return shorts[idx]
+	}
+	return ""
+}
+
 func (m Model) renderActiveTab() string {
 	switch m.activeTab {
 	case tabDashboard:
@@ -213,6 +265,16 @@ func (m Model) renderActiveTab() string {
 		return m.lint.View()
 	case tabDead:
 		return m.dead.View()
+	case tabHotspots:
+		return m.hotspots.View()
+	case tabTraces:
+		return m.traces.View()
+	case tabWorkspace:
+		return m.workspace.View()
+	case tabBrain:
+		return m.brain.View()
+	case tabRouter:
+		return m.router.View()
 	}
 	return ""
 }

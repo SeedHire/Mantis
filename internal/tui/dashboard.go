@@ -156,6 +156,11 @@ quickRow("2", "Search", "Find all importers of a symbol"),
 quickRow("3", "Impact", "Blast-radius + risk scores before a refactor"),
 quickRow("4", "Lint", "Enforce architecture rules from .mantisrc.yml"),
 quickRow("5", "Dead Code", "Exported symbols with zero references"),
+quickRow("6", "Hotspots", "Git churn, risk zones, co-change coupling"),
+quickRow("7", "Traces", "Runtime hotpaths, cold code, weighted impact"),
+quickRow("8", "Workspace", "Cross-repo graph intelligence"),
+quickRow("9", "Brain", "BRAIN.md, decisions, rejected approaches"),
+quickRow("0", "Router", "7-tier model mapping and classification"),
 )
 
 body = lipgloss.JoinVertical(
