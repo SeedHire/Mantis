@@ -187,9 +187,10 @@
       50%      { opacity: .75; }
     }
 
-    /* ASCII banner + mascot (side by side, matching CLI output) */
+    /* ASCII banner + mascot (side by side) */
     .hero-logo-wrap {
-      position: relative; display: inline-block; margin-bottom: 36px;
+      position: relative; display: inline-flex; align-items: flex-start;
+      gap: 10px; margin-bottom: 36px;
     }
     .hero-logo-wrap::before {
       content: '';
@@ -205,11 +206,23 @@
       white-space: pre;
       display: inline-block;
       text-shadow:
-        0 0 30px rgba(200,121,65,.7),
-        0 0 60px rgba(200,121,65,.35),
-        0 0 100px rgba(200,121,65,.15);
+        0 0 30px rgba(200,121,65,.55),
+        0 0 60px rgba(200,121,65,.25),
+        0 0 100px rgba(200,121,65,.10);
       letter-spacing: 0;
-      filter: brightness(1.15);
+      filter: brightness(1.1);
+      margin: 0; padding: 0;
+    }
+    .hero-mascot {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: clamp(7px, 1.4vw, 13px);
+      line-height: 1.22;
+      color: var(--copper-lt);
+      white-space: pre;
+      display: inline-block;
+      text-shadow: 0 0 20px rgba(232,169,106,.4);
+      margin: 0; padding: 0;
+      padding-top: calc(clamp(7px, 1.4vw, 13px) * 1.22);
     }
 
     /* Version pill */
@@ -513,11 +526,15 @@
 
     <div class="hero-logo-wrap fade-up">
 <pre class="hero-logo">███╗   ███╗ █████╗ ███╗   ██╗████████╗██╗███████╗
-████╗ ████║██╔══██╗████╗  ██║╚══██╔══╝██║██╔════╝     \   /
-██╔████╔██║███████║██╔██╗ ██║   ██║   ██║███████╗      \_/
-██║╚██╔╝██║██╔══██║██║╚██╗██║   ██║   ██║╚════██║     (o_o)
-██║ ╚═╝ ██║██║  ██║██║ ╚████║   ██║   ██║███████║ <===[|||]===>
-╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝   ╚═╝   ╚═╝╚══════╝</pre>
+████╗ ████║██╔══██╗████╗  ██║╚══██╔══╝██║██╔════╝
+██╔████╔██║███████║██╔██╗ ██║   ██║   ██║███████╗
+██║╚██╔╝██║██╔══██║██║╚██╗██║   ██║   ██║╚════██║
+██║ ╚═╝ ██║██║  ██║██║ ╚████║   ██║   ██║███████║
+╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝   ╚═╝   ╚═╝╚══════╝</pre><pre class="hero-mascot"> \   /
+  \_/
+ (o_o)
+<===[|||]===>
+</pre>
     </div>
 
     <h1 class="fade-up d2">
