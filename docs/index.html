@@ -187,15 +187,16 @@
       50%      { opacity: .75; }
     }
 
-    /* ASCII banner + mascot (side by side) */
+    /* ASCII banner + mascot */
     .hero-logo-wrap {
-      position: relative; display: inline-flex; align-items: flex-start;
-      gap: 10px; margin-bottom: 36px;
+      position: relative;
+      display: inline-block;
+      margin-bottom: 6px;
     }
     .hero-logo-wrap::before {
       content: '';
       position: absolute; inset: -20px;
-      background: radial-gradient(ellipse 80% 60% at 50% 50%, rgba(200,121,65,.2) 0%, transparent 70%);
+      background: radial-gradient(ellipse 80% 60% at 50% 50%, rgba(200,121,65,.18) 0%, transparent 70%);
       pointer-events: none; border-radius: 20px;
     }
     .hero-logo {
@@ -211,18 +212,16 @@
         0 0 100px rgba(200,121,65,.10);
       letter-spacing: 0;
       filter: brightness(1.1);
-      margin: 0; padding: 0;
     }
     .hero-mascot {
       font-family: 'JetBrains Mono', monospace;
-      font-size: clamp(7px, 1.4vw, 13px);
-      line-height: 1.22;
+      font-size: clamp(9px, 1.2vw, 12px);
+      line-height: 1.5;
       color: var(--copper-lt);
       white-space: pre;
       display: inline-block;
       text-shadow: 0 0 20px rgba(232,169,106,.4);
-      margin: 0; padding: 0;
-      padding-top: calc(clamp(7px, 1.4vw, 13px) * 1.22);
+      margin-bottom: 36px;
     }
 
     /* Version pill */
@@ -525,17 +524,18 @@
   <div class="container">
 
     <div class="hero-logo-wrap fade-up">
-<pre class="hero-logo">███╗   ███╗ █████╗ ███╗   ██╗████████╗██╗███████╗
+      <pre class="hero-logo">███╗   ███╗ █████╗ ███╗   ██╗████████╗██╗███████╗
 ████╗ ████║██╔══██╗████╗  ██║╚══██╔══╝██║██╔════╝
 ██╔████╔██║███████║██╔██╗ ██║   ██║   ██║███████╗
 ██║╚██╔╝██║██╔══██║██║╚██╗██║   ██║   ██║╚════██║
 ██║ ╚═╝ ██║██║  ██║██║ ╚████║   ██║   ██║███████║
-╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝   ╚═╝   ╚═╝╚══════╝</pre><pre class="hero-mascot"> \   /
-  \_/
- (o_o)
-<===[|||]===>
-</pre>
+╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝   ╚═╝   ╚═╝╚══════╝</pre>
     </div>
+    <pre class="hero-mascot fade-up d1">     
+     \   /
+      \_/
+     (o_o)
+ <===[|||]==></pre>
 
     <h1 class="fade-up d2">
       AI coding assistant.<br/>
