@@ -23,7 +23,7 @@ import (
 const (
 	logFile        = "telemetry.jsonl"
 	disabledFlag   = "telemetry_disabled"
-	uploadEndpoint = "https://onwhlecvqbwbqxnhbpqk.supabase.co/functions/v1/track-event"
+	uploadEndpoint = "https://vkimmiebehlgzlgrbwyo.supabase.co/functions/v1/track-event"
 	batchSize      = 10
 )
 
