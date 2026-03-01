@@ -3,17 +3,20 @@ version: 2
 
 project_name: mantis
 
+partial:
+  by: goos
+
 before:
   hooks:
     - go mod tidy
-    - go vet ./...
 
 builds:
   - id: mantis
     main: ./cmd/mantis
     binary: mantis
     env:
-      - CGO_ENABLED=0
+      - CGO_ENABLED=1
+      - '{{if and (eq .Os "linux") (eq .Arch "arm64")}}CC=aarch64-linux-gnu-gcc{{end}}'
     goos:
       - linux
       - darwin
