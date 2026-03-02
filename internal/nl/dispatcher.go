@@ -55,6 +55,15 @@ func (d *Dispatcher) IsAvailable() bool {
 	return d != nil && d.db != nil
 }
 
+// Querier returns a graph.Querier for direct graph queries.
+// Returns nil if the dispatcher is unavailable.
+func (d *Dispatcher) Querier() *graph.Querier {
+	if !d.IsAvailable() {
+		return nil
+	}
+	return graph.NewQuerier(d.db)
+}
+
 // Dispatch analyses the user message and runs whichever internal tools are relevant.
 // Returns a slice of ToolResult to inject into the AI's context before it answers.
 func (d *Dispatcher) Dispatch(message string) []ToolResult {

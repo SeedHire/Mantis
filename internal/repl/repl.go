@@ -19,9 +19,12 @@ import (
 	"github.com/chzyer/readline"
 	"golang.org/x/term"
 	"github.com/charmbracelet/glamour"
+	"github.com/seedhire/mantis/internal/agent"
 	"github.com/seedhire/mantis/internal/autofix"
 	"github.com/seedhire/mantis/internal/brain"
 	"github.com/seedhire/mantis/internal/embeddings"
+	"github.com/seedhire/mantis/internal/graph"
+	"github.com/seedhire/mantis/internal/intel"
 	"github.com/seedhire/mantis/internal/nl"
 	"github.com/seedhire/mantis/internal/ollama"
 	"github.com/seedhire/mantis/internal/pipeline"
@@ -43,6 +46,25 @@ const (
 	colorRed    = "\033[38;5;197m"
 	colorBold   = "\033[1m"
 )
+
+// routerEmbedAdapter adapts *embeddings.Store to satisfy router.EmbedStore.
+// The router package defines a minimal interface to avoid importing embeddings.
+type routerEmbedAdapter struct{ store *embeddings.Store }
+
+func (a *routerEmbedAdapter) Add(ctx context.Context, id, source, sectionLabel, text string) error {
+	return a.store.Add(ctx, id, source, sectionLabel, text)
+}
+func (a *routerEmbedAdapter) SearchBySource(ctx context.Context, query, source string, limit int) ([]router.EmbedChunk, error) {
+	chunks, err := a.store.SearchBySource(ctx, query, source, limit)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]router.EmbedChunk, len(chunks))
+	for i, c := range chunks {
+		result[i] = router.EmbedChunk{SectionLabel: c.SectionLabel, Score: c.Score}
+	}
+	return result, nil
+}
 
 // Config holds REPL startup options.
 type Config struct {
@@ -150,20 +172,22 @@ func Run(cfg Config) error {
 		fmt.Printf("%s● %d skills loaded%s\n", colorGold, n, colorReset)
 	}
 
-	// Semantic embeddings — optional, used for memory retrieval.
+	// Semantic embeddings — optional, used for memory retrieval + router classifier.
 	var embStore *embeddings.Store
+	var routerStore router.EmbedStore
 	mantisDir := filepath.Join(root, ".mantis")
 	if es, err := embeddings.Open(mantisDir, client); err == nil {
 		embStore = es
 		defer embStore.Close()
-		// Background index brain files on first run.
-		if embStore.Count() == 0 {
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-				defer cancel()
-				_ = embStore.IndexBrainFiles(ctx, mantisDir)
-			}()
-		}
+		adapter := &routerEmbedAdapter{store: embStore}
+		routerStore = adapter
+		// Re-index brain files and router examples in background.
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			defer cancel()
+			_ = embStore.IndexBrainFiles(ctx, mantisDir)
+			router.IndexRouterExamples(adapter)
+		}()
 	}
 
 	// NL dispatcher — codebase intelligence tools, called automatically.
@@ -203,7 +227,7 @@ func Run(cfg Config) error {
 
 	// One-shot mode: mantis "question"
 	if cfg.InitialQuery != "" {
-		return runOnce(cfg, client, sess, b, dispatcher, messages, truthWriter, usageTracker)
+		return runOnce(cfg, client, sess, b, dispatcher, messages, truthWriter, usageTracker, routerStore)
 	}
 
 	// Interactive REPL with readline (history, arrows, Ctrl+R, tab completion).
@@ -234,7 +258,7 @@ func Run(cfg Config) error {
 	})
 	if err != nil {
 		// Fallback to plain scanner if readline init fails (e.g. non-TTY).
-		return runWithScanner(cfg, client, sess, b, dispatcher, messages, truthWriter, usageTracker)
+		return runWithScanner(cfg, client, sess, b, dispatcher, messages, truthWriter, usageTracker, routerStore)
 	}
 	defer rl.Close()
 
@@ -289,7 +313,7 @@ func Run(cfg Config) error {
 
 		// Classify intent → pick model.
 		hasImage := cfg.ImagePath != ""
-		intent := router.Classify(input, hasImage)
+		intent := router.Classify(input, hasImage, routerStore)
 		if cfg.ForceTier != "" {
 			intent.Tier = parseTier(cfg.ForceTier)
 		}
@@ -338,19 +362,30 @@ func Run(cfg Config) error {
 			userContent = tmpl + "\n\n" + input
 		}
 
-		// Semantic memory retrieval — find relevant past context.
-		if embStore != nil && embStore.Count() > 0 {
+		// Semantic memory retrieval — hybrid BM25+cosine via RRF.
+		var memChunksFound int
+		if embStore != nil {
 			embCtx, embCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			if chunks, err := embStore.Search(embCtx, input, 2); err == nil && len(chunks) > 0 {
-				var memBuf strings.Builder
-				memBuf.WriteString("\n[retrieved_memory]\n")
+			if chunks, err := embStore.Search(embCtx, input, 5); err == nil && len(chunks) > 0 {
+				// Keep top chunk and any within 0.015 RRF delta of it.
+				topScore := chunks[0].Score
+				var relevant []embeddings.Chunk
 				for _, c := range chunks {
-					if c.Score > 0.5 {
-						memBuf.WriteString(fmt.Sprintf("(%s, relevance %.0f%%): %s\n", c.Source, c.Score*100, c.Text))
+					if topScore-c.Score < 0.015 {
+						relevant = append(relevant, c)
 					}
 				}
-				if mem := memBuf.String(); len(mem) > 25 {
-					userContent = userContent + "\n" + mem
+				if len(relevant) > 0 {
+					var memBuf strings.Builder
+					memBuf.WriteString("<retrieved_memory>\n")
+					// Most relevant chunk goes last (closest to query — Lost in the Middle fix).
+					for i := len(relevant) - 1; i >= 0; i-- {
+						c := relevant[i]
+						memBuf.WriteString(fmt.Sprintf("[%s] %s\n", c.Source, c.Text))
+					}
+					memBuf.WriteString("</retrieved_memory>")
+					userContent = userContent + "\n\n" + memBuf.String()
+					memChunksFound = len(relevant)
 				}
 			}
 			embCancel()
@@ -386,6 +421,43 @@ func Run(cfg Config) error {
 		// Proactive context compression — compress old turns before they cause overflow.
 		messages = compressIfNeeded(messages, client)
 
+		// ── Multi-agent fan-out for complex multi-package tasks ───────────────
+		// Gate: TierHeavy or TierCode, graph available, impact spans 4+ files
+		// across 2+ packages. Workers run in parallel goroutines; each uses the
+		// full AgentToolkit (read/write/bash/search/finish).
+		if (intent.Tier == router.TierHeavy || intent.Tier == router.TierCode) &&
+			dispatcher.IsAvailable() {
+			if querier := dispatcher.Querier(); querier != nil {
+				if target := extractImpactTarget(input, querier); target != "" {
+					if impact, err := intel.Impact(querier, target, 5); err == nil &&
+						agent.ShouldRunMultiAgent(impact) {
+						toolkit := agent.NewToolkit(root, querier, embStore)
+						agentCtx, agentCancel := context.WithTimeout(context.Background(), 15*time.Minute)
+						combined, agentErr := agent.Run(
+							agentCtx, input, impact, toolkit, client,
+							buildSystemPrompt(brainContext, tierSkills, router.TierCode),
+							mantisDir,
+						)
+						agentCancel()
+						if agentErr == nil {
+							fmt.Printf("%s◈ Mantis%s %s[multi-agent · %d files · %d packages]%s\n",
+								colorCopper+colorBold, colorReset, colorDim,
+								impact.TotalFiles, agent.DistinctPackages(impact), colorReset)
+							renderResponse(stripInternalBlocks(stripFileBlocks(combined)))
+							wf := extractAndWriteFiles(combined, root)
+							if len(wf) > 0 {
+								printWrittenFiles(wf)
+							}
+							messages = append(messages, ollama.Message{Role: "assistant", Content: combined})
+							sess.Add(model, intent.Tier, 0, 0, hasImage)
+							continue
+						}
+						fmt.Printf("%s  [multi-agent failed: %v — falling back]%s\n\n", colorRed, agentErr, colorReset)
+					}
+				}
+			}
+		}
+
 		// ── Multi-stage SWE pipeline for complex build/implement requests ─────
 		// Triggered before the single-model path so complex tasks get:
 		//   plan (reason model) → code + tests (code model, parallel)
@@ -394,7 +466,7 @@ func Run(cfg Config) error {
 			pRes, pErr := pipeline.Run(
 				pipelineCtx, client, input,
 				buildSystemPrompt(brainContext, tierSkills, router.TierCode), // TierCode: no <thinking> injection; pipeline stages use their own role suffixes
-				pipeline.Options{AvailableModels: availableModels},
+				pipeline.Options{AvailableModels: availableModels, Root: root},
 			)
 			pipelineCancel()
 
@@ -434,6 +506,11 @@ func Run(cfg Config) error {
 			messages = multiPassReasoning(client, model, intent.Tier, messages)
 		}
 
+		// Show memory retrieval indicator if relevant chunks were found.
+		if memChunksFound > 0 {
+			fmt.Printf("%s  ◉ %d memory chunk(s)%s\n", colorDim, memChunksFound, colorReset)
+		}
+
 		// Show spinner while model generates, then render formatted output.
 		stopSpin := startSpinner(string(intent.TaskType))
 		streamCtx, streamCancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -467,7 +544,10 @@ func Run(cfg Config) error {
 		}
 
 		// Render the full response as formatted markdown.
-		fmt.Printf("%s◈ Mantis%s\n", colorCopper+colorBold, colorReset)
+		turnTok := promptTok + completionTok
+		_, _, sessTotal := sess.Totals()
+		fmt.Printf("%s◈ Mantis%s  %s[+%d tok · session: %d]%s\n",
+			colorCopper+colorBold, colorReset, colorDim, turnTok, sessTotal+turnTok, colorReset)
 		renderResponse(stripInternalBlocks(stripFileBlocks(rb.String())))
 
 		// Write any file code blocks from the response to disk.
@@ -555,9 +635,31 @@ func Run(cfg Config) error {
 			}
 		}
 
-		// Check conventions on AI output.
+		// Convention enforcement — re-prompt once on violations (mirrors hallucination loop).
 		if cr := verify.CheckConventions(rb.String(), conventions); !cr.Clean {
-			fmt.Printf("%s%s%s\n", colorRed, cr.Warning, colorReset)
+			correctionMsg := fmt.Sprintf(
+				"Your response violates these project conventions:\n%s\n"+
+					"Please rewrite your answer following these rules exactly. "+
+					"Do not repeat the violations.",
+				cr.Warning)
+			fmt.Printf("%s  [conventions violated — re-prompting]%s\n", colorDim, colorReset)
+			retryMsgs := append(messages, ollama.Message{Role: "user", Content: correctionMsg})
+			var rb3 strings.Builder
+			retryCtx3, retryCancel3 := context.WithTimeout(context.Background(), 3*time.Minute)
+			pt3, ct3, err3 := streamWithFallback(retryCtx3, client, model, intent.Tier, retryMsgs, &rb3)
+			retryCancel3()
+			if err3 == nil && strings.TrimSpace(rb3.String()) != "" {
+				messages[len(messages)-1] = ollama.Message{Role: "assistant", Content: rb3.String()}
+				sess.Add(model, intent.Tier, pt3, ct3, false)
+				fmt.Printf("%s◈ Mantis%s %s(convention-corrected)%s\n",
+					colorCopper+colorBold, colorReset, colorDim, colorReset)
+				renderResponse(stripInternalBlocks(stripFileBlocks(rb3.String())))
+				if wf2 := extractAndWriteFiles(rb3.String(), root); len(wf2) > 0 {
+					printWrittenFiles(wf2)
+				}
+			} else {
+				fmt.Printf("%s%s%s\n\n", colorRed, cr.Warning, colorReset)
+			}
 		}
 
 		if promptTok > 8000 {
@@ -573,13 +675,13 @@ func Run(cfg Config) error {
 // runOnce handles a single non-interactive query: mantis "question"
 func runOnce(cfg Config, client *ollama.Client, sess *session.Session,
 	b *brain.Brain, dispatcher *nl.Dispatcher, messages []interface{},
-	tw *truth.Writer, ut *usage.Tracker) error {
+	tw *truth.Writer, ut *usage.Tracker, rs router.EmbedStore) error {
 
 	// Normalize terminal error pastes into actionable fix requests.
 	cfg.InitialQuery = normalizeTerminalInput(cfg.InitialQuery)
 
 	hasImage := cfg.ImagePath != ""
-	intent := router.Classify(cfg.InitialQuery, hasImage)
+	intent := router.Classify(cfg.InitialQuery, hasImage, rs)
 	if cfg.ForceTier != "" {
 		intent.Tier = parseTier(cfg.ForceTier)
 	}
@@ -812,6 +914,14 @@ Rules:
 - After all files, confirm: "✓ Created X files: Makefile, src/app.py, ..."
 `)
 
+	// ── Retrieved memory grounding ────────────────────────────────────────────
+	sb.WriteString(`
+## Retrieved memory
+When a <retrieved_memory> block appears in a user message, it contains context
+retrieved from past sessions, decisions, and conventions. Treat it as authoritative
+project context. Do not contradict it unless the user explicitly asks you to.
+`)
+
 	// ── Active skills (engineering expertise loaded from .mantis/skills/) ─────
 	if skillsCtx != "" {
 		sb.WriteString("\n## Engineering Skills\n")
@@ -936,7 +1046,7 @@ func endSession(sess *session.Session, b *brain.Brain, messages []interface{}, e
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 			id := fmt.Sprintf("session-%d", time.Now().Unix())
-			_ = embStore.Add(ctx, id, "session", topic+"\n"+summary)
+			_ = embStore.Add(ctx, id, "session", topic, topic+"\n"+summary)
 		}()
 	}
 }
@@ -960,20 +1070,57 @@ func extractSessionTopic(messages []interface{}) string {
 }
 
 func extractSessionSummary(messages []interface{}) string {
+	var userTopics []string
 	var assistantTurns []string
+
 	for _, m := range messages {
-		if msg, ok := m.(ollama.Message); ok && msg.Role == "assistant" && len(msg.Content) > 50 {
-			assistantTurns = append(assistantTurns, msg.Content)
+		if msg, ok := m.(ollama.Message); ok {
+			switch msg.Role {
+			case "user":
+				content := strings.TrimSpace(msg.Content)
+				// Skip injected context blocks.
+				if len(content) > 10 && !strings.HasPrefix(content, "[") && !strings.HasPrefix(content, "<") {
+					line := content
+					if idx := strings.IndexByte(line, '\n'); idx > 0 {
+						line = line[:idx]
+					}
+					if len(line) > 120 {
+						line = line[:120] + "…"
+					}
+					userTopics = append(userTopics, line)
+				}
+			case "assistant":
+				if len(msg.Content) > 50 {
+					assistantTurns = append(assistantTurns, msg.Content)
+				}
+			}
 		}
 	}
+
 	if len(assistantTurns) == 0 {
 		return ""
 	}
-	last := assistantTurns[len(assistantTurns)-1]
-	if len(last) > 400 {
-		last = last[:400] + "..."
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("## Session (%s)\n\n", time.Now().Format("2006-01-02 15:04")))
+
+	if len(userTopics) > 0 {
+		sb.WriteString("**Topics:**\n")
+		for _, t := range userTopics {
+			sb.WriteString("- " + t + "\n")
+		}
+		sb.WriteString("\n")
 	}
-	return fmt.Sprintf("## Session (%s)\n\n%s\n", time.Now().Format("2006-01-02 15:04"), last)
+
+	last := assistantTurns[len(assistantTurns)-1]
+	if len(last) > 600 {
+		last = last[:600] + "…"
+	}
+	sb.WriteString("**Last response:**\n")
+	sb.WriteString(last)
+	sb.WriteString("\n")
+
+	return sb.String()
 }
 
 func clearScreen() {
@@ -1149,43 +1296,73 @@ func printBanner() {
 }
 
 func printHelp() {
-	fmt.Printf(`%sSlash commands:%s
-  /file <path>       inject a file into context
-  /vision <path>     load an image (screenshot, diagram, error)
-  /reset             clear conversation (keeps brain memory)
-  /cost              token savings report
-  /stats             usage analytics (tiers, latency, files)
-  /telemetry on|off  enable / disable anonymous usage upload
-  /brain             show project memory
-  /save              save session to project memory now
-  /model <tier>      switch tier: trivial · fast · code · reason · heavy · max
-  /reject <reason>   log last suggestion as rejected approach
-  /decision <text>   log an architecture decision
-  /quit              exit (also Ctrl+C)
-
-`, colorDim, colorReset)
+	d := colorDim
+	g := colorGold
+	r := colorReset
+	fmt.Printf("\n%s╭─ Commands ──────────────────────────────────────────────╮%s\n", d, r)
+	cmds := [][2]string{
+		{"/file <path>", "inject a file into context"},
+		{"/vision <path>", "analyze an image or screenshot"},
+		{"/reset", "clear conversation (brain memory kept)"},
+		{"/cost", "token savings report"},
+		{"/stats", "usage analytics (tiers, latency, files)"},
+		{"/brain", "show project memory"},
+		{"/save", "save session to project memory now"},
+		{"/models", "show available models and current routing"},
+		{"/model <tier>", "switch tier: trivial fast code reason heavy max"},
+		{"/reject <reason>", "log last suggestion as rejected approach"},
+		{"/decision <text>", "log an architecture decision"},
+		{"/telemetry on|off", "enable / disable anonymous usage upload"},
+		{"/quit", "exit  (also Ctrl+C)"},
+	}
+	for _, c := range cmds {
+		fmt.Printf("%s│%s  %s%-20s%s  %s%s%s │%s\n",
+			d, r, g, c[0], r, d, c[1], r, r)
+	}
+	fmt.Printf("%s╰────────────────────────────────────────────────────────╯%s\n\n", d, r)
 }
 
 func printFooter() {
 	fmt.Printf("\n%s  /help  /cost  /brain  /quit%s\n\n", colorDim, colorReset)
 }
 
+// tierColors maps each tier to a terminal color code for the routing badge.
+var tierColors = map[router.Tier]string{
+	router.TierTrivial: "\033[38;5;244m", // dim grey
+	router.TierFast:    "\033[38;5;37m",  // teal
+	router.TierCode:    "\033[38;5;34m",  // green
+	router.TierReason:  "\033[38;5;220m", // yellow
+	router.TierHeavy:   "\033[38;5;214m", // orange
+	router.TierMax:     "\033[38;5;197m", // red
+	router.TierVision:  "\033[38;5;141m", // purple
+}
+
+func tierBadge(t router.Tier) string {
+	c, ok := tierColors[t]
+	if !ok {
+		c = colorDim
+	}
+	return c + colorBold + "[" + t.String() + "]" + colorReset
+}
+
 func showRouting(intent router.Intent, model string, turn int, isPipeline bool) {
+	badge := tierBadge(intent.Tier)
 	graphTag := ""
 	if intent.NeedsGraph {
-		graphTag = fmt.Sprintf(" %s[graph]%s", colorGold, colorDim)
+		graphTag = " " + colorGold + "[graph]" + colorReset
 	}
-	modelStyled := colorCopper + colorBold + model + colorReset + colorDim
-	turnLabel := fmt.Sprintf("turn %d", turn)
+	modelStyled := colorCopper + colorBold + model + colorReset
+
 	switch {
 	case intent.Tier == router.TierMax:
-		fmt.Printf("%s[%s · max · ensemble · multi-model%s]%s\n", colorDim, turnLabel, graphTag, colorReset)
+		fmt.Printf("%s ┌ #%d%s  %s  ensemble · multi-model%s\n",
+			colorDim, turn, colorReset, badge, graphTag)
 	case isPipeline:
-		fmt.Printf("%s[%s · pipeline · plan→code+tests · %s%s]%s\n",
-			colorDim, turnLabel, modelStyled, graphTag, colorReset)
+		fmt.Printf("%s ┌ #%d%s  %s  pipeline · plan→code+tests · %s%s\n",
+			colorDim, turn, colorReset, badge, modelStyled, graphTag)
 	default:
-		fmt.Printf("%s[%s · %s · %s · %s%s]%s\n",
-			colorDim, turnLabel, intent.Tier, intent.TaskType, modelStyled, graphTag, colorReset)
+		fmt.Printf("%s ┌ #%d%s  %s  %s · %s%s\n",
+			colorDim, turn, colorReset, badge, intent.TaskType, modelStyled, graphTag)
 	}
 }
 
@@ -1695,13 +1872,58 @@ func compressIfNeeded(messages []interface{}, client *ollama.Client) []interface
 	return compressed
 }
 
+// extractImpactTarget scans user input for words that match known graph nodes
+// (files or functions). Returns the first matching node ID, or "" if none found.
+// Used to seed the impact analysis for the multi-agent gate.
+func extractImpactTarget(input string, q *graph.Querier) string {
+	if q == nil {
+		return ""
+	}
+	stopWords := map[string]bool{
+		"the": true, "this": true, "that": true, "with": true, "from": true,
+		"into": true, "and": true, "for": true, "all": true, "use": true,
+		"make": true, "just": true, "also": true, "can": true, "will": true,
+	}
+	for _, word := range strings.Fields(input) {
+		// Strip punctuation.
+		word = strings.Trim(word, ".,;:!?\"'()")
+		if len(word) < 4 || stopWords[strings.ToLower(word)] {
+			continue
+		}
+		nodes, err := q.FindNodeByName(word)
+		if err != nil || len(nodes) == 0 {
+			continue
+		}
+		for _, n := range nodes {
+			if n.Type == graph.NodeTypeFile || n.Type == graph.NodeTypeFunction {
+				return n.ID
+			}
+		}
+	}
+	return ""
+}
+
 func injectFile(path string, messages *[]interface{}) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		cwd, _ := os.Getwd()
-		data, err = os.ReadFile(filepath.Join(cwd, path))
+		abs := filepath.Join(cwd, path)
+		data, err = os.ReadFile(abs)
 		if err != nil {
-			fmt.Printf("%sError reading %s: %v%s\n\n", colorRed, path, err, colorReset)
+			fmt.Printf("%s✗ file not found: %s%s\n", colorRed, path, colorReset)
+			// Show files in the same directory as a hint.
+			dir := filepath.Dir(abs)
+			if entries, de := os.ReadDir(dir); de == nil {
+				fmt.Printf("%s  files in %s:%s\n", colorDim, dir, colorReset)
+				shown := 0
+				for _, e := range entries {
+					if !e.IsDir() && shown < 10 {
+						fmt.Printf("%s    %s%s\n", colorDim, e.Name(), colorReset)
+						shown++
+					}
+				}
+			}
+			fmt.Println()
 			return
 		}
 	}
@@ -1735,7 +1957,7 @@ func extToLang(ext string) string {
 // runWithScanner is a bare-bones fallback REPL used when readline can't init (e.g. piped input).
 func runWithScanner(cfg Config, client *ollama.Client, sess *session.Session,
 	b *brain.Brain, dispatcher *nl.Dispatcher, messages []interface{},
-	tw *truth.Writer, ut *usage.Tracker) error {
+	tw *truth.Writer, ut *usage.Tracker, rs router.EmbedStore) error {
 
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
@@ -1756,7 +1978,7 @@ func runWithScanner(cfg Config, client *ollama.Client, sess *session.Session,
 		}
 		// Reuse one-shot handler for each turn.
 		cfg.InitialQuery = input
-		_ = runOnce(cfg, client, sess, b, dispatcher, messages, tw, ut)
+		_ = runOnce(cfg, client, sess, b, dispatcher, messages, tw, ut, rs)
 		cfg.InitialQuery = ""
 	}
 	endSession(sess, b, messages, nil)

@@ -81,6 +81,9 @@ func (b *Bundler) Bundle(symbolName string, maxDepth, tokenBudget int) (*Bundle,
 	var sections []Section
 	filesByID := map[string]BundleFile{}
 
+	// Entry file base name for test co-location scoring.
+	entryBase := baseWithoutExt(sym.FilePath)
+
 	// Add BFS files
 	for nodeID, depth := range depthMap {
 		n, nErr := b.querier.GetNodeByID(nodeID)
@@ -88,7 +91,7 @@ func (b *Bundler) Bundle(symbolName string, maxDepth, tokenBudget int) (*Bundle,
 			continue
 		}
 		content, _ := os.ReadFile(n.FilePath)
-		priority := scoreFile(n.FilePath, depth, string(content))
+		priority := scoreFile(n.FilePath, depth, string(content), n.LastModified, entryBase)
 		bf := BundleFile{
 			Path:    n.FilePath,
 			Depth:   depth,
@@ -116,7 +119,7 @@ func (b *Bundler) Bundle(symbolName string, maxDepth, tokenBudget int) (*Bundle,
 		filesByID[imp.ID] = bf
 		sections = append(sections, Section{
 			Content:  string(content),
-			Priority: 2,
+			Priority: scoreFile(imp.FilePath, maxDepth+1, string(content), imp.LastModified, entryBase),
 			Label:    imp.FilePath,
 		})
 	}
@@ -146,8 +149,12 @@ func (b *Bundler) Bundle(symbolName string, maxDepth, tokenBudget int) (*Bundle,
 }
 
 // scoreFile computes a multi-signal relevance score for context ranking.
-// Higher score = more likely to be kept in the token budget.
-func scoreFile(path string, depth int, content string) int {
+// Higher score = more likely to be kept under the token budget.
+//
+// Formula (inspired by Sourcegraph Cody weights):
+//
+//	score = depth_signal + size_signal + recency_signal + test_colocation + type_boost
+func scoreFile(path string, depth int, content string, lastModifiedUnix int64, entryBase string) int {
 	score := 0
 
 	// Depth signal: closer = higher (10 → 3).
@@ -175,11 +182,27 @@ func scoreFile(path string, depth int, content string) int {
 		score += 1 // small, focused files are good
 	}
 
-	// Test file demotion: test files are less relevant unless query is about tests.
+	// Recency signal: recently modified files are more relevant.
+	// Ranges ~+2 for brand-new files to ~0 for files untouched for 3+ months.
+	if lastModifiedUnix > 0 {
+		daysSince := time.Since(time.Unix(lastModifiedUnix, 0)).Hours() / 24
+		recency := int(2.0 / (1.0 + daysSince/30.0))
+		score += recency
+	}
+
+	// Test file handling: co-located test gets a boost; unrelated tests are demoted.
 	base := filepath.Base(path)
-	if strings.Contains(base, "_test.") || strings.Contains(base, ".test.") ||
-		strings.Contains(base, ".spec.") || strings.HasSuffix(base, "_test.go") {
-		score -= 4
+	isTest := strings.Contains(base, "_test.") || strings.Contains(base, ".test.") ||
+		strings.Contains(base, ".spec.") || strings.HasSuffix(base, "_test.go")
+	if isTest {
+		fileBase := baseWithoutExt(path)
+		// Strip _test suffix to get the base: auth_test → auth
+		fileBase = strings.TrimSuffix(fileBase, "_test")
+		if entryBase != "" && fileBase == entryBase {
+			score += 3 // co-located test: relevant
+		} else {
+			score -= 4 // unrelated test: demote
+		}
 	}
 
 	// Config/generated file demotion.
@@ -199,6 +222,13 @@ func scoreFile(path string, depth int, content string) int {
 		score = 1
 	}
 	return score
+}
+
+// baseWithoutExt returns the file base name without directory or extension.
+func baseWithoutExt(path string) string {
+	base := filepath.Base(path)
+	ext := filepath.Ext(base)
+	return strings.TrimSuffix(base, ext)
 }
 
 // RenderMarkdown renders a context bundle as a Markdown document.
@@ -234,7 +264,9 @@ func (b *Bundler) RenderMarkdown(bundle *Bundle) string {
 		}
 	}
 
-	for _, g := range []group{entry, depth1, depth2plus, refBy} {
+	// Most relevant context last (Lost in the Middle — Liu et al. 2023).
+	// LLMs have recency bias; placing the entry point closest to the query improves utilisation.
+	for _, g := range []group{refBy, depth2plus, depth1, entry} {
 		if len(g.files) == 0 {
 			continue
 		}

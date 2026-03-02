@@ -11,7 +11,9 @@
 package router
 
 import (
+"context"
 "strings"
+"sync"
 
 "github.com/seedhire/mantis/internal/ollama"
 )
@@ -30,7 +32,11 @@ TierVision
 )
 
 func (t Tier) String() string {
-return [...]string{"trivial", "fast", "code", "reason", "heavy", "max", "vision"}[t]
+	names := [...]string{"trivial", "fast", "code", "reason", "heavy", "max", "vision"}
+	if t < 0 || int(t) >= len(names) {
+		return "unknown"
+	}
+	return names[t]
 }
 
 // Intent holds the routing decision for a user message.
@@ -119,19 +125,24 @@ reasonMax    = 100 * gb
 // heavy / max = anything larger
 )
 
-var resolvedModels = map[Tier]string{}
+var (
+	resolvedModels   = map[Tier]string{}
+	resolvedModelsMu sync.RWMutex
+)
 
 // ResolveAll picks the best available model for every tier from a live model list.
 func ResolveAll(available []ollama.ModelInfo) {
-set := buildSet(available)
-allTiers := []Tier{TierTrivial, TierFast, TierCode, TierReason, TierHeavy, TierMax, TierVision}
-for _, tier := range allTiers {
-if chosen := pickFromPrefs(preferredModels[tier], set, available); chosen != "" {
-resolvedModels[tier] = chosen
-} else if chosen := pickBySize(available, tier); chosen != "" {
-resolvedModels[tier] = chosen
-}
-}
+	set := buildSet(available)
+	allTiers := []Tier{TierTrivial, TierFast, TierCode, TierReason, TierHeavy, TierMax, TierVision}
+	resolvedModelsMu.Lock()
+	defer resolvedModelsMu.Unlock()
+	for _, tier := range allTiers {
+		if chosen := pickFromPrefs(preferredModels[tier], set, available); chosen != "" {
+			resolvedModels[tier] = chosen
+		} else if chosen := pickBySize(available, tier); chosen != "" {
+			resolvedModels[tier] = chosen
+		}
+	}
 }
 
 // EnsembleModels returns one model per speciality pool (coding/reasoning/general).
@@ -271,14 +282,21 @@ func pickBySize(available []ollama.ModelInfo, tier Tier) string {
 }
 
 func ModelFor(tier Tier) string {
-if m, ok := resolvedModels[tier]; ok && m != "" {
-return m
-}
-return defaultModels[tier]
+	resolvedModelsMu.RLock()
+	m := resolvedModels[tier]
+	resolvedModelsMu.RUnlock()
+	if m != "" {
+		return m
+	}
+	return defaultModels[tier]
 }
 
 func PreferredModels(tier Tier) []string { return preferredModels[tier] }
-func SetResolved(tier Tier, model string) { resolvedModels[tier] = model }
+func SetResolved(tier Tier, model string) {
+	resolvedModelsMu.Lock()
+	resolvedModels[tier] = model
+	resolvedModelsMu.Unlock()
+}
 
 // ResolvedSummary returns a human-readable mapping of tier → resolved model.
 func ResolvedSummary() map[string]string {
@@ -303,57 +321,140 @@ func isQuantized(name string) bool {
 // ── Classifier ────────────────────────────────────────────────────────────────
 
 // Classify analyses a user message and returns the routing intent.
-func Classify(message string, hasImage bool) Intent {
-if hasImage {
-return Intent{Tier: TierVision, TaskType: "vision", NeedsVision: true, Confidence: 1.0}
+//
+// Three-layer pipeline:
+//
+//	Layer 1 (0 ms)  — structural rules: vision, terminal errors
+//	Layer 2 (0 ms)  — accumulated keyword scoring with context modifiers
+//	Layer 3 (20 ms) — embedding kNN on labeled examples (only when conf < 0.82)
+//
+// Pass a non-nil EmbedStore to enable Layer 3; nil disables it (safe default).
+// Classify classifies message intent using keyword scoring + optional embedding kNN.
+// Uses context.Background() as the base context. For a tighter deadline, use ClassifyCtx.
+func Classify(message string, hasImage bool, store ...EmbedStore) Intent {
+	return ClassifyCtx(context.Background(), message, hasImage, store...)
 }
-lower := strings.ToLower(message)
 
-// Terminal error paste — always a fast fix regardless of phrasing.
-for _, sig := range terminalErrorSignatures {
-if strings.Contains(lower, sig) {
-return Intent{Tier: TierFast, TaskType: "fix", NeedsGraph: false, Confidence: 0.90}
-}
+// ClassifyCtx is Classify with an explicit context (respects caller cancellation and deadline).
+func ClassifyCtx(ctx context.Context, message string, hasImage bool, store ...EmbedStore) Intent {
+	var es EmbedStore
+	if len(store) > 0 {
+		es = store[0]
+	}
+	return classify(ctx, message, hasImage, es)
 }
 
-// Max/ensemble — runs before all others.
-for _, kw := range maxKeywords {
-if strings.Contains(lower, kw) {
-return Intent{Tier: TierMax, TaskType: "ensemble", NeedsGraph: needsGraph(lower), Confidence: 0.92}
-}
-}
-// Reasoning tier — architecture, tradeoffs, deep explanation.
-for _, kw := range reasonKeywords {
-if strings.Contains(lower, kw) {
-return Intent{Tier: TierReason, TaskType: "reason", NeedsGraph: needsGraph(lower), Confidence: 0.88}
-}
-}
-// Heavy tier — multi-file, system-wide, large rewrite.
-for _, kw := range heavyKeywords {
-if strings.Contains(lower, kw) {
-return Intent{Tier: TierHeavy, TaskType: "design", NeedsGraph: needsGraph(lower), Confidence: 0.85}
-}
-}
-// Code tier — implement, debug, refactor specific code.
-for _, kw := range codeKeywords {
-if strings.Contains(lower, kw) {
-return Intent{Tier: TierCode, TaskType: detectTaskType(lower), NeedsGraph: needsGraph(lower), Confidence: 0.82}
-}
-}
-// Fast tier — short focused questions.
-for _, kw := range fastKeywords {
-if strings.Contains(lower, kw) {
-return Intent{Tier: TierFast, TaskType: detectTaskType(lower), NeedsGraph: needsGraph(lower), Confidence: 0.78}
-}
-}
-// Trivial tier — one-word lookups, syntax, spelling.
-for _, kw := range trivialKeywords {
-if strings.Contains(lower, kw) {
-return Intent{Tier: TierTrivial, TaskType: "trivial", NeedsGraph: false, Confidence: 0.80}
-}
-}
-// Default: code tier with low confidence — task template will still guide quality.
-return Intent{Tier: TierCode, TaskType: detectTaskType(lower), NeedsGraph: needsGraph(lower), Confidence: 0.60}
+func classify(ctx context.Context, message string, hasImage bool, store EmbedStore) Intent {
+	if hasImage {
+		return Intent{Tier: TierVision, TaskType: "vision", NeedsVision: true, Confidence: 1.0}
+	}
+	lower := strings.ToLower(message)
+
+	// Terminal error paste — always fast/fix regardless of phrasing.
+	for _, sig := range terminalErrorSignatures {
+		if strings.Contains(lower, sig) {
+			return Intent{Tier: TierFast, TaskType: "fix", NeedsGraph: false, Confidence: 0.90}
+		}
+	}
+
+	// Accumulated scores per tier.
+	scores := map[Tier]float64{}
+
+	for _, kw := range maxKeywords {
+		if strings.Contains(lower, kw) {
+			scores[TierMax] += 1.5
+		}
+	}
+	for _, kw := range reasonKeywords {
+		if strings.Contains(lower, kw) {
+			scores[TierReason] += 1.2
+		}
+	}
+	for _, kw := range heavyKeywords {
+		if strings.Contains(lower, kw) {
+			scores[TierHeavy] += 1.0
+		}
+	}
+	for _, kw := range codeKeywords {
+		if strings.Contains(lower, kw) {
+			scores[TierCode] += 0.8
+		}
+	}
+	for _, kw := range fastKeywords {
+		if strings.Contains(lower, kw) {
+			scores[TierFast] += 0.9
+		}
+	}
+	for _, kw := range trivialKeywords {
+		if strings.Contains(lower, kw) {
+			scores[TierTrivial] += 0.8
+		}
+	}
+
+	// Context modifiers:
+	// 1. Question-form dampener — a trailing "?" strongly suggests explanation/reason.
+	isQuestion := strings.HasSuffix(strings.TrimSpace(lower), "?")
+	if isQuestion {
+		scores[TierHeavy] *= 0.4
+		scores[TierCode] *= 0.7
+		scores[TierReason] *= 1.3
+	}
+	// 2. Very short messages (≤ 4 words) are unlikely to be heavy-tier build requests.
+	if wc := len(strings.Fields(message)); wc <= 4 {
+		scores[TierHeavy] *= 0.35
+		scores[TierMax] *= 0.35
+	}
+
+	// Pick tier with highest score.
+	best := TierCode
+	bestScore := 0.0
+	for tier, score := range scores {
+		if score > bestScore {
+			bestScore = score
+			best = tier
+		}
+	}
+
+	if bestScore == 0 {
+		// No keywords matched — default to code tier.
+		return Intent{Tier: TierCode, TaskType: detectTaskType(lower), NeedsGraph: needsGraph(lower), Confidence: 0.60}
+	}
+
+	// Confidence = fraction of total score held by winner, mapped to [0.60, 0.95].
+	totalScore := 0.0
+	for _, s := range scores {
+		totalScore += s
+	}
+	confidence := 0.60 + 0.35*(bestScore/totalScore)
+	if confidence > 0.95 {
+		confidence = 0.95
+	}
+
+	taskType := detectTaskType(lower)
+	switch best {
+	case TierMax:
+		taskType = "ensemble"
+	case TierReason:
+		taskType = "reason"
+	case TierHeavy:
+		taskType = "design"
+	}
+
+	intent := Intent{
+		Tier:       best,
+		TaskType:   taskType,
+		NeedsGraph: needsGraph(lower),
+		Confidence: confidence,
+	}
+
+	// Layer 3: embedding kNN — only for ambiguous queries (conf < 0.82).
+	if confidence < 0.82 && store != nil {
+		intent = classifyByEmbedding(ctx, message, store, intent)
+		intent.TaskType = taskType            // preserve detected task type
+		intent.NeedsGraph = needsGraph(lower) // preserve graph flag
+	}
+
+	return intent
 }
 
 var maxKeywords = []string{
@@ -370,18 +471,22 @@ var reasonKeywords = []string{
 "architecture", "design pattern", "trade-off", "when to use",
 "difference between", "what is the best way", "what approach",
 "reasoning", "analyse", "analyze", "pros", "cons",
+// Moved from heavyKeywords — "explain the whole X" is a reasoning question.
+"explain the whole", "explain the entire",
 }
 
 var heavyKeywords = []string{
 "refactor entire", "refactor all", "refactor the whole", "rewrite",
-"migrate", "explain the whole", "explain all", "codebase",
+"migrate", "explain all", "codebase",
 "multi-file", "across all", "every file", "full project", "from scratch",
 "plan the", "strategy for",
-// Multi-file project builds
-"build a", "build an", "build me", "create a full", "create an app",
+// Specific multi-file project builds (not generic "build a X").
+"create a full", "create an app", "build a full", "build a backend",
+"build a rest api", "build a graphql", "build a microservice",
+"build a complete", "build the entire",
 "clone", "scaffold", "full stack", "full-stack", "entire app",
 "rest api", "graphql api", "microservice", "backend for",
-"set up a", "setup project", "initialize project",
+"setup project", "initialize project",
 }
 
 var codeKeywords = []string{

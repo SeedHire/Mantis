@@ -35,11 +35,39 @@ type ImageMessage struct {
 	Images  []string `json:"images"` // base64-encoded
 }
 
+// Tool describes a function the model may call.
+type Tool struct {
+	Type     string       `json:"type"` // always "function"
+	Function ToolFunction `json:"function"`
+}
+
+// ToolFunction holds the name, description and JSON-Schema parameters for a tool.
+type ToolFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
+}
+
+// ToolCall is a model-generated request to invoke a tool.
+type ToolCall struct {
+	Function struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	} `json:"function"`
+}
+
+// ToolMessage carries the result of a tool invocation back to the model.
+type ToolMessage struct {
+	Role    string `json:"role"` // "tool"
+	Content string `json:"content"`
+}
+
 // ChatRequest is the payload sent to /api/chat.
 type ChatRequest struct {
 	Model    string        `json:"model"`
-	Messages []interface{} `json:"messages"` // Message or ImageMessage
+	Messages []interface{} `json:"messages"` // Message, ImageMessage or ToolMessage
 	Stream   bool          `json:"stream"`
+	Tools    []Tool        `json:"tools,omitempty"`
 	Options  *ModelOptions `json:"options,omitempty"`
 }
 
@@ -53,12 +81,13 @@ type ModelOptions struct {
 // ChatChunk is one streamed line from the API.
 type ChatChunk struct {
 	Message struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
+		Role      string     `json:"role"`
+		Content   string     `json:"content"`
+		ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 	} `json:"message"`
-	Done               bool  `json:"done"`
-	PromptEvalCount    int   `json:"prompt_eval_count"`
-	EvalCount          int   `json:"eval_count"`
+	Done            bool       `json:"done"`
+	PromptEvalCount int        `json:"prompt_eval_count"`
+	EvalCount       int        `json:"eval_count"`
 }
 
 // Client talks to Ollama Cloud or local Ollama.
@@ -224,6 +253,67 @@ func (c *Client) Ping(ctx context.Context) error {
 	}
 	resp.Body.Close()
 	return nil
+}
+
+// ToolResult holds the outcome of a single non-streaming chat call with tools.
+type ToolResult struct {
+	Content   string
+	ToolCalls []ToolCall
+	PromptTok int
+	ComplTok  int
+}
+
+// ChatWithTools sends a non-streaming request with tools and returns all tool
+// calls (if any) and the full assistant message.
+func (c *Client) ChatWithTools(
+	ctx context.Context,
+	model string,
+	messages []interface{},
+	tools []Tool,
+	opts *ModelOptions,
+) (*ToolResult, error) {
+	req := ChatRequest{
+		Model:    model,
+		Messages: messages,
+		Stream:   false,
+		Tools:    tools,
+		Options:  opts,
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.baseURL+"/api/chat", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if c.apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("http: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("ollama %s: %s", resp.Status, strings.TrimSpace(string(b)))
+	}
+
+	var chunk ChatChunk
+	if err := json.NewDecoder(resp.Body).Decode(&chunk); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	return &ToolResult{
+		Content:   chunk.Message.Content,
+		ToolCalls: chunk.Message.ToolCalls,
+		PromptTok: chunk.PromptEvalCount,
+		ComplTok:  chunk.EvalCount,
+	}, nil
 }
 
 // EmbedRequest is the payload for /api/embed.

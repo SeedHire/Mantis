@@ -14,8 +14,12 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 
+	"github.com/seedhire/mantis/internal/autofix"
 	"github.com/seedhire/mantis/internal/ollama"
 	"github.com/seedhire/mantis/internal/router"
 )
@@ -30,7 +34,9 @@ const (
 // Options controls pipeline execution behaviour.
 type Options struct {
 	AvailableModels []ollama.ModelInfo
-	SkipTests       bool // skip test generation for faster turnaround
+	SkipTests       bool   // skip test generation for faster turnaround
+	Root            string // project root for build verification; empty = skip
+	MaxRetries      int    // max CODE stage retries on build failure (default 3)
 }
 
 // Result holds aggregated pipeline output and token counts.
@@ -91,32 +97,82 @@ func Run(
 	res.ComplTok += ct
 	fmt.Printf("%s  ✓ plan ready%s\n", pColorGold, pColorReset)
 
-	// ── Stage 2 + 3: CODE and TESTS in parallel ───────────────────────────────
-	fmt.Printf("%s  ◆ coding + testing   [%s · parallel]%s\n", pColorDim, codeModel, pColorReset)
+	// ── Stage 2: CODE — bounded agentic retry loop ────────────────────────────
+	fmt.Printf("%s  ◆ coding   [%s]%s\n", pColorDim, codeModel, pColorReset)
 
+	maxRetries := opts.MaxRetries
+	if maxRetries <= 0 {
+		maxRetries = 3
+	}
+
+	codeMsgs := []interface{}{
+		ollama.Message{Role: "system", Content: systemPrompt + codeStageSuffix},
+		ollama.Message{Role: "user", Content: codeUserPrompt(userRequest, res.PlanText)},
+	}
+
+	var lastBuildErr string
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		var codeBuf strings.Builder
+		pt, ct, err := client.StreamChat(ctx, codeModel, codeMsgs, nil, func(c string) { codeBuf.WriteString(c) })
+		if err != nil {
+			return nil, fmt.Errorf("code stage: %w", err)
+		}
+		res.CodeText = codeBuf.String()
+		res.PromptTok += pt
+		res.ComplTok += ct
+
+		// Write files and verify build (only if Root provided).
+		if opts.Root == "" || attempt == maxRetries {
+			break
+		}
+		written := writeCodeFiles(res.CodeText, opts.Root)
+		if len(written) == 0 {
+			break // no files to check
+		}
+		buildResult := autofix.Check(opts.Root, written)
+		if buildResult == nil || buildResult.Passed {
+			break // success
+		}
+
+		buildErrStr := buildResult.Output
+		if buildErrStr == lastBuildErr {
+			fmt.Printf("%s  [stuck: same build error twice — stopping retry]%s\n", pColorDim, pColorReset)
+			break
+		}
+		lastBuildErr = buildErrStr
+		fmt.Printf("%s  [build error — retry %d/%d]%s\n", pColorDim, attempt+1, maxRetries, pColorReset)
+
+		retryMsg := fmt.Sprintf(
+			"Build failed with the following error:\n\n```\n%s\n```\n\n"+
+				"Fix only the affected function(s). Do not rewrite unchanged parts. "+
+				"Output the corrected file(s) using ```lang:filepath fences.",
+			buildErrStr)
+		// Keep messages bounded: system + original user + latest assistant + latest error.
+		// Trim any prior retry turns before appending the new ones.
+		if len(codeMsgs) > 2 {
+			codeMsgs = codeMsgs[:2]
+		}
+		codeMsgs = append(codeMsgs,
+			ollama.Message{Role: "assistant", Content: res.CodeText},
+			ollama.Message{Role: "user", Content: retryMsg},
+		)
+	}
+	fmt.Printf("%s  ✓ code ready%s\n", pColorGold, pColorReset)
+
+	// ── Stage 3: TESTS in parallel ────────────────────────────────────────────
 	type stageOut struct {
 		text   string
 		pt, ct int
 		err    error
 	}
-	codeCh := make(chan stageOut, 1)
 	testCh := make(chan stageOut, 1)
-
-	go func() {
-		msgs := []interface{}{
-			ollama.Message{Role: "system", Content: systemPrompt + codeStageSuffix},
-			ollama.Message{Role: "user", Content: codeUserPrompt(userRequest, res.PlanText)},
-		}
-		var buf strings.Builder
-		pt, ct, err := client.StreamChat(ctx, codeModel, msgs, nil, func(c string) { buf.WriteString(c) })
-		codeCh <- stageOut{buf.String(), pt, ct, err}
-	}()
 
 	go func() {
 		if opts.SkipTests {
 			testCh <- stageOut{}
 			return
 		}
+		fmt.Printf("%s  ◆ testing   [%s]%s\n", pColorDim, codeModel, pColorReset)
 		msgs := []interface{}{
 			ollama.Message{Role: "system", Content: systemPrompt + testStageSuffix},
 			ollama.Message{Role: "user", Content: testUserPrompt(userRequest, res.PlanText)},
@@ -126,23 +182,13 @@ func Run(
 		testCh <- stageOut{buf.String(), pt, ct, err}
 	}()
 
-	codeOut := <-codeCh
 	testOut := <-testCh
-
-	if codeOut.err != nil {
-		return nil, fmt.Errorf("code stage: %w", codeOut.err)
-	}
-	res.CodeText = codeOut.text
-	res.PromptTok += codeOut.pt
-	res.ComplTok += codeOut.ct
 
 	if testOut.err == nil && strings.TrimSpace(testOut.text) != "" {
 		res.TestText = testOut.text
 		res.PromptTok += testOut.pt
 		res.ComplTok += testOut.ct
-		fmt.Printf("%s  ✓ code ready  ✓ tests ready%s\n", pColorGold, pColorReset)
-	} else {
-		fmt.Printf("%s  ✓ code ready%s\n", pColorGold, pColorReset)
+		fmt.Printf("%s  ✓ tests ready%s\n", pColorGold, pColorReset)
 	}
 
 	res.Combined = assemble(res.PlanText, res.CodeText, res.TestText)
@@ -238,6 +284,38 @@ var codeComponents = []string{
 	"auth", "authentication", "jwt", "session", "oauth",
 	"frontend", "backend", "ui", "server", "client",
 	"test", "spec", "validation", "middleware", "config",
+}
+
+// writeCodeFiles extracts ```lang:filepath code blocks from text and writes
+// them to disk under root. Returns the list of file paths written.
+// Used by the agentic retry loop to verify a build after each CODE iteration.
+func writeCodeFiles(text, root string) []string {
+	re := regexp.MustCompile("(?m)^```[a-zA-Z0-9_+-]*[:/ ]([^\\s`]+)\\n([\\s\\S]*?)\\n```")
+	var paths []string
+	seen := map[string]bool{}
+	for _, m := range re.FindAllStringSubmatch(text, -1) {
+		if len(m) < 3 {
+			continue
+		}
+		relPath := strings.TrimSpace(m[1])
+		content := m[2]
+		if relPath == "" || seen[relPath] {
+			continue
+		}
+		if filepath.IsAbs(relPath) || strings.HasPrefix(filepath.Clean(relPath), "..") {
+			continue
+		}
+		seen[relPath] = true
+		dest := filepath.Join(root, filepath.Clean(relPath))
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			continue
+		}
+		if err := os.WriteFile(dest, []byte(content+"\n"), 0o644); err != nil {
+			continue
+		}
+		paths = append(paths, dest)
+	}
+	return paths
 }
 
 // ── Stage system-prompt suffixes ──────────────────────────────────────────────

@@ -229,7 +229,14 @@ func CheckConventions(response string, conventions []Convention) ConventionResul
 		}
 
 		// Check import restrictions.
-		if conv.Section == "Architecture" && (strings.Contains(lower, "import") || strings.Contains(lower, "never") || strings.Contains(lower, "don't")) {
+		isImportRule := strings.Contains(lower, "import") ||
+			strings.Contains(lower, "never") ||
+			strings.Contains(lower, "don't") ||
+			strings.Contains(lower, "must not") ||
+			strings.Contains(lower, "cannot") ||
+			strings.Contains(lower, "avoid") ||
+			strings.Contains(lower, "no imports")
+		if (conv.Section == "Architecture" || conv.Section == "Dependencies" || conv.Section == "Imports") && isImportRule {
 			for _, block := range codeBlocks {
 				if len(block) < 2 {
 					continue
@@ -275,15 +282,32 @@ func CheckConventions(response string, conventions []Convention) ConventionResul
 	}
 }
 
-// extractForbiddenImport pulls a module/package name from rules like
-// "never import from payments" or "don't use lodash".
+// extractForbiddenImport pulls a module/package name from convention rules.
+// Handles patterns like:
+//
+//	"never import from payments"   "don't use lodash"
+//	"must not import from X"       "X may not import Y"
+//	"avoid importing X"            "no imports from X"
 func extractForbiddenImport(rule string) string {
 	lower := strings.ToLower(rule)
-	markers := []string{"never import from ", "don't import from ", "do not import ", "never use "}
+	markers := []string{
+		"never import from ",
+		"don't import from ",
+		"do not import from ",
+		"do not import ",
+		"never use ",
+		"must not import from ",
+		"must not import ",
+		"cannot import from ",
+		"cannot import ",
+		"should not import ",
+		"avoid importing ",
+		"no imports from ",
+		"not import from ",
+	}
 	for _, marker := range markers {
 		if idx := strings.Index(lower, marker); idx != -1 {
 			rest := strings.TrimSpace(rule[idx+len(marker):])
-			// Take first word/path as the forbidden thing.
 			parts := strings.Fields(rest)
 			if len(parts) > 0 {
 				return strings.Trim(parts[0], "'\"`,.")
