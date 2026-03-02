@@ -57,30 +57,30 @@ TierFast: {
 },
 TierCode: {
 // Coding-specialist models — best for implement/debug/refactor
-"devstral-small-2:24b", "qwen3-coder-next", "ministral-3:14b",
-"gpt-oss:120b",
+"devstral-small-2:24b", "devstral", "qwen3-coder-next", "ministral-3:14b",
+"deepseek-coder-v2:16b", "deepseek-v3", "gpt-oss:120b",
 // local
-"qwen2.5-coder:14b", "qwen2.5-coder:32b", "deepseek-coder:6.7b",
-"codellama:13b", "deepseek-coder-v2:16b",
+"qwen2.5-coder:32b", "qwen2.5-coder:14b", "deepseek-coder:6.7b",
+"codellama:13b",
 },
 TierReason: {
 // Reasoning/analysis models — best for architecture, explanation, tradeoffs
-"kimi-k2-thinking", "cogito-2.1:671b", "deepseek-v3.2",
+"kimi-k2-thinking", "deepseek-r1", "deepseek-r1:70b", "cogito-2.1:671b", "deepseek-v3.2",
 "glm-5", "minimax-m2.1", "qwen3-next:80b",
 // local
-"llama3.1:70b", "mixtral:8x7b", "llama3.3:70b",
+"deepseek-r1:14b", "deepseek-r1:8b", "llama3.1:70b", "mixtral:8x7b", "llama3.3:70b",
 },
 TierHeavy: {
 // Largest general + coding models for hard multi-file tasks
-"devstral-2:123b", "qwen3-coder:480b", "deepseek-v3.1:671b",
+"devstral-2:123b", "deepseek-v3", "deepseek-r1:70b", "qwen3-coder:480b", "deepseek-v3.1:671b",
 "kimi-k2.5", "mistral-large-3:675b", "minimax-m2.5",
 "gemma3:27b", "glm-4.7", "qwen3.5:397b",
 // local
-"qwen2.5-coder:72b", "llama3.3:70b",
+"deepseek-r1:32b", "qwen2.5-coder:72b", "llama3.3:70b",
 },
 // TierMax uses ensemblePools — see EnsembleModels()
 TierMax: {
-"devstral-2:123b", "deepseek-v3.2", "kimi-k2-thinking",
+"devstral-2:123b", "deepseek-v3", "deepseek-r1", "deepseek-v3.2", "kimi-k2-thinking",
 "qwen3-coder:480b", "cogito-2.1:671b", "mistral-large-3:675b",
 "devstral-small-2:24b", "qwen3-coder-next", "glm-5",
 },
@@ -94,9 +94,9 @@ TierVision: {
 // ensemblePools: one model per pool is selected for parallel ensemble execution.
 // Pool 1 = coding specialist, Pool 2 = reasoning, Pool 3 = large general.
 var ensemblePools = [][]string{
-{"devstral-small-2:24b", "qwen3-coder-next", "devstral-2:123b", "qwen3-coder:480b", "qwen2.5-coder:32b"},
-{"kimi-k2-thinking", "cogito-2.1:671b", "deepseek-v3.2", "deepseek-v3.1:671b", "llama3.3:70b"},
-{"mistral-large-3:675b", "minimax-m2.5", "kimi-k2.5", "glm-5", "gemma3:27b", "llama3.1:70b"},
+{"devstral-small-2:24b", "devstral", "qwen3-coder-next", "devstral-2:123b", "qwen2.5-coder:32b"},
+{"kimi-k2-thinking", "deepseek-r1", "deepseek-r1:70b", "cogito-2.1:671b", "deepseek-v3", "llama3.3:70b"},
+{"mistral-large-3:675b", "minimax-m2.5", "kimi-k2.5", "glm-5", "deepseek-v3.2", "gemma3:27b"},
 }
 
 var defaultModels = map[Tier]string{
