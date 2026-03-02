@@ -6,6 +6,6 @@ vscode-extension/node_modules/
 vscode-extension/out/
 archive/
 .DS_Store
-supabase/.temp/
+supabase/
 vscode-extension/
 mantis
