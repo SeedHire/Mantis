@@ -19,6 +19,7 @@ import (
 	"github.com/chzyer/readline"
 	"golang.org/x/term"
 	"github.com/charmbracelet/glamour"
+	"github.com/seedhire/mantis/internal/autofix"
 	"github.com/seedhire/mantis/internal/brain"
 	"github.com/seedhire/mantis/internal/embeddings"
 	"github.com/seedhire/mantis/internal/nl"
@@ -406,10 +407,14 @@ func Run(cfg Config) error {
 				fmt.Printf("%s◈ Mantis%s %s[pipeline · plan→code+tests · %d tokens]%s\n",
 					colorCopper+colorBold, colorReset, colorDim, totalTok, colorReset)
 				renderResponse(stripInternalBlocks(stripFileBlocks(pRes.Combined)))
-				if wf := extractAndWriteFiles(pRes.Combined, root); len(wf) > 0 {
+				wf := extractAndWriteFiles(pRes.Combined, root)
+				if len(wf) > 0 {
 					printWrittenFiles(wf)
 				}
 				messages = append(messages, ollama.Message{Role: "assistant", Content: pRes.Combined})
+				// Verify build and auto-fix if needed (uses background ctx so not bounded by streamCtx).
+				bgCtx := context.Background()
+				verifyAndFix(bgCtx, client, model, intent.Tier, root, wf, &messages)
 				sess.Add(model, intent.Tier, pRes.PromptTok, pRes.ComplTok, hasImage)
 				if warn := usageTracker.Add(totalTok, true, hasImage); warn != "" {
 					fmt.Printf("%s%s%s\n\n", colorRed, warn, colorReset)
@@ -481,6 +486,9 @@ func Run(cfg Config) error {
 		}
 
 		messages = append(messages, ollama.Message{Role: "assistant", Content: rb.String()})
+
+		// Verify build and auto-fix errors up to 2 times.
+		wf = verifyAndFix(context.Background(), client, model, intent.Tier, root, wf, &messages)
 		sess.Add(model, intent.Tier, promptTok, completionTok, hasImage)
 
 		// Log turn to telemetry.
@@ -1184,6 +1192,84 @@ func showRouting(intent router.Intent, model string, turn int, isPipeline bool) 
 // normalizeTerminalInput detects when the user pastes raw terminal output
 // (shell errors, npm/go output) and rewrites it as an explicit fix request so
 // the router picks the right tier and the model knows what to do.
+// verifyAndFix runs the project's build check after files are written.
+// If the build fails it re-prompts the model with the error (max maxRetries times),
+// writes any corrected files, and returns the final written file list.
+// It is a no-op when no build system is detected or no files were written.
+func verifyAndFix(
+	ctx context.Context,
+	client *ollama.Client,
+	model string,
+	tier router.Tier,
+	root string,
+	written []WrittenFile,
+	messages *[]interface{},
+) []WrittenFile {
+	const maxRetries = 2
+
+	if len(written) == 0 || !autofix.ShouldRun(root, pathsOf(written)) {
+		return written
+	}
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		fmt.Printf("%s  🔨 verifying build…%s\n", colorDim, colorReset)
+		result := autofix.Check(root, pathsOf(written))
+		if result == nil || result.Passed {
+			fmt.Printf("%s  ✓ build passing%s\n\n", colorGold, colorReset)
+			return written
+		}
+
+		fmt.Printf("%s  ✗ build errors (attempt %d/%d) — auto-fixing…%s\n",
+			colorRed, attempt, maxRetries, colorReset)
+
+		// Inject the build error as a new user message.
+		fixMsg := autofix.FormatError(result)
+		retryMsgs := append(*messages, ollama.Message{Role: "user", Content: fixMsg})
+
+		var rb strings.Builder
+		fixCtx, fixCancel := context.WithTimeout(ctx, 3*time.Minute)
+		_, _, err := streamWithFallback(fixCtx, client, model, tier, retryMsgs, &rb)
+		fixCancel()
+		if err != nil || strings.TrimSpace(rb.String()) == "" {
+			fmt.Printf("%s  ✗ auto-fix failed — check errors manually%s\n\n", colorRed, colorReset)
+			return written
+		}
+
+		// Render the fix and write new files.
+		fmt.Printf("%s◈ Mantis%s %s(auto-fix)%s\n", colorCopper+colorBold, colorReset, colorDim, colorReset)
+		renderResponse(stripInternalBlocks(stripFileBlocks(rb.String())))
+		newFiles := extractAndWriteFiles(rb.String(), root)
+		if len(newFiles) > 0 {
+			printWrittenFiles(newFiles)
+			written = append(written, newFiles...)
+		}
+
+		// Append the fix exchange to conversation history.
+		*messages = append(*messages,
+			ollama.Message{Role: "user", Content: fixMsg},
+			ollama.Message{Role: "assistant", Content: rb.String()},
+		)
+	}
+
+	// Final check after all retries.
+	result := autofix.Check(root, pathsOf(written))
+	if result != nil && !result.Passed {
+		fmt.Printf("%s  ⚠ build still failing after %d retries — errors above may need manual fixes%s\n\n",
+			colorRed, maxRetries, colorReset)
+	} else {
+		fmt.Printf("%s  ✓ build passing%s\n\n", colorGold, colorReset)
+	}
+	return written
+}
+
+func pathsOf(files []WrittenFile) []string {
+	out := make([]string, len(files))
+	for i, f := range files {
+		out[i] = f.Path
+	}
+	return out
+}
+
 func normalizeTerminalInput(input string) string {
 	s := strings.TrimSpace(input)
 	if s == "" {
