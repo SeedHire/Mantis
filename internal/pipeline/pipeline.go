@@ -153,14 +153,35 @@ func Run(
 func assemble(plan, code, tests string) string {
 	var sb strings.Builder
 	sb.WriteString("## Plan\n\n")
-	sb.WriteString(strings.TrimSpace(plan))
+	sb.WriteString(strings.TrimSpace(stripStagePreamble(plan, "###")))
 	sb.WriteString("\n\n---\n\n## Implementation\n\n")
-	sb.WriteString(strings.TrimSpace(code))
+	sb.WriteString(strings.TrimSpace(stripStagePreamble(code, "```")))
 	if strings.TrimSpace(tests) != "" {
 		sb.WriteString("\n\n---\n\n## Tests\n\n")
-		sb.WriteString(strings.TrimSpace(tests))
+		sb.WriteString(strings.TrimSpace(stripStagePreamble(tests, "```")))
 	}
 	return sb.String()
+}
+
+// stripStagePreamble removes any chain-of-thought preamble the model writes before
+// the expected first token. For plan stages, content should start at "###". For
+// code/test stages, content should start at "```". Anything before that first
+// marker is stripped.
+func stripStagePreamble(text, marker string) string {
+	idx := strings.Index(text, marker)
+	if idx <= 0 {
+		return text
+	}
+	// Only strip if the preamble is prose (not code-fence context).
+	before := text[:idx]
+	// If the preamble contains a newline followed by the marker, it's likely
+	// legitimate content (e.g. a code block inside a plan). Only strip if the
+	// preamble is purely on the first few lines (less than 8 lines).
+	lines := strings.Split(strings.TrimSpace(before), "\n")
+	if len(lines) > 20 {
+		return text
+	}
+	return text[idx:]
 }
 
 // ── Complexity detector ────────────────────────────────────────────────────────
@@ -229,6 +250,8 @@ const planStageSuffix = `
 Analyze the development request and produce a structured implementation plan.
 Do NOT write any implementation code. Focus entirely on planning.
 
+CRITICAL: Begin your response IMMEDIATELY with "### Overview" — no preamble, no "Let me...", no "The user is...", no analysis sentences before the header. Jump straight to the structured output.
+
 Use these exact headers:
 ### Overview
 ### Files
@@ -245,6 +268,8 @@ Write the complete, production-ready implementation based on the plan.
 - Use ` + "```lang:filepath" + ` fences for EVERY file (e.g. ` + "```python:app.py" + `).
 - Handle all error cases. No stubs. No TODOs left unimplemented.
 - Validate inputs at boundaries. Return structured errors.
+
+CRITICAL: Begin your response IMMEDIATELY with the first ` + "```lang:filepath" + ` code block. Do NOT write any preamble, "I'll implement...", "Let me create...", "I need to...", or any explanation before the first code block. Code first, nothing else before it.
 `
 
 const testStageSuffix = `
@@ -255,6 +280,8 @@ Write comprehensive tests based on the implementation plan.
 - Cover: happy path, edge cases, error cases, boundary values.
 - Descriptive test names: test_<scenario>_<expected_behaviour>.
 - Mock external dependencies. Test behaviour, not implementation.
+
+CRITICAL: Begin your response IMMEDIATELY with the first ` + "```lang:filepath" + ` test file block. Do NOT write any preamble, "I'll create...", "Let me analyze...", or any sentences before the first code block.
 `
 
 // ── User prompts per stage ─────────────────────────────────────────────────────

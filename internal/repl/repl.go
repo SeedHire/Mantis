@@ -393,7 +393,7 @@ func Run(cfg Config) error {
 			pipelineCtx, pipelineCancel := context.WithTimeout(context.Background(), 10*time.Minute)
 			pRes, pErr := pipeline.Run(
 				pipelineCtx, client, input,
-				buildSystemPrompt(brainContext, tierSkills, intent.Tier),
+				buildSystemPrompt(brainContext, tierSkills, router.TierCode), // TierCode: no <thinking> injection; pipeline stages use their own role suffixes
 				pipeline.Options{AvailableModels: availableModels},
 			)
 			pipelineCancel()
