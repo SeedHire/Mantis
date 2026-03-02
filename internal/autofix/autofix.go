@@ -53,13 +53,32 @@ func Check(root string, writtenFiles []string) *Result {
 		return runCheck(root, "node", "npx tsc --noEmit",
 			[]string{"sh", "-c", "npx tsc --noEmit"})
 
-	case fileExists(root, "package.json") && dirExists(root, "node_modules"):
-		// No tsconfig — check if there's a build script.
+	case fileExists(root, "package.json"):
+		// Run npm install if node_modules is missing (first generation).
+		if !dirExists(root, "node_modules") {
+			install := runCheck(root, "node", "npm install",
+				[]string{"sh", "-c", "npm install --prefer-offline 2>&1"})
+			if install != nil && !install.Passed {
+				return install
+			}
+		}
+		// TypeScript: compile check.
+		if fileExists(root, "tsconfig.json") {
+			return runCheck(root, "node", "npx tsc --noEmit",
+				[]string{"sh", "-c", "npx tsc --noEmit"})
+		}
+		// Build script present: run it.
 		if hasBuildScript(root) {
 			return runCheck(root, "node", "npm run build",
 				[]string{"sh", "-c", "npm run build"})
 		}
-		return nil // package.json but no useful build target yet
+		// Plain JS: verify all requires resolve by loading the entry point.
+		if entry := nodeEntryPoint(root); entry != "" {
+			return runCheck(root, "node",
+				fmt.Sprintf("node -e \"require('./%s')\"", entry),
+				[]string{"sh", "-c", fmt.Sprintf("node -e \"require('./%s')\" 2>&1", entry)})
+		}
+		return nil
 
 	case hasPythonFiles(writtenFiles):
 		return checkPythonFiles(root, writtenFiles)
@@ -76,8 +95,7 @@ func ShouldRun(root string, writtenFiles []string) bool {
 	}
 	return fileExists(root, "go.mod") ||
 		fileExists(root, "Cargo.toml") ||
-		(fileExists(root, "tsconfig.json") && dirExists(root, "node_modules")) ||
-		(fileExists(root, "package.json") && dirExists(root, "node_modules") && hasBuildScript(root)) ||
+		fileExists(root, "package.json") || // always attempt for Node (may install first)
 		hasPythonFiles(writtenFiles)
 }
 
@@ -93,7 +111,11 @@ func FormatError(r *Result) string {
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 func runCheck(root, project, cmdLabel string, args []string) *Result {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	timeout := 120 * time.Second // npm install can be slow
+	if project == "go" || project == "rust" {
+		timeout = 60 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
@@ -149,6 +171,38 @@ func hasBuildScript(root string) bool {
 	}
 	// Simple check — look for "build" script key.
 	return strings.Contains(string(data), `"build"`)
+}
+
+// nodeEntryPoint returns the relative path of the JS entry point by reading
+// the "main" field of package.json, then falling back to common file names.
+func nodeEntryPoint(root string) string {
+	data, err := os.ReadFile(filepath.Join(root, "package.json"))
+	if err == nil {
+		// Extract "main": "..." value with a simple scan.
+		s := string(data)
+		if idx := strings.Index(s, `"main"`); idx >= 0 {
+			rest := s[idx+6:]
+			if colon := strings.Index(rest, ":"); colon >= 0 {
+				rest = strings.TrimSpace(rest[colon+1:])
+				if len(rest) > 2 && rest[0] == '"' {
+					end := strings.Index(rest[1:], `"`)
+					if end >= 0 {
+						candidate := rest[1 : end+1]
+						if _, err := os.Stat(filepath.Join(root, candidate)); err == nil {
+							return candidate
+						}
+					}
+				}
+			}
+		}
+	}
+	// Common fallbacks.
+	for _, name := range []string{"src/app.js", "src/index.js", "src/server.js", "app.js", "index.js", "server.js"} {
+		if _, err := os.Stat(filepath.Join(root, name)); err == nil {
+			return name
+		}
+	}
+	return ""
 }
 
 func fileExists(root, name string) bool {
