@@ -18,6 +18,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/seedhire/mantis/internal/autofix"
 	"github.com/seedhire/mantis/internal/ollama"
@@ -30,6 +32,37 @@ const (
 	pColorGold  = "\033[38;5;220m"
 	pColorDim   = "\033[38;5;244m"
 )
+
+// progressTicker prints a live token counter on the current line while a stage runs.
+// Call the returned stop function when the stage completes.
+func progressTicker(stage string) (incr func(), stop func()) {
+	var count int64
+	done := make(chan struct{})
+	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+	incr = func() { atomic.AddInt64(&count, 1) }
+
+	go func() {
+		i := 0
+		ticker := time.NewTicker(200 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				// Clear the progress line.
+				fmt.Printf("\r\033[K")
+				return
+			case <-ticker.C:
+				n := atomic.LoadInt64(&count)
+				fmt.Printf("\r%s  %s %s  %d tokens%s", pColorDim, frames[i%len(frames)], stage, n, pColorReset)
+				i++
+			}
+		}
+	}()
+
+	stop = func() { close(done) }
+	return
+}
 
 // Options controls pipeline execution behaviour.
 type Options struct {
@@ -83,12 +116,16 @@ func Run(
 		ollama.Message{Role: "user", Content: planUserPrompt(userRequest)},
 	}
 	var planBuf strings.Builder
-	pt, ct, err := client.StreamChat(ctx, planModel, planMsgs, nil, func(c string) { planBuf.WriteString(c) })
+	planIncr, planStop := progressTicker("planning")
+	pt, ct, err := client.StreamChat(ctx, planModel, planMsgs, nil, func(c string) { planBuf.WriteString(c); planIncr() })
+	planStop()
 	if err != nil {
 		// Plan model unavailable — fall back to code model so the pipeline still runs.
 		fmt.Printf("%s  ⚠ plan model unavailable, falling back to %s%s\n", pColorDim, codeModel, pColorReset)
 		planBuf.Reset()
-		pt, ct, err = client.StreamChat(ctx, codeModel, planMsgs, nil, func(c string) { planBuf.WriteString(c) })
+		planIncr2, planStop2 := progressTicker("planning")
+		pt, ct, err = client.StreamChat(ctx, codeModel, planMsgs, nil, func(c string) { planBuf.WriteString(c); planIncr2() })
+		planStop2()
 		if err != nil {
 			return nil, fmt.Errorf("plan stage: %w", err)
 		}
@@ -120,7 +157,9 @@ func Run(
 	var lastBuildErr string
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		var codeBuf strings.Builder
-		pt, ct, err := client.StreamChat(ctx, codeModel, codeMsgs, nil, func(c string) { codeBuf.WriteString(c) })
+		codeIncr, codeStop := progressTicker("coding")
+		pt, ct, err := client.StreamChat(ctx, codeModel, codeMsgs, nil, func(c string) { codeBuf.WriteString(c); codeIncr() })
+		codeStop()
 		if err != nil {
 			return nil, fmt.Errorf("code stage: %w", err)
 		}
@@ -185,7 +224,9 @@ func Run(
 			ollama.Message{Role: "user", Content: testUserPrompt(userRequest, res.PlanText)},
 		}
 		var buf strings.Builder
-		pt, ct, err := client.StreamChat(ctx, codeModel, msgs, nil, func(c string) { buf.WriteString(c) })
+		testIncr, testStop := progressTicker("testing")
+		pt, ct, err := client.StreamChat(ctx, codeModel, msgs, nil, func(c string) { buf.WriteString(c); testIncr() })
+		testStop()
 		testCh <- stageOut{buf.String(), pt, ct, err}
 	}()
 
@@ -230,7 +271,9 @@ func ContinuePlan(
 	var lastBuildErr string
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		var codeBuf strings.Builder
-		pt, ct, err := client.StreamChat(ctx, codeModel, codeMsgs, nil, func(c string) { codeBuf.WriteString(c) })
+		codeIncr, codeStop := progressTicker("coding")
+		pt, ct, err := client.StreamChat(ctx, codeModel, codeMsgs, nil, func(c string) { codeBuf.WriteString(c); codeIncr() })
+		codeStop()
 		if err != nil {
 			return nil, fmt.Errorf("code stage: %w", err)
 		}
@@ -286,7 +329,9 @@ func ContinuePlan(
 			ollama.Message{Role: "user", Content: testUserPrompt(userRequest, planText)},
 		}
 		var buf strings.Builder
-		pt, ct, err := client.StreamChat(ctx, codeModel, msgs, nil, func(c string) { buf.WriteString(c) })
+		testIncr, testStop := progressTicker("testing")
+		pt, ct, err := client.StreamChat(ctx, codeModel, msgs, nil, func(c string) { buf.WriteString(c); testIncr() })
+		testStop()
 		testCh <- stageOut{buf.String(), pt, ct, err}
 	}()
 	testOut := <-testCh
