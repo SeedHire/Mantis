@@ -42,6 +42,8 @@ var rootCmd = &cobra.Command{
 			ForceTier: replTier,
 			Budget:    replBudget,
 			ImagePath: replImage,
+			PlanMode:  replPlan,
+			Continue:  replContinue,
 		}
 		if len(args) > 0 {
 			cfg.InitialQuery = strings.Join(args, " ")
@@ -53,6 +55,8 @@ var rootCmd = &cobra.Command{
 var replTier   string
 var replBudget int
 var replImage  string
+var replPlan   bool
+var replContinue bool
 
 // ── init ──────────────────────────────────────────────────────────────────────
 
@@ -1278,6 +1282,8 @@ func init() {
 	rootCmd.Flags().StringVar(&replTier, "model", "", "Force model tier: fast · smart · heavy · vision")
 	rootCmd.Flags().IntVar(&replBudget, "budget", 0, "Max tokens for this session (0 = unlimited)")
 	rootCmd.Flags().StringVar(&replImage, "image", "", "Image file path for multimodal input")
+	rootCmd.Flags().BoolVar(&replPlan, "plan", false, "Plan mode: review plan before code execution")
+	rootCmd.Flags().BoolVar(&replContinue, "continue", false, "Resume most recent session")
 
 	rootCmd.AddCommand(initCmd, contextCmd, watchCmd, findCmd, impactCmd, deadCmd, circularCmd, graphCmd, lintCmd, tuiCmd, handoffCmd, hotspotsCmd, riskyCmd, couplingCmd, intentCmd, todosCmd, specGapsCmd, workspaceCmd, traceCmd)
 

@@ -34,8 +34,9 @@ type Session struct {
 // SavedSession is the on-disk format for session persistence.
 type SavedSession struct {
 	Session
-	Topic   string `json:"topic"`
-	Summary string `json:"summary,omitempty"`
+	Topic    string            `json:"topic"`
+	Summary  string            `json:"summary,omitempty"`
+	Messages []json.RawMessage `json:"messages,omitempty"`
 }
 
 // New creates a fresh session.
@@ -168,16 +169,30 @@ func formatTokens(n int) string {
 
 // Save persists the session to .mantis/sessions/{timestamp}.json.
 // topic is a short description extracted from the first user message.
-func (s *Session) Save(mantisDir, topic, summary string) error {
+// msgs is the conversation history to persist for session resume.
+func (s *Session) Save(mantisDir, topic, summary string, msgs []interface{}) error {
 	sessDir := filepath.Join(mantisDir, "sessions")
 	if err := os.MkdirAll(sessDir, 0o755); err != nil {
 		return err
 	}
 
+	// Serialize conversation messages for persistence.
+	var rawMsgs []json.RawMessage
+	for _, m := range msgs {
+		if b, err := json.Marshal(m); err == nil {
+			rawMsgs = append(rawMsgs, b)
+		}
+	}
+	// Cap stored history to avoid bloating disk — keep last 20 messages.
+	if len(rawMsgs) > 20 {
+		rawMsgs = append(rawMsgs[:1], rawMsgs[len(rawMsgs)-19:]...)
+	}
+
 	saved := SavedSession{
-		Session: *s,
-		Topic:   topic,
-		Summary: summary,
+		Session:  *s,
+		Topic:    topic,
+		Summary:  summary,
+		Messages: rawMsgs,
 	}
 	data, err := json.MarshalIndent(saved, "", "  ")
 	if err != nil {

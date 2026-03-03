@@ -37,6 +37,7 @@ type Options struct {
 	SkipTests       bool   // skip test generation for faster turnaround
 	Root            string // project root for build verification; empty = skip
 	MaxRetries      int    // max CODE stage retries on build failure (default 3)
+	PlanOnly        bool   // stop after PLAN stage and return for user approval
 }
 
 // Result holds aggregated pipeline output and token counts.
@@ -96,6 +97,12 @@ func Run(
 	res.PromptTok += pt
 	res.ComplTok += ct
 	fmt.Printf("%s  ✓ plan ready%s\n", pColorGold, pColorReset)
+
+	// Plan Mode: stop after PLAN stage for user review.
+	if opts.PlanOnly {
+		res.Combined = res.PlanText
+		return res, nil
+	}
 
 	// ── Stage 2: CODE — bounded agentic retry loop ────────────────────────────
 	fmt.Printf("%s  ◆ coding   [%s]%s\n", pColorDim, codeModel, pColorReset)
@@ -184,6 +191,105 @@ func Run(
 
 	testOut := <-testCh
 
+	if testOut.err == nil && strings.TrimSpace(testOut.text) != "" {
+		res.TestText = testOut.text
+		res.PromptTok += testOut.pt
+		res.ComplTok += testOut.ct
+		fmt.Printf("%s  ✓ tests ready%s\n", pColorGold, pColorReset)
+	}
+
+	res.Combined = assemble(res.PlanText, res.CodeText, res.TestText)
+	return res, nil
+}
+
+// ContinuePlan runs CODE+TESTS stages using a previously approved plan.
+func ContinuePlan(
+	ctx context.Context,
+	client *ollama.Client,
+	userRequest string,
+	planText string,
+	systemPrompt string,
+	opts Options,
+) (*Result, error) {
+	res := &Result{PlanText: planText}
+	codeModel := router.ModelFor(router.TierCode)
+
+	// ── CODE stage ────────────────────────────────────────────────────────────
+	fmt.Printf("%s  ◆ coding   [%s]%s\n", pColorDim, codeModel, pColorReset)
+
+	maxRetries := opts.MaxRetries
+	if maxRetries <= 0 {
+		maxRetries = 3
+	}
+
+	codeMsgs := []interface{}{
+		ollama.Message{Role: "system", Content: systemPrompt + codeStageSuffix},
+		ollama.Message{Role: "user", Content: codeUserPrompt(userRequest, planText)},
+	}
+
+	var lastBuildErr string
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		var codeBuf strings.Builder
+		pt, ct, err := client.StreamChat(ctx, codeModel, codeMsgs, nil, func(c string) { codeBuf.WriteString(c) })
+		if err != nil {
+			return nil, fmt.Errorf("code stage: %w", err)
+		}
+		res.CodeText = codeBuf.String()
+		res.PromptTok += pt
+		res.ComplTok += ct
+
+		if opts.Root == "" || attempt == maxRetries {
+			break
+		}
+		written := writeCodeFiles(res.CodeText, opts.Root)
+		if len(written) == 0 {
+			break
+		}
+		buildResult := autofix.Check(opts.Root, written)
+		if buildResult == nil || buildResult.Passed {
+			break
+		}
+		buildErrStr := buildResult.Output
+		if buildErrStr == lastBuildErr {
+			break
+		}
+		lastBuildErr = buildErrStr
+		fmt.Printf("%s  [build error — retry %d/%d]%s\n", pColorDim, attempt+1, maxRetries, pColorReset)
+		retryMsg := fmt.Sprintf(
+			"Build failed with the following error:\n\n```\n%s\n```\n\nFix only the affected function(s).",
+			buildErrStr)
+		if len(codeMsgs) > 2 {
+			codeMsgs = codeMsgs[:2]
+		}
+		codeMsgs = append(codeMsgs,
+			ollama.Message{Role: "assistant", Content: res.CodeText},
+			ollama.Message{Role: "user", Content: retryMsg},
+		)
+	}
+	fmt.Printf("%s  ✓ code ready%s\n", pColorGold, pColorReset)
+
+	// ── TESTS stage ───────────────────────────────────────────────────────────
+	type stageOut struct {
+		text   string
+		pt, ct int
+		err    error
+	}
+	testCh := make(chan stageOut, 1)
+	go func() {
+		if opts.SkipTests {
+			testCh <- stageOut{}
+			return
+		}
+		fmt.Printf("%s  ◆ testing   [%s]%s\n", pColorDim, codeModel, pColorReset)
+		msgs := []interface{}{
+			ollama.Message{Role: "system", Content: systemPrompt + testStageSuffix},
+			ollama.Message{Role: "user", Content: testUserPrompt(userRequest, planText)},
+		}
+		var buf strings.Builder
+		pt, ct, err := client.StreamChat(ctx, codeModel, msgs, nil, func(c string) { buf.WriteString(c) })
+		testCh <- stageOut{buf.String(), pt, ct, err}
+	}()
+	testOut := <-testCh
 	if testOut.err == nil && strings.TrimSpace(testOut.text) != "" {
 		res.TestText = testOut.text
 		res.PromptTok += testOut.pt

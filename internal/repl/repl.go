@@ -5,12 +5,16 @@ package repl
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -76,6 +80,10 @@ type Config struct {
 	InitialQuery string
 	// ImagePath is a path to an image for multimodal input
 	ImagePath string
+	// PlanMode stops pipeline after PLAN stage and asks for approval before coding
+	PlanMode bool
+	// Continue resumes the most recent session
+	Continue bool
 }
 
 // Run starts the interactive REPL. Blocks until the user quits.
@@ -224,6 +232,32 @@ func Run(cfg Config) error {
 		ollama.Message{Role: "system", Content: systemPrompt},
 	}
 
+	// Session resume: load most recent session conversation if --continue.
+	if cfg.Continue {
+		if prev, err := session.LoadRecent(mantisDir, 24*time.Hour); err == nil && prev != nil && len(prev.Messages) > 0 {
+			var restored []interface{}
+			for _, raw := range prev.Messages {
+				var msg ollama.Message
+				if err := json.Unmarshal(raw, &msg); err == nil && msg.Role != "" {
+					restored = append(restored, msg)
+				}
+			}
+			if len(restored) > 0 {
+				// Replace system prompt with fresh one, keep user/assistant history.
+				messages = []interface{}{ollama.Message{Role: "system", Content: systemPrompt}}
+				for _, m := range restored {
+					if msg, ok := m.(ollama.Message); ok && msg.Role != "system" {
+						messages = append(messages, m)
+					}
+				}
+				fmt.Printf("%s● resumed session: %s (%d messages)%s\n",
+					colorGold, prev.Topic, len(messages)-1, colorReset)
+			}
+		} else {
+			fmt.Printf("%s● no recent session to resume%s\n", colorDim, colorReset)
+		}
+	}
+
 	printFooter()
 
 	// One-shot mode: mantis "question"
@@ -246,6 +280,9 @@ func Run(cfg Config) error {
 		readline.PcItem("/models"),
 		readline.PcItem("/reject"),
 		readline.PcItem("/decision"),
+		readline.PcItem("/plan"),
+		readline.PcItem("/context"),
+		readline.PcItem("/fetch"),
 		readline.PcItem("/quit"),
 	)
 
@@ -277,6 +314,7 @@ func Run(cfg Config) error {
 	}()
 
 	turn := 0
+	planMode := cfg.PlanMode
 	for {
 		printSep()
 		fmt.Printf("%s  /help  /cost  /brain  /quit%s\n", colorDim, colorReset)
@@ -297,7 +335,7 @@ func Run(cfg Config) error {
 
 		// Slash commands.
 		if strings.HasPrefix(input, "/") {
-			if quit := handleSlashCommand(input, sess, b, &messages, client, &brainContext); quit {
+			if quit := handleSlashCommand(input, sess, b, &messages, client, &brainContext, &planMode); quit {
 				break
 			}
 			continue
@@ -464,11 +502,13 @@ func Run(cfg Config) error {
 		// Triggered before the single-model path so complex tasks get:
 		//   plan (reason model) → code + tests (code model, parallel)
 		if pipeline.ShouldRun(intent, input) {
+			pipelineOpts := pipeline.Options{AvailableModels: availableModels, Root: root, PlanOnly: planMode}
 			pipelineCtx, pipelineCancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			sysPrompt := buildSystemPrompt(brainContext, tierSkills, router.TierCode)
 			pRes, pErr := pipeline.Run(
 				pipelineCtx, client, input,
-				buildSystemPrompt(brainContext, tierSkills, router.TierCode), // TierCode: no <thinking> injection; pipeline stages use their own role suffixes
-				pipeline.Options{AvailableModels: availableModels, Root: root},
+				sysPrompt,
+				pipelineOpts,
 			)
 			pipelineCancel()
 
@@ -476,7 +516,33 @@ func Run(cfg Config) error {
 				fmt.Printf("%s  [pipeline failed: %v — falling back to single model]%s\n\n",
 					colorRed, pErr, colorReset)
 				// Fall through to single-model path below.
-			} else {
+			} else if planMode && pRes.CodeText == "" {
+				// Plan Mode: show plan and ask for approval before coding.
+				fmt.Printf("\n%s◈ Mantis — Plan ready%s\n", colorCopper+colorBold, colorReset)
+				renderResponse(pRes.PlanText)
+				fmt.Printf("\n%sProceed with implementation? [y/n]: %s", colorGold, colorReset)
+				approval, rlErr := rl.Readline()
+				if rlErr != nil || (strings.ToLower(strings.TrimSpace(approval)) != "y" && strings.TrimSpace(approval) != "") {
+					fmt.Printf("%s● plan discarded%s\n\n", colorDim, colorReset)
+					sess.Add(model, intent.Tier, pRes.PromptTok, pRes.ComplTok, hasImage)
+					continue
+				}
+				// User approved — continue with CODE+TESTS stages.
+				fmt.Printf("%s● plan approved — starting implementation%s\n", colorGold, colorReset)
+				contCtx, contCancel := context.WithTimeout(context.Background(), 10*time.Minute)
+				pRes, pErr = pipeline.ContinuePlan(
+					contCtx, client, input, pRes.PlanText,
+					sysPrompt,
+					pipeline.Options{AvailableModels: availableModels, Root: root},
+				)
+				contCancel()
+				if pErr != nil {
+					fmt.Printf("%s  [implementation failed: %v]%s\n\n", colorRed, pErr, colorReset)
+					continue
+				}
+			}
+
+			if pErr == nil {
 				totalTok := pRes.PromptTok + pRes.ComplTok
 				fmt.Printf("%s◈ Mantis%s %s[pipeline · plan→code+tests · %d tokens]%s\n",
 					colorCopper+colorBold, colorReset, colorDim, totalTok, colorReset)
@@ -741,7 +807,7 @@ func runOnce(cfg Config, client *ollama.Client, sess *session.Session,
 }
 
 func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
-	messages *[]interface{}, client *ollama.Client, brainContext *string) (quit bool) {
+	messages *[]interface{}, client *ollama.Client, brainContext *string, planMode *bool) (quit bool) {
 
 	parts := strings.Fields(input)
 	cmd := parts[0]
@@ -863,10 +929,109 @@ func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
 			_ = b.LogDecision(decision)
 			fmt.Printf("%s● decision logged%s\n\n", colorGold, colorReset)
 		}
+	case "/plan":
+		*planMode = !*planMode
+		if *planMode {
+			fmt.Printf("%s● plan mode ON — pipeline will pause for approval before coding%s\n\n", colorGold, colorReset)
+		} else {
+			fmt.Printf("%s● plan mode OFF — pipeline runs end-to-end%s\n\n", colorGold, colorReset)
+		}
+	case "/context":
+		handleContextCommand(sess, *messages, *brainContext)
+	case "/fetch":
+		if len(parts) < 2 {
+			fmt.Printf("%susage: /fetch <url>%s\n\n", colorDim, colorReset)
+		} else {
+			content := fetchURL(parts[1])
+			if content != "" {
+				*messages = append(*messages, ollama.Message{
+					Role: "user", Content: "<web_context url=\"" + parts[1] + "\">\n" + content + "\n</web_context>",
+				})
+				fmt.Printf("%s● fetched %s — injected into context%s\n\n", colorGold, parts[1], colorReset)
+			}
+		}
 	default:
 		fmt.Printf("%sunknown command — /help%s\n\n", colorDim, colorReset)
 	}
 	return false
+}
+
+// estimateTokens returns a rough token count (1 token ≈ 4 chars for English text).
+func estimateTokens(s string) int {
+	return (len(s) + 3) / 4
+}
+
+// handleContextCommand prints a token-budget breakdown of the current context window.
+func handleContextCommand(sess *session.Session, messages []interface{}, brainCtx string) {
+	var systemTok, brainTok, userTok, assistantTok, totalMsgs int
+	for _, m := range messages {
+		if msg, ok := m.(ollama.Message); ok {
+			tok := estimateTokens(msg.Content)
+			switch msg.Role {
+			case "system":
+				systemTok += tok
+			case "user":
+				userTok += tok
+			case "assistant":
+				assistantTok += tok
+			}
+			totalMsgs++
+		} else if img, ok := m.(ollama.ImageMessage); ok {
+			userTok += estimateTokens(img.Content) + 500 // image overhead
+			totalMsgs++
+		}
+	}
+	brainTok = estimateTokens(brainCtx)
+	total := systemTok + userTok + assistantTok
+
+	w := 54
+	line := strings.Repeat("─", w)
+	fmt.Printf("\n╭%s╮\n", line)
+	fmt.Printf("│  %-40s %8s  │\n", "CONTEXT BREAKDOWN", "tokens")
+	fmt.Printf("├%s┤\n", line)
+	fmt.Printf("│  %-40s %8d  │\n", "System prompt", systemTok)
+	fmt.Printf("│  %-40s %8d  │\n", "Brain memory (in system)", brainTok)
+	fmt.Printf("│  %-40s %8d  │\n", "User messages", userTok)
+	fmt.Printf("│  %-40s %8d  │\n", "Assistant messages", assistantTok)
+	fmt.Printf("├%s┤\n", line)
+	fmt.Printf("│  %-40s %8d  │\n", "Total (estimated)", total)
+	fmt.Printf("│  %-40s %8d  │\n", "Messages", totalMsgs)
+	fmt.Printf("╰%s╯\n\n", line)
+}
+
+// fetchURL retrieves a web page, strips HTML, and returns truncated plain text.
+func fetchURL(rawURL string) string {
+	if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") {
+		rawURL = "https://" + rawURL
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	req, err := makeHTTPRequest(ctx, rawURL)
+	if err != nil {
+		fmt.Printf("%s✗ fetch failed: %v%s\n\n", colorRed, err, colorReset)
+		return ""
+	}
+	resp, err := defaultHTTPClient().Do(req)
+	if err != nil {
+		fmt.Printf("%s✗ fetch failed: %v%s\n\n", colorRed, err, colorReset)
+		return ""
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
+	if err != nil {
+		fmt.Printf("%s✗ read failed: %v%s\n\n", colorRed, err, colorReset)
+		return ""
+	}
+
+	text := stripHTML(string(body))
+	// Truncate to ~4K tokens worth.
+	if len(text) > 16000 {
+		text = text[:16000] + "\n[truncated]"
+	}
+	return text
 }
 
 // buildSystemPrompt returns the base system prompt (tier-independent).
@@ -1056,7 +1221,7 @@ func endSession(sess *session.Session, b *brain.Brain, messages []interface{}, e
 	topic := extractSessionTopic(messages)
 	root, _ := os.Getwd()
 	mantisDir := filepath.Join(root, ".mantis")
-	if err := sess.Save(mantisDir, topic, summary); err == nil {
+	if err := sess.Save(mantisDir, topic, summary, messages); err == nil {
 		fmt.Printf("%s● session saved%s\n", colorDim, colorReset)
 	}
 
@@ -1324,6 +1489,9 @@ func printHelp() {
 		{"/init", "analyze codebase and generate MANTIS.md"},
 		{"/file <path>", "inject a file into context"},
 		{"/vision <path>", "analyze an image or screenshot"},
+		{"/fetch <url>", "fetch a web page into context"},
+		{"/plan", "toggle plan mode (review before code)"},
+		{"/context", "show context window token breakdown"},
 		{"/reset", "clear conversation (brain memory kept)"},
 		{"/cost", "token savings report"},
 		{"/stats", "usage analytics (tiers, latency, files)"},
@@ -1983,6 +2151,7 @@ func runWithScanner(cfg Config, client *ollama.Client, sess *session.Session,
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 	scannerBrainCtx := b.Load()
+	scannerPlanMode := cfg.PlanMode
 	for {
 		fmt.Printf("%s❯%s ", colorCopper, colorReset)
 		if !scanner.Scan() {
@@ -1993,7 +2162,7 @@ func runWithScanner(cfg Config, client *ollama.Client, sess *session.Session,
 			continue
 		}
 		if strings.HasPrefix(input, "/") {
-			if quit := handleSlashCommand(input, sess, b, &messages, client, &scannerBrainCtx); quit {
+			if quit := handleSlashCommand(input, sess, b, &messages, client, &scannerBrainCtx, &scannerPlanMode); quit {
 				break
 			}
 			continue
@@ -2005,4 +2174,42 @@ func runWithScanner(cfg Config, client *ollama.Client, sess *session.Session,
 	}
 	endSession(sess, b, messages, nil)
 	return nil
+}
+
+// htmlTagRe matches HTML tags for stripping.
+var htmlTagRe = regexp.MustCompile(`<[^>]*>`)
+
+// stripHTML removes HTML tags and decodes common entities, returning plain text.
+func stripHTML(s string) string {
+	text := htmlTagRe.ReplaceAllString(s, " ")
+	// Collapse whitespace.
+	spaceRe := regexp.MustCompile(`\s+`)
+	text = spaceRe.ReplaceAllString(text, " ")
+	// Decode common entities.
+	r := strings.NewReplacer(
+		"&amp;", "&", "&lt;", "<", "&gt;", ">",
+		"&quot;", "\"", "&#39;", "'", "&nbsp;", " ",
+	)
+	return strings.TrimSpace(r.Replace(text))
+}
+
+// makeHTTPRequest creates a new GET request with a browser-like User-Agent.
+func makeHTTPRequest(ctx context.Context, url string) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Mantis/1.0")
+	req.Header.Set("Accept", "text/html,text/plain,application/json")
+	return req, nil
+}
+
+// defaultHTTPClient returns a shared HTTP client with reasonable timeouts.
+func defaultHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: 15 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+		},
+	}
 }

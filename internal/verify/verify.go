@@ -5,6 +5,7 @@
 package verify
 
 import (
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -132,12 +133,35 @@ type ConventionResult struct {
 
 // Convention represents a parsed convention rule.
 type Convention struct {
-	Section string // e.g. "Naming", "Architecture", "Testing"
-	Rule    string // the rule text
+	Section  string // e.g. "Naming", "Architecture", "Testing"
+	Rule     string // the rule text
+	PathGlob string // optional path scope (e.g. "internal/api/**"); empty = applies everywhere
 }
+
+// MatchesPath returns true if this convention applies to the given file path.
+// An empty PathGlob means the rule is global.
+func (c Convention) MatchesPath(filePath string) bool {
+	if c.PathGlob == "" {
+		return true
+	}
+	matched, _ := filepath.Match(c.PathGlob, filePath)
+	if matched {
+		return true
+	}
+	// Also try matching just the directory prefix for ** patterns.
+	prefix := strings.TrimSuffix(c.PathGlob, "/**")
+	if prefix != c.PathGlob && strings.HasPrefix(filePath, prefix+"/") {
+		return true
+	}
+	return false
+}
+
+// pathScopeRe matches [path: some/glob/**] directives in CONVENTIONS.md.
+var pathScopeRe = regexp.MustCompile(`^\[path:\s*(.+?)\]$`)
 
 // ParseConventions extracts convention rules from CONVENTIONS.md content.
 // Rules are lines under ## sections that start with "- " or are non-empty non-header lines.
+// Path scoping is supported via [path: glob] directives that apply to subsequent rules.
 func ParseConventions(content string) []Convention {
 	if strings.TrimSpace(content) == "" {
 		return nil
@@ -145,10 +169,16 @@ func ParseConventions(content string) []Convention {
 
 	var conventions []Convention
 	section := ""
+	pathScope := ""
 	for _, line := range strings.Split(content, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "## ") {
 			section = strings.TrimPrefix(line, "## ")
+			pathScope = "" // reset scope on new section
+			continue
+		}
+		if m := pathScopeRe.FindStringSubmatch(line); len(m) == 2 {
+			pathScope = strings.TrimSpace(m[1])
 			continue
 		}
 		if line == "" || line == "(not set)" || strings.HasPrefix(line, "#") {
@@ -157,7 +187,7 @@ func ParseConventions(content string) []Convention {
 		rule := strings.TrimPrefix(line, "- ")
 		rule = strings.TrimPrefix(rule, "* ")
 		if rule != "" && section != "" {
-			conventions = append(conventions, Convention{Section: section, Rule: rule})
+			conventions = append(conventions, Convention{Section: section, Rule: rule, PathGlob: pathScope})
 		}
 	}
 	return conventions
@@ -170,17 +200,36 @@ var (
 	pascalCaseRe = regexp.MustCompile(`^[A-Z][a-zA-Z0-9]*$`)
 	// Matches variable/function declarations in common languages.
 	varDeclRe = regexp.MustCompile(`(?:let|const|var|func|def|function)\s+([a-zA-Z_][a-zA-Z0-9_]*)`)
+	// Matches code blocks with file paths: ```lang:filepath
+	codeFencePathRe = regexp.MustCompile("```[a-z]+:([^\n`]+)\n([\\s\\S]*?)```")
 )
 
 // CheckConventions checks extracted code blocks against parsed convention rules.
-// Currently checks naming conventions (snake_case, camelCase, PascalCase patterns).
+// Path-scoped rules are only applied to code blocks whose file path matches the rule's PathGlob.
 func CheckConventions(response string, conventions []Convention) ConventionResult {
 	if len(conventions) == 0 {
 		return ConventionResult{Clean: true}
 	}
 
-	codeBlocks := codeBlockRe.FindAllStringSubmatch(response, -1)
-	if len(codeBlocks) == 0 {
+	// Extract code blocks with file paths for path-scoped rule matching.
+	type codeBlock struct {
+		filePath string
+		code     string
+	}
+	var blocks []codeBlock
+	// First, extract blocks with file paths.
+	for _, m := range codeFencePathRe.FindAllStringSubmatch(response, -1) {
+		if len(m) >= 3 {
+			blocks = append(blocks, codeBlock{filePath: strings.TrimSpace(m[1]), code: m[2]})
+		}
+	}
+	// Also include generic code blocks (no file path → global rules only).
+	for _, m := range codeBlockRe.FindAllStringSubmatch(response, -1) {
+		if len(m) >= 2 {
+			blocks = append(blocks, codeBlock{code: m[1]})
+		}
+	}
+	if len(blocks) == 0 {
 		return ConventionResult{Clean: true}
 	}
 
@@ -191,12 +240,11 @@ func CheckConventions(response string, conventions []Convention) ConventionResul
 
 		// Check naming conventions.
 		if conv.Section == "Naming" || strings.Contains(lower, "case") || strings.Contains(lower, "naming") {
-			for _, block := range codeBlocks {
-				if len(block) < 2 {
+			for _, block := range blocks {
+				if !conv.MatchesPath(block.filePath) {
 					continue
 				}
-				code := block[1]
-				decls := varDeclRe.FindAllStringSubmatch(code, -1)
+				decls := varDeclRe.FindAllStringSubmatch(block.code, -1)
 				for _, d := range decls {
 					if len(d) < 2 {
 						continue
@@ -207,9 +255,8 @@ func CheckConventions(response string, conventions []Convention) ConventionResul
 					}
 
 					if strings.Contains(lower, "snake_case") && !snakeCaseRe.MatchString(name) && !pascalCaseRe.MatchString(name) {
-						// snake_case expected but found mixed case
 						if strings.Contains(name, "_") {
-							continue // has underscores, likely attempting snake_case
+							continue
 						}
 						violations = append(violations, ConventionViolation{
 							Rule:    conv.Rule,
@@ -237,14 +284,12 @@ func CheckConventions(response string, conventions []Convention) ConventionResul
 			strings.Contains(lower, "avoid") ||
 			strings.Contains(lower, "no imports")
 		if (conv.Section == "Architecture" || conv.Section == "Dependencies" || conv.Section == "Imports") && isImportRule {
-			for _, block := range codeBlocks {
-				if len(block) < 2 {
+			for _, block := range blocks {
+				if !conv.MatchesPath(block.filePath) {
 					continue
 				}
-				code := block[1]
-				// Extract forbidden patterns from rule like "never import from X"
 				forbidden := extractForbiddenImport(conv.Rule)
-				if forbidden != "" && strings.Contains(code, forbidden) {
+				if forbidden != "" && strings.Contains(block.code, forbidden) {
 					violations = append(violations, ConventionViolation{
 						Rule:    conv.Rule,
 						Details: "code contains import/reference to '" + forbidden + "'",
