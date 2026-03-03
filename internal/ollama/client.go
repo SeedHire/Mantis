@@ -13,13 +13,12 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"time"
 )
 
 const (
 	CloudBaseURL = "https://api.ollama.com"
 	LocalBaseURL = "http://localhost:11434"
-	Timeout      = 120 * time.Second
+	Timeout      = 0 // no client-level timeout; callers pass context deadlines
 )
 
 // Message is a single chat turn.

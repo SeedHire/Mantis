@@ -258,7 +258,7 @@ func Run(cfg Config) error {
 		}
 	}
 
-	printFooter()
+	fmt.Println() // spacing after banner
 
 	// One-shot mode: mantis "question"
 	if cfg.InitialQuery != "" {
@@ -317,7 +317,7 @@ func Run(cfg Config) error {
 	planMode := cfg.PlanMode
 	for {
 		printSep()
-		fmt.Printf("%s  /help  /cost  /brain  /quit  (Ctrl+C to interrupt)%s\n", colorDim, colorReset)
+		fmt.Printf("%s  /help  /cost  /brain  /quit%s\n", colorDim, colorReset)
 		line, err := rl.Readline()
 		if err == readline.ErrInterrupt {
 			if len(line) == 0 {
@@ -518,6 +518,10 @@ func Run(cfg Config) error {
 			if pErr != nil {
 				fmt.Printf("%s  [pipeline failed: %v — falling back to single model]%s\n\n",
 					colorRed, pErr, colorReset)
+				// Carry the plan from stage 1 into the single-model fallback context.
+				if pRes != nil && pRes.PlanText != "" {
+					input = "Here is the plan I already made:\n\n" + pRes.PlanText + "\n\nNow implement it for this request:\n" + input
+				}
 				// Fall through to single-model path below.
 			} else if planMode && pRes.CodeText == "" {
 				// Plan Mode: show plan and ask for approval before coding.
@@ -1538,7 +1542,7 @@ func printHelp() {
 }
 
 func printFooter() {
-	fmt.Printf("\n%s  /help  /cost  /brain  /quit  (Ctrl+C to interrupt)%s\n\n", colorDim, colorReset)
+	fmt.Printf("\n%s  /help  /cost  /brain  /quit%s\n\n", colorDim, colorReset)
 }
 
 // tierColors maps each tier to a terminal color code for the routing badge.
@@ -1675,6 +1679,7 @@ func normalizeTerminalInput(input string) string {
 		label   string
 	}{
 		{"command not found", "shell error"},
+		{"make: ***", "make error"},
 		{"npm ERR!", "npm error"},
 		{"npm WARN", "npm warning"},
 		{"Error:", "runtime error"},

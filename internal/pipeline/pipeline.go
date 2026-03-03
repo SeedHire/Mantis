@@ -167,7 +167,7 @@ func Run(
 		pt, ct, err := client.StreamChat(ctx, codeModel, codeMsgs, nil, func(c string) { codeBuf.WriteString(c); codeIncr() })
 		codeStop()
 		if err != nil {
-			return nil, fmt.Errorf("code stage: %w", err)
+			return res, fmt.Errorf("code stage: %w", err)
 		}
 		res.CodeText = codeBuf.String()
 		res.PromptTok += pt
@@ -292,7 +292,7 @@ func ContinuePlan(
 		pt, ct, err := client.StreamChat(ctx, codeModel, codeMsgs, nil, func(c string) { codeBuf.WriteString(c); codeIncr() })
 		codeStop()
 		if err != nil {
-			return nil, fmt.Errorf("code stage: %w", err)
+			return res, fmt.Errorf("code stage: %w", err)
 		}
 		res.CodeText = codeBuf.String()
 		res.PromptTok += pt
