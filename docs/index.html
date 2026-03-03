@@ -378,28 +378,6 @@
     .feature-card h3 { font-size: .95rem; font-weight: 700; margin-bottom: .4rem; }
     .feature-card p { font-size: .875rem; color: var(--fg-soft); line-height: 1.6; }
 
-    /* ── Comparison table ──────────────────────────────────────────────── */
-    .table-wrap {
-      overflow-x: auto; border-radius: 14px;
-      border: 1px solid var(--border);
-    }
-    table { width: 100%; border-collapse: collapse; font-size: .9rem; }
-    thead { background: var(--surface2); }
-    th {
-      padding: 1rem 1.25rem; text-align: left; font-weight: 700;
-      color: var(--fg-soft); font-size: .75rem;
-      text-transform: uppercase; letter-spacing: .05em;
-    }
-    th:not(:first-child) { text-align: center; }
-    td { padding: .9rem 1.25rem; border-top: 1px solid var(--border); }
-    td:not(:first-child) { text-align: center; }
-    tr:hover td { background: rgba(255,255,255,.02); }
-    .check { color: var(--success); font-size: 1.1rem; }
-    .cross { color: var(--fg-muted); font-size: 1.1rem; }
-    .highlight-col { color: var(--gold); font-weight: 700; }
-    .price-free { color: var(--success); font-weight: 700; }
-    .price-paid { color: var(--fg-soft); }
-
     /* ── How it works ──────────────────────────────────────────────────── */
     .steps { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 1.5rem; }
     .step {
@@ -511,6 +489,144 @@
     .feature-group-label::after {
       content: ''; flex: 1; height: 1px; background: var(--border);
     }
+
+    /* ── Compact feature + compare blocks ─────────────────────────────── */
+    .keyword-cloud {
+      display: flex; flex-wrap: wrap; gap: 10px;
+      margin-bottom: 24px;
+    }
+    .keyword-chip {
+      padding: 6px 12px;
+      border: 1px solid var(--border-hi);
+      border-radius: 999px;
+      background: var(--surface);
+      color: var(--fg-soft);
+      font-size: .78rem;
+      letter-spacing: .02em;
+    }
+    .expand-list {
+      display: grid;
+      gap: 10px;
+    }
+    .expand-item {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--surface);
+      overflow: hidden;
+    }
+    .expand-item summary {
+      cursor: pointer;
+      list-style: none;
+      padding: 14px 16px;
+      font-weight: 600;
+      color: var(--fg);
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .expand-head {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .expand-icon {
+      width: 20px;
+      height: 20px;
+      border-radius: 999px;
+      border: 1px solid var(--border-hi);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--copper-lt);
+      font-size: .8rem;
+      transition: transform .18s ease;
+      flex-shrink: 0;
+    }
+    .expand-item[open] .expand-icon {
+      transform: rotate(45deg);
+    }
+    .expand-item summary::-webkit-details-marker { display: none; }
+    .expand-item[open] summary {
+      border-bottom: 1px solid var(--border);
+      background: var(--surface2);
+    }
+    .expand-content {
+      padding: 14px 16px;
+      color: var(--fg-soft);
+      font-size: .9rem;
+      line-height: 1.7;
+    }
+    .info-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 10px;
+    }
+    .info-card {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #111523;
+      padding: 12px;
+    }
+    .info-title {
+      color: var(--fg);
+      font-size: .82rem;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      margin-bottom: 8px;
+    }
+    .info-list {
+      list-style: none;
+      display: grid;
+      gap: 6px;
+      margin: 0;
+      padding: 0;
+      font-size: .84rem;
+      line-height: 1.55;
+      color: var(--fg-soft);
+    }
+    .info-list li::before {
+      content: '• ';
+      color: var(--copper-lt);
+    }
+    .compare-snap {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 22px;
+    }
+    .snap-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+    .snap-card {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--surface2);
+      padding: 14px;
+    }
+    .snap-card h3 {
+      font-size: .88rem;
+      margin-bottom: 8px;
+      color: var(--fg);
+    }
+    .pill-row {
+      display: flex; flex-wrap: wrap; gap: 8px;
+      margin-top: 8px;
+    }
+    .pill {
+      font-size: .72rem;
+      padding: 4px 8px;
+      border-radius: 999px;
+      border: 1px solid var(--border-hi);
+      color: var(--fg-soft);
+    }
+    .pill.good {
+      border-color: rgba(45,212,160,.35);
+      color: var(--success);
+      background: rgba(45,212,160,.08);
+    }
   </style>
 </head>
 <body>
@@ -550,14 +666,13 @@
     
 
     <h1 class="fade-up d2">
-      One CLI for AI coding,<br/>
-      <span class="metallic">code intelligence, and memory.</span>
+      Free AI coding assistant<br/>
+      <span class="metallic">that actually knows your codebase.</span>
     </h1>
     <p class="fade-up d3">
-      Chat, screenshot analysis, dependency graph, runtime trace analysis,
-      cross-repo impact checks, architecture lint, and persistent project memory.
-      Includes 25 built-in skills, plus your own custom skills from <code>.mantis/skills</code>.
-      Free to use with Ollama Cloud or fully local with your own models.
+      Ask, analyze, and ship with confidence using graph-aware context,
+      persistent project memory, and built-in guardrails.
+      No API bill. Ollama Cloud free tier or fully local.
     </p>
 
     <div class="hero-ctas fade-up d4">
@@ -639,117 +754,140 @@
 <section id="features">
   <div class="container">
     <p class="section-label">Platform Overview</p>
-    <h2 class="section-title">Everything Mantis ships today.<br/>Organized by what you need to do.</h2>
-    <p class="section-sub">Use Mantis as an AI assistant, an intelligence layer for your repos, and a guardrail system for safer code changes.</p>
+    <h2 class="section-title">What you get, quickly.</h2>
+    <p class="section-sub">Keyword-first summary below. Expand only what you want to read.</p>
 
-    <div class="feature-group">
-      <div class="feature-group-label">1) Ask, Build, and See (Interactive + Multimodal)</div>
-      <div class="feature-grid">
-        <div class="feature-card">
-          <div class="feature-icon">💬</div>
-          <h3>Interactive + One-Shot CLI</h3>
-          <p>Run <code>mantis</code> for full interactive mode, or ask directly with <code>mantis "your question"</code> for quick one-shot answers.</p>
-        </div>
-        <div class="feature-card">
-          <div class="feature-icon">🖼️</div>
-          <h3>Image &amp; Screenshot Input</h3>
-          <p>Analyze UI bugs and diagrams with <code>mantis --image screenshot.png</code> or use <code>/vision</code> inside chat for multimodal debugging workflows.</p>
-        </div>
-        <div class="feature-card">
-          <div class="feature-icon">🧭</div>
-          <h3>Slash Command Workflow</h3>
-          <p>Use focused controls like <code>/file</code>, <code>/brain</code>, <code>/decision</code>, <code>/reject</code>, and <code>/cost</code> without leaving the session.</p>
-        </div>
-        <div class="feature-card">
-          <div class="feature-icon">🧩</div>
-          <h3>25 Built-In Skills + Custom Skills</h3>
-          <p>Mantis ships with 25 built-in specialist skills and also loads any additional markdown skill files you add under <code>.mantis/skills/</code>.</p>
-        </div>
-      </div>
+    <div class="keyword-cloud">
+      <span class="keyword-chip">Multimodal CLI</span>
+      <span class="keyword-chip">25 Built-In Skills</span>
+      <span class="keyword-chip">Custom Skills</span>
+      <span class="keyword-chip">Persistent Memory</span>
+      <span class="keyword-chip">Ground Truth Guard</span>
+      <span class="keyword-chip">Semantic Recall</span>
+      <span class="keyword-chip">Impact Analysis</span>
+      <span class="keyword-chip">Cross-Repo Workspace</span>
+      <span class="keyword-chip">Runtime Trace Analysis</span>
+      <span class="keyword-chip">Architecture Lint</span>
+      <span class="keyword-chip">7-Tier Router + Vision</span>
+      <span class="keyword-chip">Token Savings</span>
     </div>
 
-    <div class="feature-group">
-      <div class="feature-group-label">2) Memory That Persists Across Sessions</div>
-      <div class="feature-grid">
-        <div class="feature-card">
-          <div class="feature-icon">🧠</div>
-          <h3>Project Brain Files</h3>
-          <p>Mantis continuously updates <code>BRAIN.md</code>, <code>DECISIONS.log</code>, and <code>REJECTED.md</code> so context survives from one day to the next.</p>
+    <div class="expand-list">
+      <details class="expand-item">
+        <summary><span class="expand-head">Ask, Build, and See</span><span class="expand-icon">+</span></summary>
+        <div class="expand-content">
+          <div class="info-grid">
+            <div class="info-card">
+              <div class="info-title">Interaction</div>
+              <ul class="info-list">
+                <li><code>mantis</code> interactive workflow</li>
+                <li>One-shot CLI queries</li>
+                <li>Image analysis via <code>--image</code> and <code>/vision</code></li>
+              </ul>
+            </div>
+            <div class="info-card">
+              <div class="info-title">Speed Controls</div>
+              <ul class="info-list">
+                <li><code>/file</code> to inject source quickly</li>
+                <li><code>/brain</code> to inspect memory state</li>
+                <li><code>/decision</code>, <code>/reject</code>, <code>/cost</code> for workflow control</li>
+              </ul>
+            </div>
+          </div>
         </div>
-        <div class="feature-card">
-          <div class="feature-icon">✅</div>
-          <h3>Live Ground Truth</h3>
-          <p><code>GROUND_TRUTH.json</code> stores real function signatures from your codebase and powers automatic hallucination detection + correction.</p>
+      </details>
+      <details class="expand-item">
+        <summary><span class="expand-head">Memory + Skills</span><span class="expand-icon">+</span></summary>
+        <div class="expand-content">
+          <div class="info-grid">
+            <div class="info-card">
+              <div class="info-title">Persistent Brain</div>
+              <ul class="info-list">
+                <li><code>BRAIN.md</code> and <code>DECISIONS.log</code> track context</li>
+                <li><code>REJECTED.md</code> prevents repeat bad paths</li>
+                <li><code>embeddings.db</code> provides semantic recall</li>
+              </ul>
+            </div>
+            <div class="info-card">
+              <div class="info-title">Skill Layer</div>
+              <ul class="info-list">
+                <li>25 built-in specialist skills included</li>
+                <li>Add markdown skills in <code>.mantis/skills/</code></li>
+                <li>Relevant skills load automatically per task</li>
+              </ul>
+            </div>
+          </div>
         </div>
-        <div class="feature-card">
-          <div class="feature-icon">🔎</div>
-          <h3>Semantic Recall</h3>
-          <p>Past sessions are embedded into <code>embeddings.db</code> so Mantis can retrieve relevant historical decisions when similar problems come back.</p>
+      </details>
+      <details class="expand-item">
+        <summary><span class="expand-head">Codebase Intelligence</span><span class="expand-icon">+</span></summary>
+        <div class="expand-content">
+          <div class="info-grid">
+            <div class="info-card">
+              <div class="info-title">Graph Engine</div>
+              <ul class="info-list">
+                <li>AST dependency graph across Go, TS, and Python</li>
+                <li>Symbol discovery with <code>find</code></li>
+                <li>Interactive exploration with <code>graph</code></li>
+              </ul>
+            </div>
+            <div class="info-card">
+              <div class="info-title">Change Safety</div>
+              <ul class="info-list">
+                <li>Blast-radius checks with <code>impact</code></li>
+                <li>Dead code and circular dependency detection</li>
+                <li>Cross-repo impact via <code>workspace</code></li>
+              </ul>
+            </div>
+          </div>
         </div>
-      </div>
-    </div>
-
-    <div class="feature-group">
-      <div class="feature-group-label">3) Codebase Intelligence (Single Repo + Cross Repo)</div>
-      <div class="feature-grid">
-        <div class="feature-card">
-          <div class="feature-icon">🕸️</div>
-          <h3>AST Dependency Graph</h3>
-          <p><code>mantis init</code> builds a graph across Go, TypeScript, and Python for accurate symbol lookups, import tracing, and dependency analysis.</p>
+      </details>
+      <details class="expand-item">
+        <summary><span class="expand-head">Risk + Runtime Visibility</span><span class="expand-icon">+</span></summary>
+        <div class="expand-content">
+          <div class="info-grid">
+            <div class="info-card">
+              <div class="info-title">History Signals</div>
+              <ul class="info-list">
+                <li><code>hotspots</code> and <code>risky</code> expose churn risk</li>
+                <li><code>coupling</code> reveals co-change patterns</li>
+                <li><code>intent</code> and <code>spec-gaps</code> show quality drift</li>
+              </ul>
+            </div>
+            <div class="info-card">
+              <div class="info-title">Runtime Signals</div>
+              <ul class="info-list">
+                <li>Trace ingest for OTLP, pprof, and custom formats</li>
+                <li><code>hotpaths</code> and <code>cold</code> highlight runtime reality</li>
+                <li><code>weight</code> ranks impact by runtime significance</li>
+              </ul>
+            </div>
+          </div>
         </div>
-        <div class="feature-card">
-          <div class="feature-icon">💥</div>
-          <h3>Impact Before Edits</h3>
-          <p>Run <code>mantis impact &lt;symbol&gt;</code> to trace direct + transitive callers and see what change blast radius you are about to create.</p>
+      </details>
+      <details class="expand-item">
+        <summary><span class="expand-head">Guardrails + Cost Control</span><span class="expand-icon">+</span></summary>
+        <div class="expand-content">
+          <div class="info-grid">
+            <div class="info-card">
+              <div class="info-title">Reliability Guardrails</div>
+              <ul class="info-list">
+                <li><code>GROUND_TRUTH.json</code> catches invented symbols</li>
+                <li><code>mantis lint</code> enforces architecture boundaries</li>
+                <li>7-tier router picks model depth automatically</li>
+              </ul>
+            </div>
+            <div class="info-card">
+              <div class="info-title">Cost Clarity</div>
+              <ul class="info-list">
+                <li>Session reports include route usage and token totals</li>
+                <li>Built-in paid-model comparison snapshot</li>
+                <li>Free-tier + local-first workflow by default</li>
+              </ul>
+            </div>
+          </div>
         </div>
-        <div class="feature-card">
-          <div class="feature-icon">🧩</div>
-          <h3>Cross-Repo Workspace Graph</h3>
-          <p>Use <code>mantis workspace init/find/impact/stats</code> to reason about symbol usage and change impact across multiple repositories at once.</p>
-        </div>
-      </div>
-    </div>
-
-    <div class="feature-group">
-      <div class="feature-group-label">4) Risk Detection From History + Runtime</div>
-      <div class="feature-grid">
-        <div class="feature-card">
-          <div class="feature-icon">⏱️</div>
-          <h3>Temporal Intelligence</h3>
-          <p>Commands like <code>hotspots</code>, <code>risky</code>, <code>coupling</code>, <code>intent</code>, <code>todos</code>, and <code>spec-gaps</code> identify churn and risk trends in git history.</p>
-        </div>
-        <div class="feature-card">
-          <div class="feature-icon">📈</div>
-          <h3>Runtime Trace Analysis</h3>
-          <p>Ingest OTLP, pprof, or custom traces with <code>mantis trace ingest</code>, then inspect <code>hotpaths</code>, <code>cold</code>, and runtime-weighted impact with <code>trace weight</code>.</p>
-        </div>
-        <div class="feature-card">
-          <div class="feature-icon">🧹</div>
-          <h3>Dead Code + Circular Dependency Checks</h3>
-          <p>Use <code>mantis dead</code> and <code>mantis circular</code> to catch structural issues early, before they become reliability and maintenance debt.</p>
-        </div>
-      </div>
-    </div>
-
-    <div class="feature-group">
-      <div class="feature-group-label">5) Guardrails, Routing, and Cost Visibility</div>
-      <div class="feature-grid">
-        <div class="feature-card">
-          <div class="feature-icon">📐</div>
-          <h3>Convention + Architecture Enforcement</h3>
-          <p>Define rules in <code>.mantisrc.yml</code> and run <code>mantis lint</code> to keep boundaries clean in local development and CI pipelines.</p>
-        </div>
-        <div class="feature-card">
-          <div class="feature-icon">🎯</div>
-          <h3>7-Tier Model Router + Vision Tier</h3>
-          <p>Queries route automatically across trivial, fast, code, reason, heavy, max, and vision tiers for better speed/quality balance without manual model switching.</p>
-        </div>
-        <div class="feature-card">
-          <div class="feature-icon">💸</div>
-          <h3>Token Savings Report</h3>
-          <p>Every session includes a cost summary so you can compare against paid models and understand exactly how much money your workflow is saving.</p>
-        </div>
-      </div>
+      </details>
     </div>
 
   </div>
@@ -760,35 +898,68 @@
   <div class="container">
     <p class="section-label">Comparison</p>
     <h2 class="section-title">What Mantis includes at $0.</h2>
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Feature</th>
-            <th class="highlight-col">Mantis</th>
-            <th>Claude Code</th>
-            <th>GitHub Copilot</th>
-            <th>Cursor</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr><td>Monthly cost</td><td class="price-free highlight-col">$0</td><td class="price-paid">$20+</td><td class="price-paid">$10+</td><td class="price-paid">$20+</td></tr>
-          <tr><td>Multimodal image input</td><td class="check highlight-col">✓</td><td class="check">partial</td><td class="cross">—</td><td class="check">partial</td></tr>
-          <tr><td>Persistent project memory</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
-          <tr><td>Decision &amp; rejection memory</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
-          <tr><td>Session resume</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
-          <tr><td>Live dependency graph</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="check">partial</td></tr>
-          <tr><td>Cross-repo graph + impact</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
-          <tr><td>Impact analysis before editing</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
-          <tr><td>Temporal hotspots &amp; risky files</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
-          <tr><td>Runtime trace analysis</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
-          <tr><td>Architecture lint in CI</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
-          <tr><td>Hallucination guard (self-healing)</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
-          <tr><td>Handoff mode</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
-          <tr><td>Runs on local Ollama</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
-          <tr><td>Token cost tracker</td><td class="check highlight-col">✓</td><td class="cross">—</td><td class="cross">—</td><td class="cross">—</td></tr>
-        </tbody>
-      </table>
+    <p class="section-sub">Compared with typical Codex CLI, Claude Code, and Copilot workflows.</p>
+    <div class="compare-snap">
+      <div class="snap-grid">
+        <div class="snap-card">
+          <h3>Mantis</h3>
+          <div class="pill-row">
+            <span class="pill good">Persistent Memory</span>
+            <span class="pill good">Cross-Repo Graph</span>
+            <span class="pill good">Runtime Traces</span>
+            <span class="pill good">$0 + Local Ollama</span>
+          </div>
+        </div>
+        <div class="snap-card">
+          <h3>Codex CLI Workflows</h3>
+          <div class="pill-row">
+            <span class="pill">Strong coding agent</span>
+            <span class="pill">Memory usually external</span>
+            <span class="pill">Graph/trace tools separate</span>
+          </div>
+        </div>
+        <div class="snap-card">
+          <h3>Claude Code Workflows</h3>
+          <div class="pill-row">
+            <span class="pill">Strong reasoning</span>
+            <span class="pill">Project memory not native</span>
+            <span class="pill">Runtime intel not native</span>
+          </div>
+        </div>
+        <div class="snap-card">
+          <h3>Copilot Workflows</h3>
+          <div class="pill-row">
+            <span class="pill">IDE completion strength</span>
+            <span class="pill">Cross-repo impact limited</span>
+            <span class="pill">Team memory external</span>
+          </div>
+        </div>
+      </div>
+      <details class="expand-item">
+        <summary><span class="expand-head">Open detailed capability matrix</span><span class="expand-icon">+</span></summary>
+        <div class="expand-content">
+          <div class="info-grid">
+            <div class="info-card">
+              <div class="info-title">Mantis-Native Stack</div>
+              <ul class="info-list">
+                <li>Persistent team memory + decision/rejection log</li>
+                <li>AST + cross-repo impact graph</li>
+                <li>Runtime trace ingestion + architecture lint</li>
+                <li>Hallucination guard + local-first operation</li>
+              </ul>
+            </div>
+            <div class="info-card">
+              <div class="info-title">Typical Alternative Stack</div>
+              <ul class="info-list">
+                <li>Agent workflow often strong for coding tasks</li>
+                <li>Memory, graph, and runtime visibility split across tools</li>
+                <li>Capability depth usually tied to paid tiers</li>
+                <li>Extra integration/setup overhead for teams</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </details>
     </div>
   </div>
 </section>
@@ -797,7 +968,7 @@
 <section>
   <div class="container">
     <p class="section-label">Get started</p>
-    <h2 class="section-title">Up and running in 4 steps.</h2>
+    <h2 class="section-title">Up and running in 3 steps.</h2>
     <div class="steps">
       <div class="step">
         <div class="step-num">1</div>
@@ -811,13 +982,8 @@
       </div>
       <div class="step">
         <div class="step-num">3</div>
-        <h3>Index your project graph</h3>
-        <p>Run <code>mantis init</code> once inside your repo. This enables impact analysis, symbol search, dead code checks, and smarter context bundling.</p>
-      </div>
-      <div class="step">
-        <div class="step-num">4</div>
-        <h3>Start building</h3>
-        <p>Open interactive mode with <code>mantis</code>, ask one-shot questions, or add <code>--image</code> for multimodal debugging workflows.</p>
+        <h3>Index + start</h3>
+        <p>Run <code>mantis init</code> once, then use <code>mantis</code> (or <code>--image</code>) to start with full graph-aware context.</p>
       </div>
     </div>
   </div>
