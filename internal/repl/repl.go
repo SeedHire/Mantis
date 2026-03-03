@@ -4,6 +4,7 @@ package repl
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
@@ -12,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
@@ -405,6 +407,14 @@ func Run(cfg Config) error {
 			userContent = tmpl + "\n\n" + input
 		}
 
+		// Auto-capture build errors when the user mentions a build command.
+		if intent.TaskType == "fix" || intent.TaskType == "general" {
+			if captured := captureBuildError(input, root); captured != "" {
+				fmt.Printf("%s  ◉ captured build output%s\n", colorDim, colorReset)
+				userContent = userContent + "\n\n" + captured
+			}
+		}
+
 		// Semantic memory retrieval — hybrid BM25+cosine via RRF.
 		var memChunksFound int
 		if embStore != nil {
@@ -499,6 +509,56 @@ func Run(cfg Config) error {
 					}
 				}
 			}
+		}
+
+		// ── Single-agent fix loop for code-tier fix/debug tasks ──────────────
+		// Gives the model run_command + read_file tools so it can investigate
+		// and fix build errors autonomously, without the multi-agent gate.
+		if intent.TaskType == "fix" && intent.Tier == router.TierCode {
+			fmt.Printf("%s  ◆ fix agent [%s] — investigating with tools%s\n", colorDim, model, colorReset)
+			agentCtx, agentCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			agentResp, agentPT, agentCT, agentOK := runFixAgent(agentCtx, client, model, messages, root)
+			agentCancel()
+
+			if agentOK {
+				turnTok := agentPT + agentCT
+				_, _, sessTotal := sess.Totals()
+				fmt.Printf("%s◈ Mantis%s  %s[fix-agent · +%d tok · session: %d]%s\n",
+					colorCopper+colorBold, colorReset, colorDim, turnTok, sessTotal+turnTok, colorReset)
+				renderResponse(stripInternalBlocks(stripFileBlocks(agentResp)))
+
+				wf := extractAndWriteFiles(agentResp, root)
+				if len(wf) > 0 {
+					printWrittenFiles(wf)
+				}
+				messages = append(messages, ollama.Message{Role: "assistant", Content: agentResp})
+				wf = verifyAndFix(context.Background(), client, model, intent.Tier, root, wf, &messages)
+				sess.Add(model, intent.Tier, agentPT, agentCT, hasImage)
+
+				var writtenPaths []string
+				for _, f := range wf {
+					writtenPaths = append(writtenPaths, f.Path)
+				}
+				tlog.Log(telemetry.Event{
+					SessionID:    sessID,
+					Turn:         turn,
+					Tier:         intent.Tier.String(),
+					TaskType:     string(intent.TaskType),
+					Confidence:   intent.Confidence,
+					Model:        model,
+					PromptTok:    agentPT,
+					ComplTok:     agentCT,
+					LatencyMS:    time.Since(turnStart).Milliseconds(),
+					FilesWritten: writtenPaths,
+					InputSnippet: input,
+				})
+				if warn := usageTracker.Add(turnTok, false, hasImage); warn != "" {
+					fmt.Printf("%s%s%s\n\n", colorRed, warn, colorReset)
+				}
+				continue
+			}
+			// Fix agent didn't work — fall through to normal paths.
+			fmt.Printf("%s  [fix agent unavailable — falling back]%s\n", colorDim, colorReset)
 		}
 
 		// ── Multi-stage SWE pipeline for complex build/implement requests ─────
@@ -1219,6 +1279,243 @@ func contextMessageFor(input, root string, brainContext string, tw *truth.Writer
 		return nil
 	}
 	return ollama.Message{Role: "user", Content: "[context]\n" + strings.Join(parts, "\n\n") + "\n[/context]\n\nNow answer: " + input}
+}
+
+// captureBuildError detects build-related commands mentioned in the user's
+// message and auto-runs them to capture the actual error output. Returns the
+// captured output (capped at 3000 chars) or "" if no build command was detected
+// or the build succeeded.
+func captureBuildError(input, root string) string {
+	lower := strings.ToLower(input)
+
+	// Map of trigger phrases → commands to run.
+	triggers := []struct {
+		phrase string
+		cmd    string
+	}{
+		{"make build", "make build"},
+		{"make test", "make test"},
+		{"npm run build", "npm run build"},
+		{"npm test", "npm test"},
+		{"go build", "go build ./..."},
+		{"go test", "go test ./..."},
+		{"cargo build", "cargo build"},
+		{"cargo check", "cargo check"},
+		{"cargo test", "cargo test"},
+	}
+
+	var cmdToRun string
+	for _, t := range triggers {
+		if strings.Contains(lower, t.phrase) {
+			cmdToRun = t.cmd
+			break
+		}
+	}
+	if cmdToRun == "" {
+		return ""
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "sh", "-c", cmdToRun)
+	cmd.Dir = root
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+
+	err := cmd.Run()
+	if err == nil {
+		// Build succeeded — nothing to inject.
+		return ""
+	}
+
+	output := out.String()
+	if len(output) > 3000 {
+		output = output[:3000] + "\n… (truncated)"
+	}
+	return fmt.Sprintf("[Mantis auto-ran `%s` and captured this error output]\n```\n%s\n```", cmdToRun, strings.TrimSpace(output))
+}
+
+// fixAgentTools returns a minimal set of tools for the single-agent fix loop.
+func fixAgentTools() []ollama.Tool {
+	return []ollama.Tool{
+		{
+			Type: "function",
+			Function: ollama.ToolFunction{
+				Name:        "read_file",
+				Description: "Read a file from the project. Path is relative to the project root.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Relative file path"}},"required":["path"]}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: ollama.ToolFunction{
+				Name:        "run_command",
+				Description: "Run a build/test command. Allowed: go build, go test, go vet, npm run, npm test, npm install, cargo build, cargo check, cargo test, make build, make test, git diff, git status.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"}},"required":["command"]}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: ollama.ToolFunction{
+				Name:        "list_files",
+				Description: "List files in a directory (non-recursive, max 50 entries).",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Relative directory path (default: .)"}},"required":[]}`),
+			},
+		},
+	}
+}
+
+// fixAgentAllowedCmd checks if a command is safe to run in the fix agent.
+func fixAgentAllowedCmd(cmd string) bool {
+	trimmed := strings.TrimSpace(cmd)
+	allowed := []string{
+		"go build", "go test", "go vet", "go fmt",
+		"npm run", "npm test", "npm install",
+		"cargo check", "cargo build", "cargo test",
+		"make build", "make test", "make lint",
+		"git diff", "git status", "git log",
+		"cat ", "head ", "tail ",
+	}
+	for _, prefix := range allowed {
+		if strings.HasPrefix(trimmed, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// dispatchFixTool executes a single tool call for the fix agent loop.
+func dispatchFixTool(root, toolName string, argsRaw json.RawMessage) string {
+	switch toolName {
+	case "read_file":
+		var args struct{ Path string `json:"path"` }
+		if err := json.Unmarshal(argsRaw, &args); err != nil {
+			return "error: bad arguments"
+		}
+		abs := filepath.Join(root, filepath.Clean(args.Path))
+		if !strings.HasPrefix(abs, root) {
+			return "error: path escapes project root"
+		}
+		data, err := os.ReadFile(abs)
+		if err != nil {
+			return fmt.Sprintf("error: %v", err)
+		}
+		content := string(data)
+		if len(content) > 8000 {
+			content = content[:8000] + "\n… (truncated)"
+		}
+		return content
+
+	case "run_command":
+		var args struct{ Command string `json:"command"` }
+		if err := json.Unmarshal(argsRaw, &args); err != nil {
+			return "error: bad arguments"
+		}
+		if !fixAgentAllowedCmd(args.Command) {
+			return fmt.Sprintf("error: command not allowed: %q", args.Command)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "sh", "-c", args.Command)
+		cmd.Dir = root
+		var out bytes.Buffer
+		cmd.Stdout = &out
+		cmd.Stderr = &out
+		err := cmd.Run()
+		output := out.String()
+		if len(output) > 4000 {
+			output = output[:4000] + "\n… (truncated)"
+		}
+		if err != nil {
+			return fmt.Sprintf("exit code: non-zero\n%s", output)
+		}
+		return output
+
+	case "list_files":
+		var args struct{ Path string `json:"path"` }
+		_ = json.Unmarshal(argsRaw, &args)
+		dir := root
+		if args.Path != "" {
+			dir = filepath.Join(root, filepath.Clean(args.Path))
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return fmt.Sprintf("error: %v", err)
+		}
+		var sb strings.Builder
+		for i, e := range entries {
+			if i >= 50 {
+				sb.WriteString("… (truncated)\n")
+				break
+			}
+			name := e.Name()
+			if e.IsDir() {
+				name += "/"
+			}
+			sb.WriteString(name + "\n")
+		}
+		return sb.String()
+
+	default:
+		return fmt.Sprintf("error: unknown tool %q", toolName)
+	}
+}
+
+// runFixAgent runs a lightweight single-agent tool loop for fix-type tasks.
+// It gives the code model access to read_file, run_command, and list_files
+// so it can investigate and fix issues autonomously.
+// Returns (response, promptTok, complTok, ok). ok=false means the agent loop
+// couldn't run (caller should fall back to the normal path).
+func runFixAgent(
+	ctx context.Context,
+	client *ollama.Client,
+	model string,
+	messages []interface{},
+	root string,
+) (string, int, int, bool) {
+	const maxIter = 5
+	tools := fixAgentTools()
+
+	// Copy messages so we don't mutate the caller's slice during the loop.
+	agentMsgs := make([]interface{}, len(messages))
+	copy(agentMsgs, messages)
+
+	var totalPT, totalCT int
+	var lastContent string
+
+	for iter := 0; iter < maxIter; iter++ {
+		result, err := client.ChatWithTools(ctx, model, agentMsgs, tools, nil)
+		if err != nil {
+			return "", 0, 0, false
+		}
+		totalPT += result.PromptTok
+		totalCT += result.ComplTok
+		lastContent = result.Content
+
+		if len(result.ToolCalls) == 0 {
+			// No tool calls — model has its final answer.
+			break
+		}
+
+		// Append assistant turn with tool calls.
+		agentMsgs = append(agentMsgs, ollama.Message{Role: "assistant", Content: result.Content})
+
+		// Execute each tool call.
+		for _, tc := range result.ToolCalls {
+			toolOut := dispatchFixTool(root, tc.Function.Name, tc.Function.Arguments)
+			agentMsgs = append(agentMsgs, ollama.ToolMessage{
+				Role:    "tool",
+				Content: toolOut,
+			})
+		}
+	}
+
+	if strings.TrimSpace(lastContent) == "" {
+		return "", 0, 0, false
+	}
+	return lastContent, totalPT, totalCT, true
 }
 
 // readFileSnippet reads a file and returns at most maxChars characters.

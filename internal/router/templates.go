@@ -12,10 +12,11 @@ Reference actual function names and file paths from the project.`
 
 	case "fix":
 		return `[Task: Fix Bug]
-1. Show the broken code and explain WHY it fails.
-2. Show the fix.
+1. Identify the broken code and explain WHY it fails.
+2. Write the corrected file(s) using ` + "```lang:path/to/file" + ` fences so Mantis writes them to disk automatically.
 3. Explain why the fix works.
-4. Note any files that might need related changes.`
+4. Note any files that might need related changes.
+IMPORTANT: Always output corrected files with ` + "```lang:filepath" + ` fences — do NOT just show code snippets without a file path.`
 
 	case "refactor":
 		return `[Task: Refactor]

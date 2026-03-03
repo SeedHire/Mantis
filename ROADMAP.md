@@ -599,6 +599,9 @@ Add `/fetch <url>` slash command: HTTP GET the URL, strip HTML tags, truncate to
 | 14 | Path-scoped convention rules | 1 day | Rule precision |
 | 15 | Web fetch (/fetch + auto-trigger) | 1 day | Closes web gap |
 | 16 | Multi-agent fan-out | 3 days | Product moat |
+| 17 | Single-agent fix loop for code tier | Done | Fix tasks can investigate autonomously |
+| 18 | Auto-capture build errors | Done | Model sees actual errors, not guesses |
+| 19 | Fix template requires file output | Done | Auto-fix loop triggers on fix tasks |
 
 ---
 
