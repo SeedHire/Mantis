@@ -61,18 +61,6 @@ func (t *Tracker) Summary() string {
 }
 
 func (t *Tracker) checkLimits() string {
-	pct := float64(t.today.Tokens) / float64(FreeDailyTokens) * 100
-	switch {
-	case t.today.Tokens >= FreeDailyTokens:
-		return fmt.Sprintf("🔴 daily token limit reached (%d). Upgrade to Pro for unlimited.", FreeDailyTokens)
-	case pct >= 80:
-		return fmt.Sprintf("🟡 %.0f%% of daily tokens used (%s/%s)",
-			pct, formatTokens(t.today.Tokens), formatTokens(FreeDailyTokens))
-	case t.today.HeavyCalls >= FreeDailyHeavyCalls:
-		return fmt.Sprintf("🟡 heavy model limit reached (%d/day free). Upgrade for unlimited.", FreeDailyHeavyCalls)
-	case t.today.VisionCalls >= FreeDailyVisionCalls:
-		return fmt.Sprintf("🟡 vision call limit reached (%d/day free). Upgrade for unlimited.", FreeDailyVisionCalls)
-	}
 	return ""
 }
 
