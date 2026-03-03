@@ -326,7 +326,7 @@ const planStageSuffix = `
 
 ## Your role: ARCHITECT
 Analyze the development request and produce a structured implementation plan.
-Do NOT write any implementation code. Focus entirely on planning.
+Do NOT write any implementation code or file content — list file NAMES only.
 
 CRITICAL: Begin your response IMMEDIATELY with "### Overview" — no preamble, no "Let me...", no "The user is...", no analysis sentences before the header. Jump straight to the structured output.
 
@@ -343,7 +343,9 @@ const codeStageSuffix = `
 
 ## Your role: IMPLEMENTER
 Write the complete, production-ready implementation based on the plan.
-- Use ` + "```lang:filepath" + ` fences for EVERY file (e.g. ` + "```python:app.py" + `).
+- Use ` + "```lang:filepath" + ` fences for EVERY file — source files AND config/manifest files.
+- This explicitly includes: package.json, requirements.txt, Cargo.toml, go.mod, go.sum, Makefile, .env.example, tsconfig.json, vite.config.ts, docker-compose.yml, Dockerfile, pyproject.toml — EVERY file that must exist on disk.
+- NEVER output JSON, YAML, TOML, or any config content as bare text or bare ` + "```json" + ` blocks. Every file MUST have a filepath: ` + "```json:backend/package.json" + `.
 - Handle all error cases. No stubs. No TODOs left unimplemented.
 - Validate inputs at boundaries. Return structured errors.
 
@@ -373,7 +375,9 @@ func codeUserPrompt(req, plan string) string {
 		"Implement the following based on the plan provided.\n\n"+
 			"## Original Request\n%s\n\n"+
 			"## Implementation Plan\n%s\n\n"+
-			"Write the complete implementation now. Every file must use `lang:filepath` fences.",
+			"Write the complete implementation now. Every file — including package.json, tsconfig.json, "+
+			"requirements.txt, Makefile, .env.example, and any other config/manifest file — must use "+
+			"`lang:filepath` fences (e.g. ```json:backend/package.json). No bare JSON or YAML blocks.",
 		req, plan,
 	)
 }

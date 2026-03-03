@@ -29,6 +29,11 @@ var githubClientID = "Ov23liWbzDpXAJi3Fdzy"
 // Override at build time: -ldflags "-X github.com/seedhire/mantis/internal/setup.supabaseTrackUserURL=xxx"
 var supabaseTrackUserURL = "https://vkimmiebehlgzlgrbwyo.supabase.co/functions/v1/track-user"
 
+// supabaseAnonKey is the public anon key for the Supabase project.
+// Injected at build time: -ldflags "-X github.com/seedhire/mantis/internal/setup.supabaseAnonKey=<anon-key>"
+// Falls back to the SUPABASE_ANON_KEY environment variable.
+var supabaseAnonKey = ""
+
 // AppVersion is set at build time via ldflags to the release tag (e.g. "v0.1.0").
 var AppVersion = "dev"
 
@@ -432,6 +437,14 @@ func trackUserSignIn(p githubProfile) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+	key := supabaseAnonKey
+	if key == "" {
+		key = os.Getenv("SUPABASE_ANON_KEY")
+	}
+	if key != "" {
+		req.Header.Set("apikey", key)
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
 	resp, err := client.Do(req)
 	if err == nil {
 		resp.Body.Close()

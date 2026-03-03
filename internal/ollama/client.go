@@ -203,6 +203,17 @@ func (c *Client) Chat(ctx context.Context, model string, messages []interface{},
 	return sb.String(), pt, ct, err
 }
 
+// QuickChat sends a simple system+user message and returns the text response.
+// Satisfies the brain.Querier interface.
+func (c *Client) QuickChat(ctx context.Context, model, systemPrompt, userMsg string) (string, error) {
+	msgs := []interface{}{
+		Message{Role: "system", Content: systemPrompt},
+		Message{Role: "user", Content: userMsg},
+	}
+	text, _, _, err := c.Chat(ctx, model, msgs, nil)
+	return text, err
+}
+
 // ModelInfo holds a model name and its size in bytes.
 type ModelInfo struct {
 	Name string

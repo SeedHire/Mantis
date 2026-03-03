@@ -142,6 +142,11 @@ func (b *Brain) seedConventions() error {
 func (b *Brain) Load() string {
 	var parts []string
 
+	// MANTIS.md in the project root takes priority — it's the human-curated guide.
+	if mantis := b.ReadMantisFile(); mantis != "" {
+		parts = append(parts, "## Project Guide (MANTIS.md)\n"+mantis)
+	}
+
 	if brain := b.readFile("BRAIN.md"); brain != "" {
 		parts = append(parts, "## Project Memory (BRAIN.md)\n"+brain)
 	}
@@ -260,6 +265,10 @@ func (b *Brain) loadGroundTruthN(maxFiles, maxChars int) string {
 // LoadForTier returns brain context sized for the given model tier.
 func (b *Brain) LoadForTier(tier string) string {
 	var parts []string
+
+	if mantis := b.ReadMantisFile(); mantis != "" {
+		parts = append(parts, "## Project Guide (MANTIS.md)\n"+mantis)
+	}
 
 	if brain := b.readFile("BRAIN.md"); brain != "" {
 		parts = append(parts, "## Project Memory (BRAIN.md)\n"+brain)

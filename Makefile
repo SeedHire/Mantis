@@ -2,7 +2,10 @@ BINARY     = mantis
 BUILD_DIR  = ./bin
 MODULE     = github.com/mantis-dev/mantis
 VERSION   ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
-LDFLAGS    = -ldflags "-X main.version=$(VERSION)"
+SUPABASE_ANON_KEY ?= $(shell echo $$SUPABASE_ANON_KEY)
+LDFLAGS    = -ldflags "-X main.version=$(VERSION) \
+	-X github.com/seedhire/mantis/internal/telemetry.supabaseAnonKey=$(SUPABASE_ANON_KEY) \
+	-X github.com/seedhire/mantis/internal/setup.supabaseAnonKey=$(SUPABASE_ANON_KEY)"
 
 .PHONY: build install clean test lint run
 

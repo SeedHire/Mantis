@@ -108,17 +108,20 @@ func Run(cfg Config) error {
 	clearScreen()
 	printBanner()
 
-	// Status dots — one line each, only shown if relevant.
 	creds, _ := setup.Load()
-	if creds != nil && creds.GitHubUser != "" {
-		fmt.Printf("%s● %s%s\n", colorGreen, creds.GitHubUser, colorReset)
-	}
-
 	client := ollama.NewFromEnv()
-	if client.IsCloud() {
-		fmt.Printf("%s● Ollama Cloud%s\n", colorGreen, colorReset)
-	} else {
-		fmt.Printf("%s● local Ollama%s\n", colorDim, colorReset)
+
+	// Single line: user · connection.
+	{
+		connStr := colorDim + "local Ollama" + colorReset
+		if client.IsCloud() {
+			connStr = colorGreen + "Ollama Cloud" + colorReset
+		}
+		if creds != nil && creds.GitHubUser != "" {
+			fmt.Printf("%s● %s%s · %s\n", colorGreen, creds.GitHubUser, colorReset, connStr)
+		} else {
+			fmt.Printf("● %s\n", connStr)
+		}
 	}
 
 	// Resolve available models silently; keep the list for ensemble use.
@@ -131,24 +134,16 @@ func Run(cfg Config) error {
 			availableModels = models
 			router.ResolveAll(models)
 			summary := router.ResolvedSummary()
-			// Check for collapsed tiers (same model used for 3+ tiers = limited install).
+			// Warn only when tiers are collapsed (limited model install).
 			modelFreq := map[string]int{}
 			for _, m := range summary {
 				modelFreq[m]++
 			}
-			collapsed := false
 			for _, count := range modelFreq {
 				if count >= 3 {
-					collapsed = true
+					fmt.Printf("%s● models: limited install — some tiers share the same model%s\n", colorGold, colorReset)
+					fmt.Printf("%s  install more: ollama pull devstral-small, qwen2.5-coder:14b, llama3.1:70b%s\n", colorDim, colorReset)
 					break
-				}
-			}
-			if collapsed {
-				fmt.Printf("%s● models: limited install — some tiers share the same model%s\n", colorGold, colorReset)
-				fmt.Printf("%s  install more: ollama pull devstral-small, qwen2.5-coder:14b, llama3.1:70b%s\n", colorDim, colorReset)
-			} else {
-				for tier, model := range summary {
-					fmt.Printf("  %s%-8s%s → %s\n", colorGold, tier, colorReset, model)
 				}
 			}
 		}
@@ -161,16 +156,6 @@ func Run(cfg Config) error {
 	}
 	brainContext := b.Load()
 	conventions := verify.ParseConventions(b.ReadFile("CONVENTIONS.md"))
-	if brainContext != "" {
-		fmt.Printf("%s● project memory ready%s\n", colorGold, colorReset)
-	}
-
-	// Load skills — size budget scales with intent tier (applied per-turn below).
-	// We only keep the skill count here; actual content is loaded per-turn
-	// using LoadSkillsForTask so the most relevant skills come first.
-	if n := b.SkillCount(); n > 0 {
-		fmt.Printf("%s● %d skills loaded%s\n", colorGold, n, colorReset)
-	}
 
 	// Semantic embeddings — optional, used for memory retrieval + router classifier.
 	var embStore *embeddings.Store
@@ -201,20 +186,36 @@ func Run(cfg Config) error {
 	usageTracker := usage.New()
 	tlog := telemetry.New()
 	sessID := fmt.Sprintf("%d", time.Now().UnixMilli())
-	// Attach GitHub user and show telemetry notice once.
 	if creds != nil && creds.GitHubUser != "" {
 		tlog.SetUser(creds.GitHubUser, "v0.3.0")
-	}
-	if !tlog.IsDisabled() {
-		fmt.Printf("%s● telemetry on · /telemetry off to disable%s\n", colorDim, colorReset)
 	}
 
 	// Ground truth — auto-index in background on first run.
 	truthWriter := truth.New(root)
-	if truthWriter.FileCount() > 0 {
-		fmt.Printf("%s● %d files indexed%s\n", colorGold, truthWriter.FileCount(), colorReset)
-	} else {
+	if truthWriter.FileCount() == 0 {
 		go func() { _ = truthWriter.BuildFull(root) }()
+	}
+
+	// Single project status line: files · skills · memory · MANTIS.md.
+	{
+		var parts []string
+		if n := truthWriter.FileCount(); n > 0 {
+			parts = append(parts, fmt.Sprintf("%d files", n))
+		}
+		if n := b.SkillCount(); n > 0 {
+			parts = append(parts, fmt.Sprintf("%d skills", n))
+		}
+		if brainContext != "" {
+			parts = append(parts, "memory ready")
+		}
+		if b.HasMantisFile() {
+			parts = append(parts, "MANTIS.md")
+		}
+		if len(parts) > 0 {
+			fmt.Printf("%s● %s%s\n", colorGold, strings.Join(parts, " · "), colorReset)
+		} else {
+			fmt.Printf("%s● /init to generate MANTIS.md%s\n", colorDim, colorReset)
+		}
 	}
 
 	// Conversation history — start with a default system prompt (will be rebuilt per-turn with tier context).
@@ -233,6 +234,7 @@ func Run(cfg Config) error {
 	// Interactive REPL with readline (history, arrows, Ctrl+R, tab completion).
 	slashCompleter := readline.NewPrefixCompleter(
 		readline.PcItem("/help"),
+		readline.PcItem("/init"),
 		readline.PcItem("/file"),
 		readline.PcItem("/vision"),
 		readline.PcItem("/reset"),
@@ -295,7 +297,7 @@ func Run(cfg Config) error {
 
 		// Slash commands.
 		if strings.HasPrefix(input, "/") {
-			if quit := handleSlashCommand(input, sess, b, &messages, client); quit {
+			if quit := handleSlashCommand(input, sess, b, &messages, client, &brainContext); quit {
 				break
 			}
 			continue
@@ -739,7 +741,7 @@ func runOnce(cfg Config, client *ollama.Client, sess *session.Session,
 }
 
 func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
-	messages *[]interface{}, client *ollama.Client) (quit bool) {
+	messages *[]interface{}, client *ollama.Client, brainContext *string) (quit bool) {
 
 	parts := strings.Fields(input)
 	cmd := parts[0]
@@ -774,6 +776,24 @@ func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
 			}
 		default:
 			fmt.Printf("%s/telemetry on%s  — enable upload\n%s/telemetry off%s — disable upload (local only)\n\n", colorDim, colorReset, colorDim, colorReset)
+		}
+	case "/init":
+		fmt.Printf("%s● analyzing project…%s\n", colorDim, colorReset)
+		initModel := router.ModelFor(router.TierReason)
+		initCtx, initCancel := context.WithTimeout(context.Background(), 120*time.Second)
+		generated, err := b.ScanInit(initCtx, client, initModel)
+		initCancel()
+		if err != nil {
+			fmt.Printf("%s✗ /init failed: %v%s\n\n", colorRed, err, colorReset)
+		} else {
+			fmt.Printf("%s● MANTIS.md written to project root%s\n\n", colorGreen, colorReset)
+			renderResponse(generated)
+			// Reload brain context so the new MANTIS.md takes effect immediately.
+			*brainContext = b.Load()
+			*messages = []interface{}{
+				ollama.Message{Role: "system", Content: buildSystemPrompt(*brainContext, b.LoadSkillsForTask("implement", 20000), router.TierCode)},
+			}
+			fmt.Printf("%s● context reloaded with MANTIS.md%s\n\n", colorGold, colorReset)
 		}
 	case "/brain":
 		content := b.ReadBrain()
@@ -1301,6 +1321,7 @@ func printHelp() {
 	r := colorReset
 	fmt.Printf("\n%s╭─ Commands ──────────────────────────────────────────────╮%s\n", d, r)
 	cmds := [][2]string{
+		{"/init", "analyze codebase and generate MANTIS.md"},
 		{"/file <path>", "inject a file into context"},
 		{"/vision <path>", "analyze an image or screenshot"},
 		{"/reset", "clear conversation (brain memory kept)"},
@@ -1961,6 +1982,7 @@ func runWithScanner(cfg Config, client *ollama.Client, sess *session.Session,
 
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	scannerBrainCtx := b.Load()
 	for {
 		fmt.Printf("%s❯%s ", colorCopper, colorReset)
 		if !scanner.Scan() {
@@ -1971,7 +1993,7 @@ func runWithScanner(cfg Config, client *ollama.Client, sess *session.Session,
 			continue
 		}
 		if strings.HasPrefix(input, "/") {
-			if quit := handleSlashCommand(input, sess, b, &messages, client); quit {
+			if quit := handleSlashCommand(input, sess, b, &messages, client, &scannerBrainCtx); quit {
 				break
 			}
 			continue

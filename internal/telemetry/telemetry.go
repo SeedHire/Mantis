@@ -27,6 +27,13 @@ const (
 	batchSize      = 10
 )
 
+// supabaseAnonKey is injected at build time:
+//
+//	go build -ldflags "-X github.com/seedhire/mantis/internal/telemetry.supabaseAnonKey=<anon-key>"
+//
+// Falls back to the SUPABASE_ANON_KEY environment variable.
+var supabaseAnonKey = ""
+
 // Event is one turn logged to disk.
 type Event struct {
 	Timestamp    time.Time `json:"ts"`
@@ -151,6 +158,14 @@ func (l *Logger) flush() {
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
+		key := supabaseAnonKey
+		if key == "" {
+			key = os.Getenv("SUPABASE_ANON_KEY")
+		}
+		if key != "" {
+			req.Header.Set("apikey", key)
+			req.Header.Set("Authorization", "Bearer "+key)
+		}
 		client := &http.Client{Timeout: 8 * time.Second}
 		resp, err := client.Do(req)
 		if err == nil {
