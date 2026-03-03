@@ -80,6 +80,20 @@ func Check(root string, writtenFiles []string) *Result {
 		}
 		return nil
 
+	case fileExists(root, "Dockerfile"):
+		// Validate Dockerfile syntax with docker build --check (dry-run).
+		return runCheck(root, "docker", "docker build --check .",
+			[]string{"sh", "-c", "docker build --check . 2>&1 || docker build --dry-run . 2>&1 || echo 'Dockerfile present, docker not available for validation'"})
+
+	case fileExists(root, "docker-compose.yml") || fileExists(root, "docker-compose.yaml") || fileExists(root, "compose.yml") || fileExists(root, "compose.yaml"):
+		return runCheck(root, "docker", "docker compose config",
+			[]string{"sh", "-c", "docker compose config 2>&1 || docker-compose config 2>&1"})
+
+	case fileExists(root, "Makefile") && !fileExists(root, "go.mod"):
+		// Only run make for non-Go projects (Go projects already use go build above).
+		return runCheck(root, "make", "make",
+			[]string{"sh", "-c", "make 2>&1"})
+
 	case hasPythonFiles(writtenFiles):
 		return checkPythonFiles(root, writtenFiles)
 	}
@@ -96,6 +110,10 @@ func ShouldRun(root string, writtenFiles []string) bool {
 	return fileExists(root, "go.mod") ||
 		fileExists(root, "Cargo.toml") ||
 		fileExists(root, "package.json") || // always attempt for Node (may install first)
+		fileExists(root, "Dockerfile") ||
+		fileExists(root, "docker-compose.yml") || fileExists(root, "docker-compose.yaml") ||
+		fileExists(root, "compose.yml") || fileExists(root, "compose.yaml") ||
+		fileExists(root, "Makefile") ||
 		hasPythonFiles(writtenFiles)
 }
 

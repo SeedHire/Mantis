@@ -45,13 +45,31 @@ func (e *FinishedError) Unwrap() error  { return ErrFinished }
 func (e *FinishedError) Is(t error) bool { return t == ErrFinished }
 
 // allowedPrefixes is the bash command allowlist (prefix matching).
-// Prevents arbitrary shell execution while still supporting all dev workflows.
+// Covers build tools, package managers, Docker, Make, diagnostics, and VCS.
 var allowedPrefixes = []string{
-	"go build", "go test", "go vet", "go fmt", "go run",
-	"npm run", "npm test", "npm install",
-	"cargo check", "cargo build", "cargo test",
-	"python -m pytest", "python3 -m pytest",
-	"git diff", "git status", "git log",
+	// Go
+	"go build", "go test", "go vet", "go fmt", "go run", "go mod",
+	// Node
+	"npm run", "npm test", "npm install", "npm ci", "npm start",
+	"npx ", "yarn ", "pnpm ",
+	// Rust
+	"cargo check", "cargo build", "cargo test", "cargo run",
+	// Python
+	"python -m", "python3 -m", "python ", "python3 ",
+	"pip install", "pip3 install", "pip list", "pip3 list",
+	// Docker
+	"docker build", "docker compose", "docker-compose",
+	"docker run", "docker ps", "docker logs", "docker images",
+	"docker exec", "docker stop", "docker rm", "docker inspect",
+	// Make
+	"make",
+	// Kubernetes
+	"kubectl ",
+	// Git
+	"git diff", "git status", "git log", "git show",
+	// Shell diagnostics
+	"cat ", "head ", "tail ", "ls ", "find ", "grep ",
+	"pwd", "which ", "echo ", "wc ", "env",
 }
 
 // AgentToolkit provides typed tool access for coding agents.
@@ -219,7 +237,7 @@ func (t *AgentToolkit) Tools() []ollama.Tool {
 			Type: "function",
 			Function: ollama.ToolFunction{
 				Name:        "run_bash",
-				Description: "Run a shell command in the project root. Allowed: go build/test/vet/fmt, npm run/test, cargo check/build/test, python -m pytest, git diff/status/log.",
+				Description: "Run a shell command in the project root. Allowed: go, npm, yarn, pnpm, cargo, make, docker, docker compose, pip, python, kubectl, git, cat, head, tail, ls, find, grep, pwd, which, echo.",
 				Parameters: rawJSON(`{
 					"type": "object",
 					"properties": {
@@ -357,7 +375,28 @@ func isAllowedCmd(cmd string) bool {
 	trimmed := strings.TrimSpace(cmd)
 	for _, prefix := range allowedPrefixes {
 		if strings.HasPrefix(trimmed, prefix) {
+			// Block shell diagnostic commands targeting sensitive system paths
+			if blockSensitivePath(trimmed) {
+				return false
+			}
 			return true
+		}
+	}
+	return false
+}
+
+// blockSensitivePath returns true if the command accesses files outside the
+// project (e.g. /etc/passwd). It applies only to file-reading diagnostics.
+func blockSensitivePath(cmd string) bool {
+	for _, diag := range []string{"cat ", "head ", "tail ", "less "} {
+		if strings.HasPrefix(cmd, diag) {
+			rest := strings.TrimSpace(cmd[len(diag):])
+			if strings.HasPrefix(rest, "/etc") || strings.HasPrefix(rest, "/proc") ||
+				strings.HasPrefix(rest, "/sys") || strings.HasPrefix(rest, "/dev") ||
+				strings.HasPrefix(rest, "/var/log") || strings.HasPrefix(rest, "/root") ||
+				strings.Contains(rest, "..") {
+				return true
+			}
 		}
 	}
 	return false

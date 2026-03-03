@@ -511,10 +511,21 @@ func Run(cfg Config) error {
 			}
 		}
 
-		// ── Single-agent fix loop for code-tier fix/debug tasks ──────────────
+		// ── Single-agent fix loop for code-tier fix/debug/deploy tasks ──────
 		// Gives the model run_command + read_file tools so it can investigate
-		// and fix build errors autonomously, without the multi-agent gate.
-		if intent.TaskType == "fix" && intent.Tier == router.TierCode {
+		// and fix build/deployment errors autonomously, without the multi-agent gate.
+		// Also triggers on deploy/docker/make mentions regardless of task type.
+		needsAgent := intent.TaskType == "fix" && intent.Tier == router.TierCode
+		if !needsAgent && intent.Tier == router.TierCode {
+			lo := strings.ToLower(input)
+			for _, kw := range []string{"docker", "makefile", "make build", "deploy", "dockerfile", "compose", "kubernetes", "kubectl"} {
+				if strings.Contains(lo, kw) {
+					needsAgent = true
+					break
+				}
+			}
+		}
+		if needsAgent {
 			fmt.Printf("%s  ◆ fix agent [%s] — investigating with tools%s\n", colorDim, model, colorReset)
 			agentCtx, agentCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			agentResp, agentPT, agentCT, agentOK := runFixAgent(agentCtx, client, model, messages, root)
@@ -1293,15 +1304,33 @@ func captureBuildError(input, root string) string {
 		phrase string
 		cmd    string
 	}{
+		// Make
 		{"make build", "make build"},
 		{"make test", "make test"},
+		{"make run", "make run"},
+		{"makefile", "make"},
+		// Node
 		{"npm run build", "npm run build"},
 		{"npm test", "npm test"},
+		{"npm start", "npm start"},
+		{"yarn build", "yarn build"},
+		{"yarn test", "yarn test"},
+		{"pnpm build", "pnpm build"},
+		// Go
 		{"go build", "go build ./..."},
 		{"go test", "go test ./..."},
+		// Rust
 		{"cargo build", "cargo build"},
 		{"cargo check", "cargo check"},
 		{"cargo test", "cargo test"},
+		// Docker
+		{"docker build", "docker build ."},
+		{"docker compose up", "docker compose up --dry-run"},
+		{"docker-compose up", "docker-compose config"},
+		{"dockerfile", "docker build ."},
+		// Python
+		{"pip install", "pip install -r requirements.txt"},
+		{"python -m", "python3 -m py_compile"},
 	}
 
 	var cmdToRun string
@@ -1352,7 +1381,7 @@ func fixAgentTools() []ollama.Tool {
 			Type: "function",
 			Function: ollama.ToolFunction{
 				Name:        "run_command",
-				Description: "Run a build/test command. Allowed: go build, go test, go vet, npm run, npm test, npm install, cargo build, cargo check, cargo test, make build, make test, git diff, git status.",
+				Description: "Run a shell command in the project root. Allowed: go, npm, yarn, pnpm, cargo, make, docker, docker compose, pip, python, kubectl, git, cat, head, tail, ls, find, grep, pwd, which, echo.",
 				Parameters:  json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"}},"required":["command"]}`),
 			},
 		},
@@ -1371,12 +1400,29 @@ func fixAgentTools() []ollama.Tool {
 func fixAgentAllowedCmd(cmd string) bool {
 	trimmed := strings.TrimSpace(cmd)
 	allowed := []string{
-		"go build", "go test", "go vet", "go fmt",
-		"npm run", "npm test", "npm install",
-		"cargo check", "cargo build", "cargo test",
-		"make build", "make test", "make lint",
-		"git diff", "git status", "git log",
-		"cat ", "head ", "tail ",
+		// Go
+		"go build", "go test", "go vet", "go fmt", "go run", "go mod",
+		// Node
+		"npm run", "npm test", "npm install", "npm ci", "npm start",
+		"npx ", "yarn ", "pnpm ",
+		// Rust
+		"cargo check", "cargo build", "cargo test", "cargo run",
+		// Python
+		"python -m", "python3 -m", "python ", "python3 ",
+		"pip install", "pip3 install", "pip list", "pip3 list",
+		// Docker
+		"docker build", "docker compose", "docker-compose",
+		"docker run", "docker ps", "docker logs", "docker images",
+		"docker exec", "docker stop", "docker rm", "docker inspect",
+		// Make
+		"make",
+		// Kubernetes
+		"kubectl ",
+		// Git
+		"git diff", "git status", "git log", "git show",
+		// Shell diagnostics
+		"cat ", "head ", "tail ", "ls ", "find ", "grep ",
+		"pwd", "which ", "echo ", "wc ", "env",
 	}
 	for _, prefix := range allowed {
 		if strings.HasPrefix(trimmed, prefix) {
