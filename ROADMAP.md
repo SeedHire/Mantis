@@ -620,3 +620,8 @@ Add `/fetch <url>` slash command: HTTP GET the URL, strip HTML tags, truncate to
 - **Anthropic "Building effective agents"** — orchestrator-worker patterns, loop prevention
 - **AutoGen** (Microsoft) — conversation-based multi-agent, speaker selection
 - **CrewAI** — role-based agents, result-only context propagation
+
+| 20 | Expand command allowlists for Docker/Make/deploy | done | high |
+| 21 | Harden path security (block /etc, /proc reads)   | done | high |
+| 22 | Auto-trigger fix agent on deploy/docker keywords  | done | medium |
+| 23 | Autofix detects Dockerfile, compose, Makefile      | done | medium |
