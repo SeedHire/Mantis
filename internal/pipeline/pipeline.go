@@ -189,7 +189,13 @@ func Run(
 
 		buildErrStr := buildResult.Output
 		if buildErrStr == lastBuildErr {
+			// Truncate for display but keep it informative.
+			errPreview := buildErrStr
+			if len(errPreview) > 200 {
+				errPreview = errPreview[:200] + "…"
+			}
 			fmt.Printf("%s  [stuck: same build error twice — stopping retry]%s\n", pColorDim, pColorReset)
+			fmt.Printf("%s  %s%s\n", pColorDim, errPreview, pColorReset)
 			break
 		}
 		lastBuildErr = buildErrStr
@@ -306,6 +312,12 @@ func ContinuePlan(
 		}
 		buildErrStr := buildResult.Output
 		if buildErrStr == lastBuildErr {
+			errPreview := buildErrStr
+			if len(errPreview) > 200 {
+				errPreview = errPreview[:200] + "…"
+			}
+			fmt.Printf("%s  [stuck: same build error twice — stopping retry]%s\n", pColorDim, pColorReset)
+			fmt.Printf("%s  %s%s\n", pColorDim, errPreview, pColorReset)
 			break
 		}
 		lastBuildErr = buildErrStr
@@ -372,6 +384,71 @@ func assemble(plan, code, tests string) string {
 		sb.WriteString(strings.TrimSpace(stripStagePreamble(tests, "```")))
 	}
 	return sb.String()
+}
+
+// SaveOutput writes the full pipeline result to .mantis/last-pipeline.md for reference.
+func SaveOutput(root, combined string) {
+	dir := filepath.Join(root, ".mantis")
+	_ = os.MkdirAll(dir, 0o755)
+	_ = os.WriteFile(filepath.Join(dir, "last-pipeline.md"), []byte(combined), 0o644)
+}
+
+// CompactSummary returns a short CLI-friendly summary of the pipeline result.
+// It extracts the plan overview + file list, omitting verbose sections like
+// Architecture, Task Breakdown, Risks, and Assumptions.
+func CompactSummary(res *Result) string {
+	var sb strings.Builder
+
+	// Extract plan overview (first ### section only).
+	if overview := extractSection(res.PlanText, "Overview"); overview != "" {
+		sb.WriteString(overview)
+		sb.WriteString("\n")
+	}
+
+	// List files from the plan's "### Files" section.
+	if files := extractSection(res.PlanText, "Files"); files != "" {
+		sb.WriteString("\n### Files\n\n")
+		sb.WriteString(files)
+		sb.WriteString("\n")
+	}
+
+	// Count code files written.
+	codeFiles := countCodeFences(res.CodeText)
+	testFiles := countCodeFences(res.TestText)
+	if codeFiles > 0 || testFiles > 0 {
+		sb.WriteString("\n---\n\n")
+		if codeFiles > 0 {
+			sb.WriteString(fmt.Sprintf("**%d implementation file(s)** written\n", codeFiles))
+		}
+		if testFiles > 0 {
+			sb.WriteString(fmt.Sprintf("**%d test file(s)** written\n", testFiles))
+		}
+		sb.WriteString(fmt.Sprintf("\n> Full output saved to `.mantis/last-pipeline.md`\n"))
+	}
+
+	return sb.String()
+}
+
+// extractSection pulls the content of a ### Section from plan text.
+func extractSection(plan, heading string) string {
+	marker := "### " + heading
+	idx := strings.Index(plan, marker)
+	if idx < 0 {
+		return ""
+	}
+	content := plan[idx+len(marker):]
+	// Find the next ### heading or end.
+	nextIdx := strings.Index(content, "\n### ")
+	if nextIdx >= 0 {
+		content = content[:nextIdx]
+	}
+	return strings.TrimSpace(content)
+}
+
+// countCodeFences counts ```lang:filepath fenced blocks in text.
+func countCodeFences(text string) int {
+	re := regexp.MustCompile("(?m)^```[a-zA-Z0-9_+-]*[:/ ][^\\s`]+")
+	return len(re.FindAllString(text, -1))
 }
 
 // stripStagePreamble removes any chain-of-thought preamble the model writes before

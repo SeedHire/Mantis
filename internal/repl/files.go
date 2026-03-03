@@ -36,6 +36,10 @@ continue
 if !looksLikeFilePath(filePath) {
 continue
 }
+// Reject filenames that bleed into content (e.g., "README.mdbash npm install").
+if strings.ContainsAny(filePath, " \t") || len(filePath) > 200 {
+continue
+}
 seen[filePath] = true
 
 // Safety: reject absolute paths and path traversal.
@@ -106,7 +110,7 @@ re := regexp.MustCompile("(?m)^```[a-zA-Z0-9_+-]*[:/ ]([^\\s`]+)\\n[\\s\\S]*?\\n
 return re.ReplaceAllStringFunc(response, func(match string) string {
 pathRe := regexp.MustCompile("^```[a-zA-Z0-9_+-]*[:/ ]([^\\s`]+)")
 sub := pathRe.FindStringSubmatch(match)
-if len(sub) < 2 || !looksLikeFilePath(sub[1]) {
+if len(sub) < 2 || !looksLikeFilePath(sub[1]) || strings.ContainsAny(sub[1], " \t") {
 return match
 }
 return fmt.Sprintf("> ✎ `%s`", sub[1])

@@ -103,7 +103,9 @@ func ShouldRun(root string, writtenFiles []string) bool {
 // model prompt. It strips ANSI escape codes and caps length.
 func FormatError(r *Result) string {
 	return fmt.Sprintf(
-		"Build check failed (%s: %s).\n\nFix all errors — rewrite the affected files completely:\n\n```\n%s\n```",
+		"Build check failed (%s: %s).\n\n"+
+			"Fix ONLY the lines that caused the error. Do NOT rewrite entire files or regenerate a plan. "+
+			"Output ONLY the corrected file(s) using ```lang:filepath fences.\n\n```\n%s\n```",
 		r.Project, r.Command, r.Output,
 	)
 }

@@ -333,6 +333,9 @@ func Run(cfg Config) error {
 			continue
 		}
 
+		// Normalize terminal error pastes into actionable fix requests.
+		input = normalizeTerminalInput(input)
+
 		// Slash commands.
 		if strings.HasPrefix(input, "/") {
 			if quit := handleSlashCommand(input, sess, b, &messages, client, &brainContext, &planMode); quit {
@@ -546,7 +549,11 @@ func Run(cfg Config) error {
 				totalTok := pRes.PromptTok + pRes.ComplTok
 				fmt.Printf("%s◈ Mantis%s %s[pipeline · plan→code+tests · %d tokens]%s\n",
 					colorCopper+colorBold, colorReset, colorDim, totalTok, colorReset)
-				renderResponse(stripInternalBlocks(stripFileBlocks(pRes.Combined)))
+
+				// Save full output to .mantis/last-pipeline.md, show compact summary on CLI.
+				pipeline.SaveOutput(root, pRes.Combined)
+				renderResponse(pipeline.CompactSummary(pRes))
+
 				wf := extractAndWriteFiles(pRes.Combined, root)
 				if len(wf) > 0 {
 					printWrittenFiles(wf)
@@ -1602,13 +1609,14 @@ func verifyAndFix(
 			return written
 		}
 
-		// Render the fix and write new files.
+		// Show fixed files only (no full response dump).
 		fmt.Printf("%s◈ Mantis%s %s(auto-fix)%s\n", colorCopper+colorBold, colorReset, colorDim, colorReset)
-		renderResponse(stripInternalBlocks(stripFileBlocks(rb.String())))
 		newFiles := extractAndWriteFiles(rb.String(), root)
 		if len(newFiles) > 0 {
 			printWrittenFiles(newFiles)
 			written = append(written, newFiles...)
+		} else {
+			fmt.Printf("%s  (no file changes from auto-fix)%s\n\n", colorDim, colorReset)
 		}
 
 		// Append the fix exchange to conversation history.
