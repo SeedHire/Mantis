@@ -317,7 +317,7 @@ func Run(cfg Config) error {
 	planMode := cfg.PlanMode
 	for {
 		printSep()
-		fmt.Printf("%s  /help  /cost  /brain  /quit%s\n", colorDim, colorReset)
+		fmt.Printf("%s  /help  /cost  /brain  /quit  (Ctrl+C to interrupt)%s\n", colorDim, colorReset)
 		line, err := rl.Readline()
 		if err == readline.ErrInterrupt {
 			if len(line) == 0 {
@@ -563,6 +563,24 @@ func Run(cfg Config) error {
 				bgCtx := context.Background()
 				verifyAndFix(bgCtx, client, model, intent.Tier, root, wf, &messages)
 				sess.Add(model, intent.Tier, pRes.PromptTok, pRes.ComplTok, hasImage)
+				var pipeWrittenPaths []string
+				for _, f := range wf {
+					pipeWrittenPaths = append(pipeWrittenPaths, f.Path)
+				}
+				tlog.Log(telemetry.Event{
+					SessionID:    sessID,
+					Turn:         turn,
+					Tier:         intent.Tier.String(),
+					TaskType:     string(intent.TaskType),
+					Confidence:   intent.Confidence,
+					Model:        model,
+					Pipeline:     true,
+					PromptTok:    pRes.PromptTok,
+					ComplTok:     pRes.ComplTok,
+					LatencyMS:    time.Since(turnStart).Milliseconds(),
+					FilesWritten: pipeWrittenPaths,
+					InputSnippet: input,
+				})
 				if warn := usageTracker.Add(totalTok, true, hasImage); warn != "" {
 					fmt.Printf("%s%s%s\n\n", colorRed, warn, colorReset)
 				}
@@ -1520,7 +1538,7 @@ func printHelp() {
 }
 
 func printFooter() {
-	fmt.Printf("\n%s  /help  /cost  /brain  /quit%s\n\n", colorDim, colorReset)
+	fmt.Printf("\n%s  /help  /cost  /brain  /quit  (Ctrl+C to interrupt)%s\n\n", colorDim, colorReset)
 }
 
 // tierColors maps each tier to a terminal color code for the routing badge.
