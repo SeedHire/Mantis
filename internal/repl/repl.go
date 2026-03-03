@@ -468,7 +468,13 @@ func Run(cfg Config) error {
 		} else if toolCtx == "" {
 			// Lazy context injection: wrap user message with README/symbols when relevant.
 			if ctxMsg := contextMessageFor(input, root, brainContext, truthWriter); ctxMsg != nil {
-				userMsg = ctxMsg
+				// Merge context injection with enriched userContent (build output, project files).
+				if msg, ok := ctxMsg.(ollama.Message); ok {
+					msg.Content = strings.Replace(msg.Content, "\n\nNow answer: "+input, "\n\nNow answer: "+userContent, 1)
+					userMsg = msg
+				} else {
+					userMsg = ctxMsg
+				}
 			} else {
 				userMsg = ollama.Message{Role: "user", Content: userContent}
 			}
@@ -1632,7 +1638,8 @@ func runFixAgent(
 
 // runTextFixAgent uses a text-based ReAct pattern for models that don't support
 // native tool calling. It injects tool descriptions into the system prompt and
-// parses tool calls from the model's text output.
+// parses tool calls from the model's text output. Uses StreamChat (streaming)
+// which works reliably on Ollama Cloud.
 func runTextFixAgent(
 	ctx context.Context,
 	client *ollama.Client,
@@ -1654,7 +1661,6 @@ IMPORTANT: Always run the failing command first to see the actual error, then re
 After investigation, provide the corrected files using fenced code blocks with the filepath: ` + "```lang:filepath"
 
 	agentMsgs := make([]interface{}, 0, len(messages)+2)
-	// Inject tool system prompt before existing messages.
 	agentMsgs = append(agentMsgs, ollama.Message{Role: "system", Content: toolPrompt})
 	agentMsgs = append(agentMsgs, messages...)
 
@@ -1662,16 +1668,19 @@ After investigation, provide the corrected files using fenced code blocks with t
 	var lastContent string
 
 	for iter := 0; iter < maxIter; iter++ {
-		result, err := client.ChatWithTools(ctx, model, agentMsgs, nil, nil)
+		var buf bytes.Buffer
+		pt, ct, err := client.StreamChat(ctx, model, agentMsgs, nil, func(chunk string) {
+			buf.WriteString(chunk)
+		})
 		if err != nil {
 			break
 		}
-		totalPT += result.PromptTok
-		totalCT += result.ComplTok
-		lastContent = result.Content
+		totalPT += pt
+		totalCT += ct
+		lastContent = buf.String()
 
 		// Parse text-based tool calls.
-		calls := parseTextToolCalls(result.Content)
+		calls := parseTextToolCalls(lastContent)
 		if len(calls) == 0 {
 			break
 		}
@@ -1684,7 +1693,7 @@ After investigation, provide the corrected files using fenced code blocks with t
 			toolResults.WriteString(fmt.Sprintf("[%s result]\n%s\n\n", tc.tool, out))
 		}
 
-		agentMsgs = append(agentMsgs, ollama.Message{Role: "assistant", Content: result.Content})
+		agentMsgs = append(agentMsgs, ollama.Message{Role: "assistant", Content: lastContent})
 		agentMsgs = append(agentMsgs, ollama.Message{Role: "user", Content: "Tool results:\n" + toolResults.String() + "\nNow analyze the output and provide the fix."})
 	}
 
