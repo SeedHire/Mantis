@@ -592,7 +592,7 @@ func Run(cfg Config) error {
 			promptTok, completionTok, streamErr = streamWithFallback(streamCtx, client, model, intent.Tier, messages, &rb)
 		}
 		streamCancel()
-		stopSpin()
+		spinElapsed := stopSpin()
 
 		if streamErr != nil {
 			fmt.Printf("\n%s⚠ %v%s\n\n", colorRed, streamErr, colorReset)
@@ -614,8 +614,8 @@ func Run(cfg Config) error {
 		// Render the full response as formatted markdown.
 		turnTok := promptTok + completionTok
 		_, _, sessTotal := sess.Totals()
-		fmt.Printf("%s◈ Mantis%s  %s[+%d tok · session: %d]%s\n",
-			colorCopper+colorBold, colorReset, colorDim, turnTok, sessTotal+turnTok, colorReset)
+		fmt.Printf("%s◈ Mantis%s  %s[+%d tok · %.1fs · session: %d]%s\n",
+			colorCopper+colorBold, colorReset, colorDim, turnTok, spinElapsed.Seconds(), sessTotal+turnTok, colorReset)
 		renderResponse(stripInternalBlocks(stripFileBlocks(rb.String())))
 
 		// Write any file code blocks from the response to disk.
@@ -844,15 +844,17 @@ func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
 			fmt.Printf("%s/telemetry on%s  — enable upload\n%s/telemetry off%s — disable upload (local only)\n\n", colorDim, colorReset, colorDim, colorReset)
 		}
 	case "/init":
-		fmt.Printf("%s● analyzing project…%s\n", colorDim, colorReset)
+		initStart := time.Now()
+		initSpin := startSpinner("explain")
 		initModel := router.ModelFor(router.TierReason)
 		initCtx, initCancel := context.WithTimeout(context.Background(), 120*time.Second)
 		generated, err := b.ScanInit(initCtx, client, initModel)
 		initCancel()
+		initSpin()
 		if err != nil {
 			fmt.Printf("%s✗ /init failed: %v%s\n\n", colorRed, err, colorReset)
 		} else {
-			fmt.Printf("%s● MANTIS.md written to project root%s\n\n", colorGreen, colorReset)
+			fmt.Printf("%s● MANTIS.md written  %s(%.1fs)%s\n\n", colorGreen, colorDim, time.Since(initStart).Seconds(), colorReset)
 			renderResponse(generated)
 			// Reload brain context so the new MANTIS.md takes effect immediately.
 			*brainContext = b.Load()
@@ -1347,9 +1349,10 @@ func renderResponse(content string) {
 // startSpinner shows a pulsing indicator while the model generates.
 // taskType controls the lead messages shown first (task-relevant traces),
 // followed by generic humorous messages to keep the user entertained.
-// Returns a stop function that clears the spinner line.
-func startSpinner(taskType string) func() {
+// Returns a stop function that clears the spinner line and returns elapsed time.
+func startSpinner(taskType string) func() time.Duration {
 	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+	start := time.Now()
 
 	// Task-specific lead messages — shown first so they feel responsive.
 	taskLeads := map[string][]string{
@@ -1438,8 +1441,9 @@ func startSpinner(taskType string) func() {
 				fmt.Printf("\r\033[K") // clear spinner line
 				return
 			case <-time.After(80 * time.Millisecond):
-				fmt.Printf("\r%s%s %s%s",
-					colorDim, frames[i%len(frames)], msgs[msgIdx], colorReset)
+				elapsed := time.Since(start).Seconds()
+				fmt.Printf("\r%s%s %s · %.1fs%s",
+					colorDim, frames[i%len(frames)], msgs[msgIdx], elapsed, colorReset)
 				i++
 				// advance faster through task leads (~1.5s each), slower through generic (~3s)
 				interval := 19
@@ -1454,11 +1458,8 @@ func startSpinner(taskType string) func() {
 			}
 		}
 	}()
-	return func() { close(done) }
+	return func() time.Duration { close(done); return time.Since(start) }
 }
-
-
-
 func printBanner() {
 	c := colorCopper + colorBold
 	r := colorReset
@@ -1739,26 +1740,30 @@ func streamEnsemble(ctx context.Context, client *ollama.Client,
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	done := 0
+	ensembleStart := time.Now()
 
 	for i, m := range models {
 		wg.Add(1)
 		go func(idx int, model string) {
 			defer wg.Done()
+			mStart := time.Now()
 			var buf strings.Builder
 			pt, ct, err := client.StreamChat(ctx, model, messages, nil,
 				func(chunk string) { buf.WriteString(chunk) })
 			results[idx] = modelResult{model, buf.String(), pt, ct, err}
 			mu.Lock()
 			done++
+			elapsed := time.Since(mStart).Seconds()
 			if err == nil {
-				fmt.Printf("%s  [%d/%d ✓ %s]%s\n", colorGold, done, len(models), model, colorReset)
+				fmt.Printf("%s  [%d/%d ✓ %s · %.1fs]%s\n", colorGold, done, len(models), model, elapsed, colorReset)
 			} else {
-				fmt.Printf("%s  [%d/%d ✗ %s]%s\n", colorRed, done, len(models), model, colorReset)
+				fmt.Printf("%s  [%d/%d ✗ %s · %.1fs]%s\n", colorRed, done, len(models), model, elapsed, colorReset)
 			}
 			mu.Unlock()
 		}(i, m)
 	}
 	wg.Wait()
+	_ = ensembleStart // used by goroutines above
 
 	// Collect successful responses.
 	type good struct {

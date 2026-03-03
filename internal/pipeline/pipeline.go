@@ -33,11 +33,12 @@ const (
 	pColorDim   = "\033[38;5;244m"
 )
 
-// progressTicker prints a live token counter on the current line while a stage runs.
-// Call the returned stop function when the stage completes.
-func progressTicker(stage string) (incr func(), stop func()) {
+// progressTicker prints a live token counter + elapsed time on the current line while a stage runs.
+// Call the returned stop function when the stage completes; it returns elapsed time.
+func progressTicker(stage string) (incr func(), stop func() time.Duration) {
 	var count int64
 	done := make(chan struct{})
+	start := time.Now()
 	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 	incr = func() { atomic.AddInt64(&count, 1) }
@@ -49,18 +50,21 @@ func progressTicker(stage string) (incr func(), stop func()) {
 		for {
 			select {
 			case <-done:
-				// Clear the progress line.
 				fmt.Printf("\r\033[K")
 				return
 			case <-ticker.C:
 				n := atomic.LoadInt64(&count)
-				fmt.Printf("\r%s  %s %s  %d tokens%s", pColorDim, frames[i%len(frames)], stage, n, pColorReset)
+				elapsed := time.Since(start).Seconds()
+				fmt.Printf("\r%s  %s %s  %d tokens · %.1fs%s", pColorDim, frames[i%len(frames)], stage, n, elapsed, pColorReset)
 				i++
 			}
 		}
 	}()
 
-	stop = func() { close(done) }
+	stop = func() time.Duration {
+		close(done)
+		return time.Since(start)
+	}
 	return
 }
 
@@ -118,14 +122,14 @@ func Run(
 	var planBuf strings.Builder
 	planIncr, planStop := progressTicker("planning")
 	pt, ct, err := client.StreamChat(ctx, planModel, planMsgs, nil, func(c string) { planBuf.WriteString(c); planIncr() })
-	planStop()
+	planElapsed := planStop()
 	if err != nil {
 		// Plan model unavailable — fall back to code model so the pipeline still runs.
 		fmt.Printf("%s  ⚠ plan model unavailable, falling back to %s%s\n", pColorDim, codeModel, pColorReset)
 		planBuf.Reset()
 		planIncr2, planStop2 := progressTicker("planning")
 		pt, ct, err = client.StreamChat(ctx, codeModel, planMsgs, nil, func(c string) { planBuf.WriteString(c); planIncr2() })
-		planStop2()
+		planElapsed = planStop2()
 		if err != nil {
 			return nil, fmt.Errorf("plan stage: %w", err)
 		}
@@ -133,7 +137,7 @@ func Run(
 	res.PlanText = planBuf.String()
 	res.PromptTok += pt
 	res.ComplTok += ct
-	fmt.Printf("%s  ✓ plan ready%s\n", pColorGold, pColorReset)
+	fmt.Printf("%s  ✓ plan ready  %s(%.1fs · %d tokens)%s\n", pColorGold, pColorDim, planElapsed.Seconds(), pt+ct, pColorReset)
 
 	// Plan Mode: stop after PLAN stage for user review.
 	if opts.PlanOnly {
@@ -155,6 +159,8 @@ func Run(
 	}
 
 	var lastBuildErr string
+	codeStart := time.Now()
+	var codeTokTotal int
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		var codeBuf strings.Builder
 		codeIncr, codeStop := progressTicker("coding")
@@ -166,6 +172,7 @@ func Run(
 		res.CodeText = codeBuf.String()
 		res.PromptTok += pt
 		res.ComplTok += ct
+		codeTokTotal += pt + ct
 
 		// Write files and verify build (only if Root provided).
 		if opts.Root == "" || attempt == maxRetries {
@@ -203,13 +210,15 @@ func Run(
 			ollama.Message{Role: "user", Content: retryMsg},
 		)
 	}
-	fmt.Printf("%s  ✓ code ready%s\n", pColorGold, pColorReset)
+	codeElapsed := time.Since(codeStart)
+	fmt.Printf("%s  ✓ code ready  %s(%.1fs · %d tokens)%s\n", pColorGold, pColorDim, codeElapsed.Seconds(), codeTokTotal, pColorReset)
 
 	// ── Stage 3: TESTS in parallel ────────────────────────────────────────────
 	type stageOut struct {
-		text   string
-		pt, ct int
-		err    error
+		text    string
+		pt, ct  int
+		elapsed time.Duration
+		err     error
 	}
 	testCh := make(chan stageOut, 1)
 
@@ -226,8 +235,8 @@ func Run(
 		var buf strings.Builder
 		testIncr, testStop := progressTicker("testing")
 		pt, ct, err := client.StreamChat(ctx, codeModel, msgs, nil, func(c string) { buf.WriteString(c); testIncr() })
-		testStop()
-		testCh <- stageOut{buf.String(), pt, ct, err}
+		testElapsed := testStop()
+		testCh <- stageOut{buf.String(), pt, ct, testElapsed, err}
 	}()
 
 	testOut := <-testCh
@@ -236,7 +245,7 @@ func Run(
 		res.TestText = testOut.text
 		res.PromptTok += testOut.pt
 		res.ComplTok += testOut.ct
-		fmt.Printf("%s  ✓ tests ready%s\n", pColorGold, pColorReset)
+		fmt.Printf("%s  ✓ tests ready  %s(%.1fs · %d tokens)%s\n", pColorGold, pColorDim, testOut.elapsed.Seconds(), testOut.pt+testOut.ct, pColorReset)
 	}
 
 	res.Combined = assemble(res.PlanText, res.CodeText, res.TestText)
@@ -269,6 +278,8 @@ func ContinuePlan(
 	}
 
 	var lastBuildErr string
+	codeStart := time.Now()
+	var codeTokTotal int
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		var codeBuf strings.Builder
 		codeIncr, codeStop := progressTicker("coding")
@@ -280,6 +291,7 @@ func ContinuePlan(
 		res.CodeText = codeBuf.String()
 		res.PromptTok += pt
 		res.ComplTok += ct
+		codeTokTotal += pt + ct
 
 		if opts.Root == "" || attempt == maxRetries {
 			break
@@ -309,13 +321,15 @@ func ContinuePlan(
 			ollama.Message{Role: "user", Content: retryMsg},
 		)
 	}
-	fmt.Printf("%s  ✓ code ready%s\n", pColorGold, pColorReset)
+	codeElapsed := time.Since(codeStart)
+	fmt.Printf("%s  ✓ code ready  %s(%.1fs · %d tokens)%s\n", pColorGold, pColorDim, codeElapsed.Seconds(), codeTokTotal, pColorReset)
 
 	// ── TESTS stage ───────────────────────────────────────────────────────────
 	type stageOut struct {
-		text   string
-		pt, ct int
-		err    error
+		text    string
+		pt, ct  int
+		elapsed time.Duration
+		err     error
 	}
 	testCh := make(chan stageOut, 1)
 	go func() {
@@ -331,15 +345,15 @@ func ContinuePlan(
 		var buf strings.Builder
 		testIncr, testStop := progressTicker("testing")
 		pt, ct, err := client.StreamChat(ctx, codeModel, msgs, nil, func(c string) { buf.WriteString(c); testIncr() })
-		testStop()
-		testCh <- stageOut{buf.String(), pt, ct, err}
+		testElapsed := testStop()
+		testCh <- stageOut{buf.String(), pt, ct, testElapsed, err}
 	}()
 	testOut := <-testCh
 	if testOut.err == nil && strings.TrimSpace(testOut.text) != "" {
 		res.TestText = testOut.text
 		res.PromptTok += testOut.pt
 		res.ComplTok += testOut.ct
-		fmt.Printf("%s  ✓ tests ready%s\n", pColorGold, pColorReset)
+		fmt.Printf("%s  ✓ tests ready  %s(%.1fs · %d tokens)%s\n", pColorGold, pColorDim, testOut.elapsed.Seconds(), testOut.pt+testOut.ct, pColorReset)
 	}
 
 	res.Combined = assemble(res.PlanText, res.CodeText, res.TestText)

@@ -101,11 +101,15 @@ var initCmd = &cobra.Command{
 		builder.RegisterParser(&parser.GoParser{})
 		builder.RegisterParser(&parser.TypeScriptParser{})
 		builder.RegisterParser(&parser.PythonParser{Root: root})
+
+		indexStart := time.Now()
+		fmt.Printf("\033[38;5;244m⠋ indexing project…\033[0m")
 		fileCount, symbolCount, err := builder.BuildFull(nil)
+		fmt.Printf("\r\033[K")
 		if err != nil {
 			return fmt.Errorf("build: %w", err)
 		}
-		fmt.Printf("✓ Indexed %d files, %d symbols\n", fileCount, symbolCount)
+		fmt.Printf("✓ Indexed %d files, %d symbols  \033[38;5;244m(%.1fs)\033[0m\n", fileCount, symbolCount, time.Since(indexStart).Seconds())
 
 		_ = db.SetMeta("version", "0.1.0")
 		_ = db.SetMeta("last_init", fmt.Sprintf("%d", time.Now().Unix()))
