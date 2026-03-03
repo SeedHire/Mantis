@@ -235,6 +235,12 @@ func (c *Client) ListModels(ctx context.Context) ([]ModelInfo, error) {
 	}
 	defer resp.Body.Close()
 
+	// BUG-16: check HTTP status before decoding; 401/429 bodies are not JSON.
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("list models %s: %s", resp.Status, strings.TrimSpace(string(b)))
+	}
+
 	var result struct {
 		Models []struct {
 			Name string `json:"name"`
@@ -339,7 +345,11 @@ type EmbedResponse struct {
 
 // Embed generates an embedding vector for the given text using the specified model.
 func (c *Client) Embed(ctx context.Context, model, text string) ([]float64, error) {
-	body, _ := json.Marshal(EmbedRequest{Model: model, Input: text})
+	// BUG-10: handle marshal error instead of silently ignoring it.
+	body, err := json.Marshal(EmbedRequest{Model: model, Input: text})
+	if err != nil {
+		return nil, fmt.Errorf("marshal embed request: %w", err)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/embed", bytes.NewReader(body))
 	if err != nil {
 		return nil, err

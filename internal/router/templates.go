@@ -13,10 +13,10 @@ Reference actual function names and file paths from the project.`
 	case "fix":
 		return `[Task: Fix Bug]
 1. Identify the broken code and explain WHY it fails.
-2. Write the corrected file(s) using ` + "```lang:path/to/file" + ` fences so Mantis writes them to disk automatically.
+2. Apply the fix: use edit_file for targeted replacements in existing files; use ` + "```lang:path/to/file" + ` fences only when creating new files or the change is too large for a targeted replacement.
 3. Explain why the fix works.
 4. Note any files that might need related changes.
-IMPORTANT: Always output corrected files with ` + "```lang:filepath" + ` fences — do NOT just show code snippets without a file path.
+IMPORTANT: Prefer edit_file (old_string → new_string) over rewriting entire files — it is safer and uses fewer tokens.
 IMPORTANT: Do NOT create files that don't already exist unless the user explicitly asked for them. Only modify existing files.
 IMPORTANT: If project file contents are provided below, use them — do NOT guess file contents.`
 
@@ -30,9 +30,10 @@ IMPORTANT: If project file contents are provided below, use them — do NOT gues
 	case "implement":
 		return `[Task: Implement]
 1. Start with the interface or function signature.
-2. Then the implementation — use ` + "```lang:path/to/file" + ` fences for every file so Mantis writes them to disk automatically.
-3. Then a usage example.
-4. Note any imports or dependencies needed.`
+2. Then the implementation — use edit_file for changes to existing files (targeted old→new replacement); use ` + "```lang:path/to/file" + ` fences for new files so Mantis writes them to disk automatically.
+3. Never rewrite an entire existing file with a fenced block — use edit_file instead.
+4. Then a usage example.
+5. Note any imports or dependencies needed.`
 
 	case "test":
 		return `[Task: Write Tests]

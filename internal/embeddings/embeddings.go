@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -47,6 +49,7 @@ type Store struct {
 	client *ollama.Client
 	model  string
 	dim    int
+	dimMu  sync.Mutex // BUG-01: guards dim against concurrent writers
 }
 
 // Open creates or opens the embeddings database.
@@ -157,9 +160,12 @@ func (s *Store) Embed(ctx context.Context, text string) ([]float64, error) {
 	if err != nil {
 		return nil, err
 	}
+	// BUG-01: protect dim from concurrent writes (Embed is called from parallel search paths).
+	s.dimMu.Lock()
 	if s.dim == 0 {
 		s.dim = len(vec)
 	}
+	s.dimMu.Unlock()
 	return vec, nil
 }
 
@@ -232,32 +238,40 @@ func (s *Store) SearchHybrid(ctx context.Context, query string, limit int) ([]Ch
 	bm25Rank := map[string]int{}
 
 	// ── BM25 via FTS5 (top 20 candidates) ────────────────────────────────────
-	ftsRows, err := s.db.QueryContext(ctx,
-		`SELECT c.id, c.source, c.section_label, c.text, c.embedding, c.created_at
-		 FROM chunks_fts f
-		 JOIN chunks c ON c.id = f.id
-		 WHERE chunks_fts MATCH ?
-		 ORDER BY rank
-		 LIMIT 20`,
-		ftsQuery(query),
-	)
-	if err == nil {
-		rank := 0
-		for ftsRows.Next() {
-			var c Chunk
-			var embBlob []byte
-			var createdAt sql.NullTime
-			if scanErr := ftsRows.Scan(&c.ID, &c.Source, &c.SectionLabel, &c.Text, &embBlob, &createdAt); scanErr != nil {
-				continue
+	// BUG-11: skip FTS5 entirely when the query yields an empty MATCH string
+	// (all words ≤ 2 chars); avoids a silent SQLite error that drops BM25 results.
+	if ftsQ := ftsQuery(query); ftsQ != "" {
+		ftsRows, ftsErr := s.db.QueryContext(ctx,
+			`SELECT c.id, c.source, c.section_label, c.text, c.embedding, c.created_at
+			 FROM chunks_fts f
+			 JOIN chunks c ON c.id = f.id
+			 WHERE chunks_fts MATCH ?
+			 ORDER BY rank
+			 LIMIT 20`,
+			ftsQ,
+		)
+		if ftsErr == nil {
+			defer ftsRows.Close()
+			rank := 0
+			for ftsRows.Next() {
+				var c Chunk
+				var embBlob []byte
+				var createdAt sql.NullTime
+				if scanErr := ftsRows.Scan(&c.ID, &c.Source, &c.SectionLabel, &c.Text, &embBlob, &createdAt); scanErr != nil {
+					continue
+				}
+				if createdAt.Valid {
+					c.CreatedAt = createdAt.Time
+				}
+				bm25Rank[c.ID] = rank
+				rank++
+				chunkByID[c.ID] = c
 			}
-			if createdAt.Valid {
-				c.CreatedAt = createdAt.Time
+			// A4: surface truncation from context cancel so callers can handle partial results.
+			if err := ftsRows.Err(); err != nil && !errors.Is(err, context.Canceled) {
+				return nil, fmt.Errorf("fts scan: %w", err)
 			}
-			bm25Rank[c.ID] = rank
-			rank++
-			chunkByID[c.ID] = c
 		}
-		ftsRows.Close()
 	}
 
 	// ── Cosine similarity (capped scan) ──────────────────────────────────────
@@ -271,6 +285,7 @@ func (s *Store) SearchHybrid(ctx context.Context, query string, limit int) ([]Ch
 			`SELECT id, source, section_label, text, embedding, created_at FROM chunks
 			 ORDER BY created_at DESC LIMIT 500`)
 		if cosErr == nil {
+			defer cosRows.Close()
 			type entry struct {
 				id    string
 				score float64
@@ -295,7 +310,10 @@ func (s *Store) SearchHybrid(ctx context.Context, query string, limit int) ([]Ch
 					chunkByID[c.ID] = c
 				}
 			}
-			cosRows.Close()
+			// A4: surface non-cancel errors; context.Canceled means partial results are expected.
+			if err := cosRows.Err(); err != nil && !errors.Is(err, context.Canceled) {
+				return nil, fmt.Errorf("cosine scan: %w", err)
+			}
 
 			sort.Slice(scores, func(i, j int) bool { return scores[i].score > scores[j].score })
 			for i, e := range scores {

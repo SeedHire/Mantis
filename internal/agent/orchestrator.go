@@ -185,6 +185,7 @@ func runWorker(
 	workerSystem := fmt.Sprintf(
 		"%s\n\n## Your role: WORKER for package %q\n"+
 			"Focus only on this package. Use the provided tools to read files, write code, and verify with go build.\n"+
+			"FILE EDITING RULES: Use edit_file to modify existing files (precise old→new replacement). Use write_file ONLY to create new files. Never rewrite an entire existing file with write_file.\n"+
 			"When done, call finish(summary) with a brief description of your changes.",
 		systemPrompt, pkg,
 	)

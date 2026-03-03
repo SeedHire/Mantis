@@ -264,7 +264,7 @@ func Run(cfg Config) error {
 
 	// One-shot mode: mantis "question"
 	if cfg.InitialQuery != "" {
-		return runOnce(cfg, client, sess, b, dispatcher, messages, truthWriter, usageTracker, routerStore)
+		return runOnce(cfg, client, sess, b, dispatcher, &messages, truthWriter, usageTracker, routerStore)
 	}
 
 	// Interactive REPL with readline (history, arrows, Ctrl+R, tab completion).
@@ -491,8 +491,9 @@ func Run(cfg Config) error {
 		// Gate: TierHeavy or TierCode, graph available, impact spans 4+ files
 		// across 2+ packages. Workers run in parallel goroutines; each uses the
 		// full AgentToolkit (read/write/bash/search/finish).
+		// BUG-02: guard dispatcher nil before calling IsAvailable().
 		if (intent.Tier == router.TierHeavy || intent.Tier == router.TierCode) &&
-			dispatcher.IsAvailable() {
+			dispatcher != nil && dispatcher.IsAvailable() {
 			if querier := dispatcher.Querier(); querier != nil {
 				if target := extractImpactTarget(input, querier); target != "" {
 					if impact, err := intel.Impact(querier, target, 5); err == nil &&
@@ -556,7 +557,10 @@ func Run(cfg Config) error {
 					printWrittenFiles(wf)
 				}
 				messages = append(messages, ollama.Message{Role: "assistant", Content: agentResp})
-				wf = verifyAndFix(context.Background(), client, model, intent.Tier, root, wf, &messages)
+				// Skip verifyAndFix: the fix agent already investigated the build error
+				// using tools. Calling autofix.Check here detects project type from the
+				// directory (e.g. package.json in a Node project even when the error was
+				// in a Makefile) and triggers unrelated checks that compound bad edits.
 				sess.Add(model, intent.Tier, agentPT, agentCT, hasImage)
 
 				var writtenPaths []string
@@ -684,7 +688,10 @@ func Run(cfg Config) error {
 		// Multi-pass reasoning for complex queries (Reason/Heavy tiers).
 		// Pass 1: silent analysis. Pass 2: solution informed by analysis.
 		if intent.Tier == router.TierReason || intent.Tier == router.TierHeavy {
-			messages = multiPassReasoning(client, model, intent.Tier, messages)
+			// BUG-06: pass a per-turn context so Ctrl+C can cancel the analysis pass.
+			turnCtx, turnCancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			messages = multiPassReasoning(turnCtx, client, model, intent.Tier, messages)
+			turnCancel()
 		}
 
 		// Show memory retrieval indicator if relevant chunks were found.
@@ -789,7 +796,8 @@ func Run(cfg Config) error {
 						"Please correct your answer using only real symbols.",
 					strings.Join(vr.UnknownSymbols, ", "), corrections)
 
-				retryMsgs := append(messages, ollama.Message{Role: "user", Content: correctionMsg})
+				// BUG-04: copy slice before append to avoid aliasing the backing array.
+				retryMsgs := append(append([]interface{}{}, messages...), ollama.Message{Role: "user", Content: correctionMsg})
 				var rb2 strings.Builder
 				retryCtx, retryCancel := context.WithTimeout(context.Background(), 3*time.Minute)
 				pt2, ct2, err2 := streamWithFallback(retryCtx, client, model, intent.Tier, retryMsgs, &rb2)
@@ -824,7 +832,8 @@ func Run(cfg Config) error {
 					"Do not repeat the violations.",
 				cr.Warning)
 			fmt.Printf("%s  [conventions violated — re-prompting]%s\n", colorDim, colorReset)
-			retryMsgs := append(messages, ollama.Message{Role: "user", Content: correctionMsg})
+			// BUG-04: copy slice before append to avoid aliasing the backing array.
+			retryMsgs := append(append([]interface{}{}, messages...), ollama.Message{Role: "user", Content: correctionMsg})
 			var rb3 strings.Builder
 			retryCtx3, retryCancel3 := context.WithTimeout(context.Background(), 3*time.Minute)
 			pt3, ct3, err3 := streamWithFallback(retryCtx3, client, model, intent.Tier, retryMsgs, &rb3)
@@ -854,8 +863,9 @@ func Run(cfg Config) error {
 }
 
 // runOnce handles a single non-interactive query: mantis "question"
+// BUG-17: messages is *[]interface{} so runWithScanner can accumulate history.
 func runOnce(cfg Config, client *ollama.Client, sess *session.Session,
-	b *brain.Brain, dispatcher *nl.Dispatcher, messages []interface{},
+	b *brain.Brain, dispatcher *nl.Dispatcher, messages *[]interface{},
 	tw *truth.Writer, ut *usage.Tracker, rs router.EmbedStore) error {
 
 	// Normalize terminal error pastes into actionable fix requests.
@@ -892,14 +902,14 @@ func runOnce(cfg Config, client *ollama.Client, sess *session.Session,
 		userMsg = ollama.Message{Role: "user", Content: userContent}
 	}
 
-	messages = append(messages, userMsg)
+	*messages = append(*messages, userMsg)
 
 	fmt.Println()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
 	var rb strings.Builder
-	promptTok, completionTok, err := streamWithFallback(ctx, client, model, intent.Tier, messages, &rb)
+	promptTok, completionTok, err := streamWithFallback(ctx, client, model, intent.Tier, *messages, &rb)
 	fmt.Println()
 	if err != nil {
 		if strings.Contains(err.Error(), "connection refused") {
@@ -910,6 +920,8 @@ func runOnce(cfg Config, client *ollama.Client, sess *session.Session,
 		return err
 	}
 	response := rb.String()
+	// Append assistant response so history persists across scanner turns.
+	*messages = append(*messages, ollama.Message{Role: "assistant", Content: response})
 	sess.Add(model, intent.Tier, promptTok, completionTok, hasImage)
 	_ = ut.Add(promptTok+completionTok, intent.Tier == router.TierHeavy, hasImage)
 	if vr := verify.Check(response, tw); !vr.Clean {
@@ -1079,6 +1091,14 @@ func estimateTokens(s string) int {
 // handleContextCommand prints a token-budget breakdown of the current context window.
 func handleContextCommand(sess *session.Session, messages []interface{}, brainCtx string) {
 	var systemTok, brainTok, userTok, assistantTok, totalMsgs int
+
+	// Collect injected files (from /file or context bundles).
+	type injectedFile struct {
+		path   string
+		tokens int
+	}
+	var injected []injectedFile
+
 	for _, m := range messages {
 		if msg, ok := m.(ollama.Message); ok {
 			tok := estimateTokens(msg.Content)
@@ -1087,6 +1107,14 @@ func handleContextCommand(sess *session.Session, messages []interface{}, brainCt
 				systemTok += tok
 			case "user":
 				userTok += tok
+				// Detect injected files: lines starting with "File: path"
+				for _, line := range strings.SplitN(msg.Content, "\n", 3) {
+					if strings.HasPrefix(line, "File: ") {
+						path := strings.TrimPrefix(line, "File: ")
+						injected = append(injected, injectedFile{path: path, tokens: tok})
+						break
+					}
+				}
 			case "assistant":
 				assistantTok += tok
 			}
@@ -1112,6 +1140,19 @@ func handleContextCommand(sess *session.Session, messages []interface{}, brainCt
 	fmt.Printf("│  %-40s %8d  │\n", "Total (estimated)", total)
 	fmt.Printf("│  %-40s %8d  │\n", "Messages", totalMsgs)
 	fmt.Printf("╰%s╯\n\n", line)
+
+	// Show injected files table if any are present.
+	if len(injected) > 0 {
+		fmt.Printf("%sInjected files in context:%s\n", colorDim, colorReset)
+		for _, f := range injected {
+			label := f.path
+			if len(label) > 50 {
+				label = "…" + label[len(label)-49:]
+			}
+			fmt.Printf("  %s%-52s%s %s(%d tok)%s\n", colorCopper, label, colorReset, colorDim, f.tokens, colorReset)
+		}
+		fmt.Println()
+	}
 }
 
 // fetchURL retrieves a web page, strips HTML, and returns truncated plain text.
@@ -1451,6 +1492,14 @@ func fixAgentTools() []ollama.Tool {
 		{
 			Type: "function",
 			Function: ollama.ToolFunction{
+				Name:        "edit_file",
+				Description: "Apply a precise old→new replacement to an existing file. Fails safely if old_string is not found exactly once. Prefer this over write_file for modifying existing files.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Relative file path"},"old_string":{"type":"string","description":"Exact text to replace (must appear exactly once)"},"new_string":{"type":"string","description":"Replacement text"}},"required":["path","old_string","new_string"]}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: ollama.ToolFunction{
 				Name:        "run_command",
 				Description: "Run a shell command in the project root. Allowed: go, npm, yarn, pnpm, cargo, make, docker, docker compose, pip, python, kubectl, git, cat, head, tail, ls, find, grep, pwd, which, echo.",
 				Parameters:  json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"}},"required":["command"]}`),
@@ -1512,7 +1561,8 @@ func dispatchFixTool(root, toolName string, argsRaw json.RawMessage) string {
 			return "error: bad arguments"
 		}
 		abs := filepath.Join(root, filepath.Clean(args.Path))
-		if !strings.HasPrefix(abs, root) {
+		// BUG-08: require separator so "/project2" doesn't pass when root="/project".
+		if abs != root && !strings.HasPrefix(abs, root+string(filepath.Separator)) {
 			return "error: path escapes project root"
 		}
 		data, err := os.ReadFile(abs)
@@ -1524,6 +1574,37 @@ func dispatchFixTool(root, toolName string, argsRaw json.RawMessage) string {
 			content = content[:8000] + "\n… (truncated)"
 		}
 		return content
+
+	case "edit_file":
+		var args struct {
+			Path      string `json:"path"`
+			OldString string `json:"old_string"`
+			NewString string `json:"new_string"`
+		}
+		if err := json.Unmarshal(argsRaw, &args); err != nil {
+			return "error: bad arguments"
+		}
+		abs := filepath.Join(root, filepath.Clean(args.Path))
+		if abs != root && !strings.HasPrefix(abs, root+string(filepath.Separator)) {
+			return "error: path escapes project root"
+		}
+		data, err := os.ReadFile(abs)
+		if err != nil {
+			return fmt.Sprintf("error: %v", err)
+		}
+		content := string(data)
+		count := strings.Count(content, args.OldString)
+		if count == 0 {
+			return fmt.Sprintf("error: old_string not found in %s", args.Path)
+		}
+		if count > 1 {
+			return fmt.Sprintf("error: old_string matches %d times — be more specific", count)
+		}
+		newContent := strings.Replace(content, args.OldString, args.NewString, 1)
+		if err := os.WriteFile(abs, []byte(newContent), 0o644); err != nil {
+			return fmt.Sprintf("error: %v", err)
+		}
+		return fmt.Sprintf("edited %s", args.Path)
 
 	case "run_command":
 		var args struct{ Command string `json:"command"` }
@@ -1636,6 +1717,24 @@ func runFixAgent(
 	return runTextFixAgent(ctx, client, model, messages, root)
 }
 
+// extractCapturedBuildOutput scans messages for the pre-captured build error
+// injected by captureBuildError(). Returns the raw injected block if found.
+func extractCapturedBuildOutput(messages []interface{}) string {
+	const marker = "[Mantis auto-ran `"
+	for _, msg := range messages {
+		m, ok := msg.(ollama.Message)
+		if !ok || m.Role != "user" {
+			continue
+		}
+		idx := strings.Index(m.Content, marker)
+		if idx < 0 {
+			continue
+		}
+		return m.Content[idx:]
+	}
+	return ""
+}
+
 // runTextFixAgent uses a text-based ReAct pattern for models that don't support
 // native tool calling. It injects tool descriptions into the system prompt and
 // parses tool calls from the model's text output. Uses StreamChat (streaming)
@@ -1656,16 +1755,32 @@ Available tools:
 1. run_command - Run a shell command. Example: TOOL_CALL: {"tool":"run_command","args":{"command":"make build"}}
 2. read_file - Read a project file. Example: TOOL_CALL: {"tool":"read_file","args":{"path":"Makefile"}}
 3. list_files - List directory contents. Example: TOOL_CALL: {"tool":"list_files","args":{"path":"."}}
+4. edit_file - Apply a targeted replacement to an existing file. Example: TOOL_CALL: {"tool":"edit_file","args":{"path":"main.go","old_string":"oldCode()","new_string":"newCode()"}}
 
-IMPORTANT: Always run the failing command first to see the actual error, then read relevant files, then provide the fix.
-After investigation, provide the corrected files using fenced code blocks with the filepath: ` + "```lang:filepath"
+IMPORTANT: Always run the failing command first to see the actual error, then read relevant files, then apply the fix.
+IMPORTANT: Use edit_file to modify existing files (targeted old→new replacement). Only use write_file fenced blocks for creating new files.
+After investigation, provide corrected files using edit_file calls or fenced code blocks with the filepath: ` + "```lang:filepath"
 
-	agentMsgs := make([]interface{}, 0, len(messages)+2)
+	agentMsgs := make([]interface{}, 0, len(messages)+3)
 	agentMsgs = append(agentMsgs, ollama.Message{Role: "system", Content: toolPrompt})
 	agentMsgs = append(agentMsgs, messages...)
 
+	// Ground the agent with the pre-captured build output so the model cannot
+	// hallucinate a different cause. If captureBuildError already ran the command
+	// and injected the output, surface it explicitly as the authoritative error.
+	preCapture := extractCapturedBuildOutput(messages)
+	if preCapture != "" {
+		agentMsgs = append(agentMsgs, ollama.Message{
+			Role: "user",
+			Content: "The actual build error is already captured above (see [Mantis auto-ran...] block). " +
+				"Fix ONLY what that specific error output describes. " +
+				"Do NOT assume a different cause. Do NOT reference files that are not mentioned in the error.",
+		})
+	}
+
 	var totalPT, totalCT int
 	var lastContent string
+	usedTools := false
 
 	for iter := 0; iter < maxIter; iter++ {
 		var buf bytes.Buffer
@@ -1682,9 +1797,27 @@ After investigation, provide the corrected files using fenced code blocks with t
 		// Parse text-based tool calls.
 		calls := parseTextToolCalls(lastContent)
 		if len(calls) == 0 {
+			// If model skipped tools on first iter and there is no pre-captured
+			// output, force a discovery step by listing files and re-prompting.
+			// This prevents the model from hallucinating a fix without seeing
+			// the real error.
+			if iter == 0 && !usedTools && preCapture == "" {
+				lsOut := dispatchFixTool(root, "list_files", json.RawMessage(`{}`))
+				agentMsgs = append(agentMsgs,
+					ollama.Message{Role: "assistant", Content: lastContent},
+					ollama.Message{Role: "user", Content: fmt.Sprintf(
+						"You must run the failing build command before proposing any fix. "+
+							"Project files:\n%s\n\n"+
+							"Use TOOL_CALL to run the failing command now so you can see the actual error output.",
+						lsOut,
+					)},
+				)
+				continue
+			}
 			break
 		}
 
+		usedTools = true
 		// Execute tool calls and build result message.
 		var toolResults strings.Builder
 		for _, tc := range calls {
@@ -1972,6 +2105,11 @@ func startSpinner(taskType string) func() time.Duration {
 
 	done := make(chan struct{})
 	go func() {
+		// BUG-03: use time.NewTicker instead of time.After to avoid leaking one
+		// timer per iteration (time.After creates a new timer that is not GC'd
+		// until it fires, accumulating hundreds per second in tight loops).
+		ticker := time.NewTicker(80 * time.Millisecond)
+		defer ticker.Stop()
 		i := 0
 		msgIdx := 0
 		for {
@@ -1979,16 +2117,14 @@ func startSpinner(taskType string) func() time.Duration {
 			case <-done:
 				fmt.Printf("\r\033[K") // clear spinner line
 				return
-			case <-time.After(80 * time.Millisecond):
+			case <-ticker.C:
 				elapsed := time.Since(start).Seconds()
 				fmt.Printf("\r%s%s %s · %.1fs%s",
 					colorDim, frames[i%len(frames)], msgs[msgIdx], elapsed, colorReset)
 				i++
 				// advance faster through task leads (~1.5s each), slower through generic (~3s)
 				interval := 19
-				if msgIdx < len(taskLeads[taskType]) {
-					interval = 19
-				} else {
+				if msgIdx >= len(taskLeads[taskType]) {
 					interval = 38
 				}
 				if i%interval == 0 {
@@ -2129,8 +2265,9 @@ func verifyAndFix(
 			colorRed, attempt, maxRetries, colorReset)
 
 		// Inject the build error as a new user message.
+		// BUG-04: copy slice before append to avoid aliasing the backing array.
 		fixMsg := autofix.FormatError(result)
-		retryMsgs := append(*messages, ollama.Message{Role: "user", Content: fixMsg})
+		retryMsgs := append(append([]interface{}{}, *messages...), ollama.Message{Role: "user", Content: fixMsg})
 
 		var rb strings.Builder
 		fixCtx, fixCancel := context.WithTimeout(ctx, 3*time.Minute)
@@ -2281,7 +2418,6 @@ func streamEnsemble(ctx context.Context, client *ollama.Client,
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	done := 0
-	ensembleStart := time.Now()
 
 	for i, m := range models {
 		wg.Add(1)
@@ -2304,7 +2440,6 @@ func streamEnsemble(ctx context.Context, client *ollama.Client,
 		}(i, m)
 	}
 	wg.Wait()
-	_ = ensembleStart // used by goroutines above
 
 	// Collect successful responses.
 	type good struct {
@@ -2457,7 +2592,8 @@ func trimToMinimal(messages []interface{}) []interface{} {
 // multiPassReasoning performs a silent analysis pass before the main response.
 // For complex queries (Reason/Heavy), the model first analyzes constraints and
 // risks, then this analysis is injected as context for the solution pass.
-func multiPassReasoning(client *ollama.Client, model string, tier router.Tier, messages []interface{}) []interface{} {
+// BUG-06: accept caller's context so the analysis pass is cancellable.
+func multiPassReasoning(ctx context.Context, client *ollama.Client, model string, tier router.Tier, messages []interface{}) []interface{} {
 	// Extract the last user message.
 	var lastUserContent string
 	for i := len(messages) - 1; i >= 0; i-- {
@@ -2481,7 +2617,7 @@ func multiPassReasoning(client *ollama.Client, model string, tier router.Tier, m
 	copy(analysisMsgs, messages)
 	analysisMsgs = append(analysisMsgs, ollama.Message{Role: "user", Content: analysisPrompt})
 
-	analysisCtx, analysisCancel := context.WithTimeout(context.Background(), 90*time.Second)
+	analysisCtx, analysisCancel := context.WithTimeout(ctx, 90*time.Second)
 	defer analysisCancel()
 
 	var analysis strings.Builder
@@ -2578,10 +2714,11 @@ func compressIfNeeded(messages []interface{}, client *ollama.Client) []interface
 	}
 
 	var summaryBuf strings.Builder
+	// BUG-14: defer cancel so the context is released even if StreamChat panics.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	_, _, err := client.StreamChat(ctx, summaryModel, summaryMsgs, nil,
 		func(chunk string) { summaryBuf.WriteString(chunk) })
-	cancel()
 
 	if err != nil || strings.TrimSpace(summaryBuf.String()) == "" {
 		// Summarization failed — fall back to trimToMinimal behavior.
@@ -2715,7 +2852,7 @@ func runWithScanner(cfg Config, client *ollama.Client, sess *session.Session,
 		}
 		// Reuse one-shot handler for each turn.
 		cfg.InitialQuery = input
-		_ = runOnce(cfg, client, sess, b, dispatcher, messages, tw, ut, rs)
+		_ = runOnce(cfg, client, sess, b, dispatcher, &messages, tw, ut, rs)
 		cfg.InitialQuery = ""
 	}
 	endSession(sess, b, messages, nil)
@@ -2725,11 +2862,13 @@ func runWithScanner(cfg Config, client *ollama.Client, sess *session.Session,
 // htmlTagRe matches HTML tags for stripping.
 var htmlTagRe = regexp.MustCompile(`<[^>]*>`)
 
+// spaceRe collapses runs of whitespace; package-level to avoid per-call recompilation (BUG-18).
+var spaceRe = regexp.MustCompile(`\s+`)
+
 // stripHTML removes HTML tags and decodes common entities, returning plain text.
 func stripHTML(s string) string {
 	text := htmlTagRe.ReplaceAllString(s, " ")
-	// Collapse whitespace.
-	spaceRe := regexp.MustCompile(`\s+`)
+	// Collapse whitespace (spaceRe is a package-level var — BUG-18).
 	text = spaceRe.ReplaceAllString(text, " ")
 	// Decode common entities.
 	r := strings.NewReplacer(

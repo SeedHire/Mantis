@@ -64,6 +64,10 @@ func Impact(q *graph.Querier, target string, maxDepth int) (*ImpactResult, error
 		if err != nil || node == nil {
 			continue
 		}
+		// C4: skip vendor, node_modules, and generated files — they inflate blast radius.
+		if isIgnoredPath(node.FilePath) {
+			continue
+		}
 		byDepth[depth] = append(byDepth[depth], node)
 		total++
 
@@ -85,6 +89,24 @@ func Impact(q *graph.Querier, target string, maxDepth int) (*ImpactResult, error
 		ByDepth:    byDepth,
 		RiskScores: riskScores,
 	}, nil
+}
+
+// isIgnoredPath returns true for vendor, generated, and tooling paths that
+// should not appear in impact blast-radius reports.
+func isIgnoredPath(path string) bool {
+	lower := strings.ToLower(strings.ReplaceAll(path, "\\", "/"))
+	for _, seg := range []string{
+		"vendor/", "/vendor/",
+		"node_modules/", "/node_modules/",
+		".gen.", "_gen.", ".generated.", "_generated.",
+		"/mock/", "/mocks/", "mock_",
+		"/__generated__/",
+	} {
+		if strings.Contains(lower, seg) {
+			return true
+		}
+	}
+	return false
 }
 
 type notFoundError struct{ name string }

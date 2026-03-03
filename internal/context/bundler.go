@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/seedhire/mantis/internal/graph"
+	"github.com/seedhire/mantis/internal/intel"
 	"github.com/seedhire/mantis/internal/parser"
 )
 
@@ -77,6 +78,24 @@ func (b *Bundler) Bundle(symbolName string, maxDepth, tokenBudget int) (*Bundle,
 		return nil, err
 	}
 
+	// Build coupling churn map: files that frequently co-change with the entry file get a bonus.
+	// Run temporal analysis with a short timeout; degrade gracefully if git is unavailable.
+	churnBonus := map[string]int{}
+	if stats, err := intel.Temporal(b.root, 90); err == nil {
+		coupled := intel.CouplingFor(stats, sym.FilePath, 20)
+		for _, c := range coupled {
+			other := c.FileB
+			if c.FileB == sym.FilePath {
+				other = c.FileA
+			}
+			bonus := int(c.Coupling * 4)
+			if bonus > 4 {
+				bonus = 4
+			}
+			churnBonus[other] = bonus
+		}
+	}
+
 	// Build sections with multi-signal scoring.
 	var sections []Section
 	filesByID := map[string]BundleFile{}
@@ -91,7 +110,7 @@ func (b *Bundler) Bundle(symbolName string, maxDepth, tokenBudget int) (*Bundle,
 			continue
 		}
 		content, _ := os.ReadFile(n.FilePath)
-		priority := scoreFile(n.FilePath, depth, string(content), n.LastModified, entryBase)
+		priority := scoreFile(n.FilePath, depth, string(content), n.LastModified, entryBase, churnBonus[n.FilePath])
 		bf := BundleFile{
 			Path:    n.FilePath,
 			Depth:   depth,
@@ -119,7 +138,7 @@ func (b *Bundler) Bundle(symbolName string, maxDepth, tokenBudget int) (*Bundle,
 		filesByID[imp.ID] = bf
 		sections = append(sections, Section{
 			Content:  string(content),
-			Priority: scoreFile(imp.FilePath, maxDepth+1, string(content), imp.LastModified, entryBase),
+			Priority: scoreFile(imp.FilePath, maxDepth+1, string(content), imp.LastModified, entryBase, churnBonus[imp.FilePath]),
 			Label:    imp.FilePath,
 		})
 	}
@@ -153,8 +172,8 @@ func (b *Bundler) Bundle(symbolName string, maxDepth, tokenBudget int) (*Bundle,
 //
 // Formula (inspired by Sourcegraph Cody weights):
 //
-//	score = depth_signal + size_signal + recency_signal + test_colocation + type_boost
-func scoreFile(path string, depth int, content string, lastModifiedUnix int64, entryBase string) int {
+//	score = depth_signal + size_signal + recency_signal + test_colocation + type_boost + churn_bonus
+func scoreFile(path string, depth int, content string, lastModifiedUnix int64, entryBase string, churnBonus int) int {
 	score := 0
 
 	// Depth signal: closer = higher (10 → 3).
@@ -216,6 +235,11 @@ func scoreFile(path string, depth int, content string, lastModifiedUnix int64, e
 	if strings.Contains(lower, "types") || strings.Contains(lower, "interface") ||
 		strings.Contains(lower, "model") || strings.Contains(lower, "schema") {
 		score += 2
+	}
+
+	// Churn coupling bonus: files that frequently co-change with the target are more relevant.
+	if churnBonus > 0 {
+		score += churnBonus
 	}
 
 	if score < 1 {

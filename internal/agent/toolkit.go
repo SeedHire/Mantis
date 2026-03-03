@@ -84,6 +84,11 @@ type AgentToolkit struct {
 // NewToolkit creates a toolkit bound to the given project root.
 // querier and embStore may be nil; their tools return graceful errors.
 func NewToolkit(projectRoot string, querier *graph.Querier, embStore *embeddings.Store) *AgentToolkit {
+	// Resolve symlinks on the root itself so the prefix check in safePath is
+	// consistent on macOS (/var/folders → /private/var/folders).
+	if resolved, err := filepath.EvalSymlinks(projectRoot); err == nil {
+		projectRoot = resolved
+	}
 	return &AgentToolkit{
 		projectRoot: projectRoot,
 		querier:     querier,
@@ -188,6 +193,32 @@ func (t *AgentToolkit) SearchCodebase(ctx context.Context, query string, limit i
 	return t.embStore.SearchHybrid(ctx, query, limit)
 }
 
+// EditFile applies a precise old→new replacement to an existing file.
+// Fails if old_string is not found exactly once (safe by default).
+// Use write_file only for new files; prefer edit_file for existing files.
+func (t *AgentToolkit) EditFile(path, oldString, newString string) error {
+	abs, err := t.safePath(path)
+	if err != nil {
+		return err
+	}
+	t.fileMu.Lock()
+	defer t.fileMu.Unlock()
+
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		return err
+	}
+	content := string(data)
+	count := strings.Count(content, oldString)
+	if count == 0 {
+		return fmt.Errorf("edit_file: old_string not found in %s", path)
+	}
+	if count > 1 {
+		return fmt.Errorf("edit_file: old_string matches %d times in %s — be more specific", count, path)
+	}
+	return os.WriteFile(abs, []byte(strings.Replace(content, oldString, newString, 1)), 0o644)
+}
+
 // FindSymbol looks up a symbol by name in the dependency graph.
 func (t *AgentToolkit) FindSymbol(name string) ([]*graph.Node, error) {
 	if t.querier == nil {
@@ -260,6 +291,22 @@ func (t *AgentToolkit) Tools() []ollama.Tool {
 						"limit": {"type":"integer","description":"Max results to return (default 5)"}
 					},
 					"required": ["query"]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: ollama.ToolFunction{
+				Name:        "edit_file",
+				Description: "Apply a precise old→new replacement to an existing file. Fails if old_string is not found exactly once. Use this instead of write_file when modifying existing files.",
+				Parameters: rawJSON(`{
+					"type": "object",
+					"properties": {
+						"path":       {"type":"string","description":"Relative file path from project root"},
+						"old_string": {"type":"string","description":"Exact text to replace (must appear exactly once)"},
+						"new_string": {"type":"string","description":"Replacement text"}
+					},
+					"required": ["path","old_string","new_string"]
 				}`),
 			},
 		},
@@ -344,6 +391,20 @@ func (t *AgentToolkit) Dispatch(ctx context.Context, toolName string, argsRaw js
 		}
 		return sb.String(), nil
 
+	case "edit_file":
+		var args struct {
+			Path      string `json:"path"`
+			OldString string `json:"old_string"`
+			NewString string `json:"new_string"`
+		}
+		if err := json.Unmarshal(argsRaw, &args); err != nil {
+			return "", fmt.Errorf("bad args: %w", err)
+		}
+		if err := t.EditFile(args.Path, args.OldString, args.NewString); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("edited %s", args.Path), nil
+
 	case "finish":
 		var args struct {
 			Summary string `json:"summary"`
@@ -361,13 +422,22 @@ func (t *AgentToolkit) Dispatch(ctx context.Context, toolName string, argsRaw js
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 // safePath resolves a relative path against projectRoot, rejecting traversals.
+// BUG-08: also resolves symlinks so a symlink pointing outside the root is blocked.
 func (t *AgentToolkit) safePath(rel string) (string, error) {
 	abs := filepath.Join(t.projectRoot, filepath.Clean(rel))
-	if !strings.HasPrefix(abs, t.projectRoot+string(filepath.Separator)) &&
-		abs != t.projectRoot {
+	if abs != t.projectRoot && !strings.HasPrefix(abs, t.projectRoot+string(filepath.Separator)) {
 		return "", fmt.Errorf("path %q escapes project root", rel)
 	}
-	return abs, nil
+	// Resolve symlinks to catch traversal via symlink indirection.
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		// File doesn't exist yet (write case) — just return the cleaned abs path.
+		return abs, nil
+	}
+	if resolved != t.projectRoot && !strings.HasPrefix(resolved, t.projectRoot+string(filepath.Separator)) {
+		return "", fmt.Errorf("path %q resolves outside project root via symlink", rel)
+	}
+	return resolved, nil
 }
 
 // isAllowedCmd returns true if cmd starts with any of the allowed prefixes.
@@ -387,8 +457,10 @@ func isAllowedCmd(cmd string) bool {
 
 // blockSensitivePath returns true if the command accesses files outside the
 // project (e.g. /etc/passwd). It applies only to file-reading diagnostics.
+// BUG-09: "less " removed — it is not in allowedPrefixes so isAllowedCmd
+// already rejects it before blockSensitivePath is ever reached.
 func blockSensitivePath(cmd string) bool {
-	for _, diag := range []string{"cat ", "head ", "tail ", "less "} {
+	for _, diag := range []string{"cat ", "head ", "tail "} {
 		if strings.HasPrefix(cmd, diag) {
 			rest := strings.TrimSpace(cmd[len(diag):])
 			if strings.HasPrefix(rest, "/etc") || strings.HasPrefix(rest, "/proc") ||

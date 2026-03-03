@@ -167,16 +167,25 @@ func parseTierName(name string) Tier {
 }
 
 // itoa is a minimal int-to-string for map key generation without importing strconv.
+// BUG-15: handle negative integers (returned empty string before, causing ID collisions).
 func itoa(n int) string {
 	if n == 0 {
 		return "0"
 	}
-	buf := [20]byte{}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	buf := [21]byte{}
 	pos := len(buf)
 	for n > 0 {
 		pos--
 		buf[pos] = byte('0' + n%10)
 		n /= 10
+	}
+	if neg {
+		pos--
+		buf[pos] = '-'
 	}
 	return string(buf[pos:])
 }

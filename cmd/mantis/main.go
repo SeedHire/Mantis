@@ -724,20 +724,64 @@ var hotspotsCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		hotspots := intel.Hotspots(stats, 15)
+		hotspots := intel.Hotspots(stats, 20)
 		if len(hotspots) == 0 {
 			fmt.Println("No file changes found in the last", temporalDays, "days.")
 			return nil
 		}
-		fmt.Printf("%-50s %7s %7s %8s %6s\n", "FILE", "COMMITS", "AUTHORS", "CHURN", "DAYS")
-		fmt.Println(strings.Repeat("─", 85))
+
+		// Split into refactor candidates (high churn, single/few authors) and watch list (many authors).
+		var refactor, watch []intel.FileChurn
 		for _, f := range hotspots {
-			days := fmt.Sprintf("%d", f.DaysSinceChange)
-			if f.DaysSinceChange < 0 {
-				days = "?"
+			if f.Authors <= 1 && f.Commits >= 3 {
+				refactor = append(refactor, f)
+			} else if f.Authors > 1 {
+				watch = append(watch, f)
 			}
-			fmt.Printf("%-50s %7d %7d %8.1f %6s\n", truncPath(f.Path, 50), f.Commits, f.Authors, f.ChurnScore, days)
 		}
+
+		header := fmt.Sprintf("%-50s %7s %7s %8s %s", "FILE", "COMMITS", "AUTHORS", "CHURN", "TOP AUTHOR")
+		sep := strings.Repeat("─", 90)
+
+		if len(refactor) > 0 {
+			fmt.Println("\n\033[38;5;197mRefactor Candidates\033[0m  (high churn · single author · bus factor 1)")
+			fmt.Println(header)
+			fmt.Println(sep)
+			for _, f := range refactor {
+				author := f.LastAuthor
+				if len(author) > 20 {
+					author = author[:17] + "…"
+				}
+				fmt.Printf("%-50s %7d %7d %8.1f %s\n", truncPath(f.Path, 50), f.Commits, f.Authors, f.ChurnScore, author)
+			}
+		}
+
+		if len(watch) > 0 {
+			fmt.Println("\n\033[38;5;220mWatch List\033[0m  (high churn · actively evolving · multiple authors)")
+			fmt.Println(header)
+			fmt.Println(sep)
+			for _, f := range watch {
+				author := f.LastAuthor
+				if len(author) > 20 {
+					author = author[:17] + "…"
+				}
+				fmt.Printf("%-50s %7d %7d %8.1f %s\n", truncPath(f.Path, 50), f.Commits, f.Authors, f.ChurnScore, author)
+			}
+		}
+
+		// If nothing fits either category (e.g. all are single commit), show raw list.
+		if len(refactor) == 0 && len(watch) == 0 {
+			fmt.Println(header)
+			fmt.Println(sep)
+			for _, f := range hotspots {
+				days := fmt.Sprintf("%d", f.DaysSinceChange)
+				if f.DaysSinceChange < 0 {
+					days = "?"
+				}
+				fmt.Printf("%-50s %7d %7d %8.1f %6s\n", truncPath(f.Path, 50), f.Commits, f.Authors, f.ChurnScore, days)
+			}
+		}
+		fmt.Println()
 		return nil
 	},
 }

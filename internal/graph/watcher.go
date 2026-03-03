@@ -62,6 +62,13 @@ func (w *Watcher) Start() error {
 				}
 				op := event.Op
 				debounce[path] = time.AfterFunc(200*time.Millisecond, func() {
+					// BUG-13: check done before touching the builder; the 200ms
+					// debounce may fire after Stop() closes w.done.
+					select {
+					case <-w.done:
+						return
+					default:
+					}
 					delete(debounce, path)
 					if op&fsnotify.Remove != 0 {
 						_ = w.builder.RemoveFile(path)

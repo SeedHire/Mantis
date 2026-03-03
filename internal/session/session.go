@@ -240,7 +240,7 @@ func LoadRecent(mantisDir string, maxAge time.Duration) (*SavedSession, error) {
 		if time.Since(saved.StartTime) <= maxAge {
 			return &saved, nil
 		}
-		break // oldest-first after sort, so if this one is too old, all are
+		break // newest-first after sort, so if this one is too old, all subsequent are too
 	}
 	return nil, nil
 }
