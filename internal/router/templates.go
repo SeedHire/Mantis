@@ -16,7 +16,9 @@ Reference actual function names and file paths from the project.`
 2. Write the corrected file(s) using ` + "```lang:path/to/file" + ` fences so Mantis writes them to disk automatically.
 3. Explain why the fix works.
 4. Note any files that might need related changes.
-IMPORTANT: Always output corrected files with ` + "```lang:filepath" + ` fences — do NOT just show code snippets without a file path.`
+IMPORTANT: Always output corrected files with ` + "```lang:filepath" + ` fences — do NOT just show code snippets without a file path.
+IMPORTANT: Do NOT create files that don't already exist unless the user explicitly asked for them. Only modify existing files.
+IMPORTANT: If project file contents are provided below, use them — do NOT guess file contents.`
 
 	case "refactor":
 		return `[Task: Refactor]
@@ -46,6 +48,11 @@ Use the project's existing test patterns and conventions.`
 2. List reverse dependencies (what calls this code).
 3. Assess blast radius: what breaks if this changes?
 4. Recommend a safe change strategy.`
+
+	case "general":
+		return `If project file contents are provided below, base your answer on them — do NOT guess or hallucinate file contents.
+When suggesting file changes, use ` + "```lang:path/to/file" + ` fences so Mantis can write them to disk automatically.
+Do NOT create new files unless the user explicitly asked for them.`
 
 	default:
 		return ""

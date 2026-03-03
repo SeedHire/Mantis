@@ -407,11 +407,18 @@ func Run(cfg Config) error {
 			userContent = tmpl + "\n\n" + input
 		}
 
-		// Auto-capture build errors when the user mentions a build command.
-		if intent.TaskType == "fix" || intent.TaskType == "general" {
-			if captured := captureBuildError(input, root); captured != "" {
-				fmt.Printf("%s  ◉ captured build output%s\n", colorDim, colorReset)
-				userContent = userContent + "\n\n" + captured
+		// Auto-capture build errors and inject relevant project files.
+		{
+			if intent.TaskType == "fix" || intent.TaskType == "general" || intent.TaskType == "implement" {
+				if captured := captureBuildError(input, root); captured != "" {
+					fmt.Printf("%s  ◉ captured build output%s\n", colorDim, colorReset)
+					userContent = userContent + "\n\n" + captured
+				}
+			}
+			// Inject build config files for any task that mentions build tools.
+			if buildFiles := injectBuildFiles(input, root); buildFiles != "" {
+				fmt.Printf("%s  ◉ loaded project files%s\n", colorDim, colorReset)
+				userContent = userContent + "\n\n" + buildFiles
 			}
 		}
 
@@ -1292,6 +1299,64 @@ func contextMessageFor(input, root string, brainContext string, tw *truth.Writer
 	return ollama.Message{Role: "user", Content: "[context]\n" + strings.Join(parts, "\n\n") + "\n[/context]\n\nNow answer: " + input}
 }
 
+// injectBuildFiles reads build-related configuration files from the project root
+// and returns their content to inject into context. This ensures the model sees
+// the actual files before suggesting changes (instead of guessing).
+func injectBuildFiles(input, root string) string {
+	lower := strings.ToLower(input)
+
+	// Map of keyword → files to read if that keyword appears in the input.
+	type fileSet struct {
+		keywords []string
+		files    []string
+	}
+	sets := []fileSet{
+		{[]string{"make", "makefile"}, []string{"Makefile", "GNUmakefile", "makefile"}},
+		{[]string{"docker", "dockerfile", "compose", "container"}, []string{"Dockerfile", "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml", ".dockerignore"}},
+		{[]string{"npm", "node", "yarn", "pnpm", "package", "typescript", "tsc"}, []string{"package.json", "tsconfig.json"}},
+		{[]string{"go build", "go test", "go mod"}, []string{"go.mod"}},
+		{[]string{"cargo", "rust"}, []string{"Cargo.toml"}},
+		{[]string{"pip", "python", "requirements"}, []string{"requirements.txt", "setup.py", "pyproject.toml"}},
+		{[]string{"deploy", "kubernetes", "kubectl", "k8s"}, []string{"k8s/", "deployment.yaml", "service.yaml"}},
+	}
+
+	seen := make(map[string]bool)
+	var parts []string
+	for _, s := range sets {
+		matched := false
+		for _, kw := range s.keywords {
+			if strings.Contains(lower, kw) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		for _, f := range s.files {
+			if seen[f] {
+				continue
+			}
+			seen[f] = true
+			path := filepath.Join(root, f)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			content := string(data)
+			if len(content) > 3000 {
+				content = content[:3000] + "\n… (truncated)"
+			}
+			parts = append(parts, fmt.Sprintf("[file: %s]\n```\n%s\n```", f, strings.TrimSpace(content)))
+		}
+	}
+
+	if len(parts) == 0 {
+		return ""
+	}
+	return "[Mantis auto-read these project files for context]\n" + strings.Join(parts, "\n\n")
+}
+
 // captureBuildError detects build-related commands mentioned in the user's
 // message and auto-runs them to capture the actual error output. Returns the
 // captured output (capped at 3000 chars) or "" if no build command was detected
@@ -1531,24 +1596,23 @@ func runFixAgent(
 	var totalPT, totalCT int
 	var lastContent string
 
+	// Try native tool calling first.
+	nativeToolsWork := true
 	for iter := 0; iter < maxIter; iter++ {
 		result, err := client.ChatWithTools(ctx, model, agentMsgs, tools, nil)
 		if err != nil {
-			return "", 0, 0, false
+			nativeToolsWork = false
+			break
 		}
 		totalPT += result.PromptTok
 		totalCT += result.ComplTok
 		lastContent = result.Content
 
 		if len(result.ToolCalls) == 0 {
-			// No tool calls — model has its final answer.
 			break
 		}
 
-		// Append assistant turn with tool calls.
 		agentMsgs = append(agentMsgs, ollama.Message{Role: "assistant", Content: result.Content})
-
-		// Execute each tool call.
 		for _, tc := range result.ToolCalls {
 			toolOut := dispatchFixTool(root, tc.Function.Name, tc.Function.Arguments)
 			agentMsgs = append(agentMsgs, ollama.ToolMessage{
@@ -1558,10 +1622,104 @@ func runFixAgent(
 		}
 	}
 
+	if nativeToolsWork && strings.TrimSpace(lastContent) != "" {
+		return lastContent, totalPT, totalCT, true
+	}
+
+	// Fallback: text-based ReAct loop for models without native tool support.
+	return runTextFixAgent(ctx, client, model, messages, root)
+}
+
+// runTextFixAgent uses a text-based ReAct pattern for models that don't support
+// native tool calling. It injects tool descriptions into the system prompt and
+// parses tool calls from the model's text output.
+func runTextFixAgent(
+	ctx context.Context,
+	client *ollama.Client,
+	model string,
+	messages []interface{},
+	root string,
+) (string, int, int, bool) {
+	const maxIter = 5
+
+	toolPrompt := `You have access to these tools. To use a tool, output a line starting with TOOL_CALL: followed by the JSON.
+Do NOT suggest commands for the user to run. Run them yourself using TOOL_CALL.
+
+Available tools:
+1. run_command - Run a shell command. Example: TOOL_CALL: {"tool":"run_command","args":{"command":"make build"}}
+2. read_file - Read a project file. Example: TOOL_CALL: {"tool":"read_file","args":{"path":"Makefile"}}
+3. list_files - List directory contents. Example: TOOL_CALL: {"tool":"list_files","args":{"path":"."}}
+
+IMPORTANT: Always run the failing command first to see the actual error, then read relevant files, then provide the fix.
+After investigation, provide the corrected files using fenced code blocks with the filepath: ` + "```lang:filepath"
+
+	agentMsgs := make([]interface{}, 0, len(messages)+2)
+	// Inject tool system prompt before existing messages.
+	agentMsgs = append(agentMsgs, ollama.Message{Role: "system", Content: toolPrompt})
+	agentMsgs = append(agentMsgs, messages...)
+
+	var totalPT, totalCT int
+	var lastContent string
+
+	for iter := 0; iter < maxIter; iter++ {
+		result, err := client.ChatWithTools(ctx, model, agentMsgs, nil, nil)
+		if err != nil {
+			break
+		}
+		totalPT += result.PromptTok
+		totalCT += result.ComplTok
+		lastContent = result.Content
+
+		// Parse text-based tool calls.
+		calls := parseTextToolCalls(result.Content)
+		if len(calls) == 0 {
+			break
+		}
+
+		// Execute tool calls and build result message.
+		var toolResults strings.Builder
+		for _, tc := range calls {
+			argsRaw, _ := json.Marshal(tc.args)
+			out := dispatchFixTool(root, tc.tool, json.RawMessage(argsRaw))
+			toolResults.WriteString(fmt.Sprintf("[%s result]\n%s\n\n", tc.tool, out))
+		}
+
+		agentMsgs = append(agentMsgs, ollama.Message{Role: "assistant", Content: result.Content})
+		agentMsgs = append(agentMsgs, ollama.Message{Role: "user", Content: "Tool results:\n" + toolResults.String() + "\nNow analyze the output and provide the fix."})
+	}
+
 	if strings.TrimSpace(lastContent) == "" {
 		return "", 0, 0, false
 	}
 	return lastContent, totalPT, totalCT, true
+}
+
+type textToolCall struct {
+	tool string
+	args map[string]interface{}
+}
+
+// parseTextToolCalls extracts TOOL_CALL: {...} lines from model text output.
+func parseTextToolCalls(text string) []textToolCall {
+	var calls []textToolCall
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "TOOL_CALL:") {
+			continue
+		}
+		jsonStr := strings.TrimSpace(strings.TrimPrefix(line, "TOOL_CALL:"))
+		var parsed struct {
+			Tool string                 `json:"tool"`
+			Args map[string]interface{} `json:"args"`
+		}
+		if err := json.Unmarshal([]byte(jsonStr), &parsed); err != nil {
+			continue
+		}
+		if parsed.Tool != "" {
+			calls = append(calls, textToolCall{tool: parsed.Tool, args: parsed.Args})
+		}
+	}
+	return calls
 }
 
 // readFileSnippet reads a file and returns at most maxChars characters.
