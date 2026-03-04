@@ -613,6 +613,22 @@ func Run(cfg Config) error {
 				if pRes != nil && len(pRes.CodeText) > 500 {
 					fmt.Printf("%s  [pipeline timed out — using %d chars of partial code]%s\n\n",
 						colorDim, len(pRes.CodeText), colorReset)
+					// Assemble Combined from whatever stages completed so files get written.
+					if pRes.Combined == "" {
+						var sb strings.Builder
+						if pRes.PlanText != "" {
+							sb.WriteString("## Plan\n\n")
+							sb.WriteString(strings.TrimSpace(pRes.PlanText))
+							sb.WriteString("\n\n---\n\n")
+						}
+						sb.WriteString("## Implementation\n\n")
+						sb.WriteString(strings.TrimSpace(pRes.CodeText))
+						if pRes.TestText != "" {
+							sb.WriteString("\n\n---\n\n## Tests\n\n")
+							sb.WriteString(strings.TrimSpace(pRes.TestText))
+						}
+						pRes.Combined = sb.String()
+					}
 					pErr = nil // treat as success with partial output
 				} else {
 					fmt.Printf("%s  [pipeline failed: %v — falling back to single model]%s\n\n",
@@ -658,7 +674,11 @@ func Run(cfg Config) error {
 				pipeline.SaveOutput(root, pRes.Combined)
 				renderResponse(pipeline.CompactSummary(pRes))
 
+				// Write code files to disk — try Combined first, fall back to raw CodeText.
 				wf := extractAndWriteFiles(pRes.Combined, root)
+				if len(wf) == 0 && pRes.CodeText != "" {
+					wf = extractAndWriteFiles(pRes.CodeText, root)
+				}
 				if len(wf) > 0 {
 					printWrittenFiles(wf)
 				}
