@@ -96,6 +96,10 @@ type Task struct {
 	Status    string // "pending", "running", "done", "failed"
 	Output    string // generated code for this task
 	FileCount int    // number of files written to disk for this task
+	StartTime time.Time
+	Elapsed   time.Duration
+	Tokens    int   // final token count (prompt + completion)
+	streamTok int64 // live streaming token counter (atomic)
 }
 
 // ShouldRun returns true when the message is complex enough to warrant the pipeline.
@@ -470,28 +474,56 @@ func taskIcon(status string, spinFrame int) (string, string) {
 	}
 }
 
+// taskSuffix builds the trailing info string (tokens, time, files) for a task line.
+func taskSuffix(t *Task) string {
+	switch t.Status {
+	case "running":
+		tok := atomic.LoadInt64(&t.streamTok)
+		elapsed := time.Since(t.StartTime).Seconds()
+		if tok > 0 {
+			return fmt.Sprintf("  %s%d tokens · %.1fs%s", pColorDim, tok, elapsed, pColorReset)
+		}
+		return fmt.Sprintf("  %s%.1fs%s", pColorDim, elapsed, pColorReset)
+	case "done":
+		parts := []string{}
+		if t.FileCount > 0 {
+			parts = append(parts, fmt.Sprintf("%d files", t.FileCount))
+		}
+		if t.Tokens > 0 {
+			parts = append(parts, fmt.Sprintf("%d tokens", t.Tokens))
+		}
+		if t.Elapsed > 0 {
+			parts = append(parts, fmt.Sprintf("%.1fs", t.Elapsed.Seconds()))
+		}
+		if len(parts) > 0 {
+			return fmt.Sprintf("  %s(%s)%s", pColorDim, strings.Join(parts, " · "), pColorReset)
+		}
+		return ""
+	case "failed":
+		if t.Elapsed > 0 {
+			return fmt.Sprintf("  %s(%.1fs)%s", pColorDim, t.Elapsed.Seconds(), pColorReset)
+		}
+		return ""
+	default:
+		return ""
+	}
+}
+
 // printTaskList renders the current task status to the terminal.
 func printTaskList(tasks []Task) {
-	for _, t := range tasks {
-		icon, color := taskIcon(t.Status, 0)
-		suffix := ""
-		if t.Status == "done" && t.FileCount > 0 {
-			suffix = fmt.Sprintf(" %s(%d files)%s", pColorDim, t.FileCount, pColorReset)
-		}
-		fmt.Printf("  %s%s %s%s%s\n", color, icon, t.Title, pColorReset, suffix)
+	for i := range tasks {
+		icon, color := taskIcon(tasks[i].Status, 0)
+		fmt.Printf("  %s%s %s%s%s\n", color, icon, tasks[i].Title, pColorReset, taskSuffix(&tasks[i]))
 	}
 }
 
 // updateTaskLine reprints a single task line in-place using ANSI cursor movement.
-func updateTaskLine(task Task, totalTasks, spinFrame int) {
-	icon, color := taskIcon(task.Status, spinFrame)
-	suffix := ""
-	if task.Status == "done" && task.FileCount > 0 {
-		suffix = fmt.Sprintf(" %s(%d files)%s", pColorDim, task.FileCount, pColorReset)
-	}
-	linesUp := totalTasks - task.ID + 1
+func updateTaskLine(tasks []Task, idx, totalTasks, spinFrame int) {
+	t := &tasks[idx]
+	icon, color := taskIcon(t.Status, spinFrame)
+	linesUp := totalTasks - t.ID + 1
 	fmt.Printf("\033[%dA\r\033[K  %s%s %s%s%s\033[%dB\r",
-		linesUp, color, icon, task.Title, pColorReset, suffix, linesUp)
+		linesUp, color, icon, t.Title, pColorReset, taskSuffix(t), linesUp)
 }
 
 // taskSpinner starts a background goroutine that animates spinner icons
@@ -511,7 +543,7 @@ func taskSpinner(tasks []Task, totalTasks int, mu *sync.Mutex) func() {
 				mu.Lock()
 				for i := range tasks {
 					if tasks[i].Status == "running" {
-						updateTaskLine(tasks[i], totalTasks, frame)
+						updateTaskLine(tasks, i, totalTasks, frame)
 					}
 				}
 				mu.Unlock()
@@ -552,7 +584,9 @@ func runTaskBased(
 	runOneTask := func(i int, priorCode string) {
 		mu.Lock()
 		tasks[i].Status = "running"
-		updateTaskLine(tasks[i], len(tasks), 0)
+		tasks[i].StartTime = time.Now()
+		atomic.StoreInt64(&tasks[i].streamTok, 0)
+		updateTaskLine(tasks, i, len(tasks), 0)
 		mu.Unlock()
 
 		taskPrompt := taskCodePrompt(userRequest, planText, tasks[i].Title, priorCode)
@@ -562,10 +596,16 @@ func runTaskBased(
 		}
 
 		var buf strings.Builder
-		pt, ct, err := client.StreamChat(ctx, codeModel, msgs, nil, func(c string) { buf.WriteString(c) })
+		pt, ct, err := client.StreamChat(ctx, codeModel, msgs, nil, func(c string) {
+			buf.WriteString(c)
+			atomic.AddInt64(&tasks[i].streamTok, 1)
+		})
 
 		mu.Lock()
 		defer mu.Unlock()
+
+		tasks[i].Elapsed = time.Since(tasks[i].StartTime)
+		tasks[i].Tokens = pt + ct
 
 		if err != nil {
 			if partial := buf.String(); strings.TrimSpace(partial) != "" {
@@ -577,7 +617,7 @@ func runTaskBased(
 				}
 			}
 			tasks[i].Status = "failed"
-			updateTaskLine(tasks[i], len(tasks), 0)
+			updateTaskLine(tasks, i, len(tasks), 0)
 			return
 		}
 
@@ -593,7 +633,7 @@ func runTaskBased(
 		if root != "" {
 			tasks[i].FileCount = len(writeCodeFiles(code, root))
 		}
-		updateTaskLine(tasks[i], len(tasks), 0)
+		updateTaskLine(tasks, i, len(tasks), 0)
 	}
 
 	// Phase 1: Run first task sequentially (setup/config — others depend on it).
