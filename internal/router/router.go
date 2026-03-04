@@ -3,7 +3,7 @@
 // Tiers (7):
 //   TierTrivial  — one-liners, definitions, syntax lookups          (~1–4B model)
 //   TierFast     — short code questions, small completions          (~8–14B model)
-//   TierCode     — coding specialist: implement, debug, refactor    (devstral / qwen3-coder)
+//   TierCode     — coding specialist: implement, debug, refactor    (qwen3-coder / deepseek-v3.2)
 //   TierReason   — analysis, architecture, deep explanation         (kimi-thinking / cogito)
 //   TierHeavy    — multi-file, large context, complex design        (devstral-2 / deepseek-v3)
 //   TierMax      — ensemble: 3 specialists in parallel + synthesis  (Opus-level output)
@@ -63,7 +63,9 @@ TierFast: {
 },
 TierCode: {
 // Coding-specialist models — best for implement/debug/refactor
-"devstral-small-2:24b", "devstral", "qwen3-coder-next", "ministral-3:14b",
+// Prioritise models with strong tool-calling and agentic capabilities.
+"qwen3-coder-next", "qwen3-coder:480b", "deepseek-v3.2", "glm-5",
+"devstral-2:123b", "devstral-small-2:24b", "devstral", "ministral-3:14b",
 "deepseek-coder-v2:16b", "deepseek-v3", "gpt-oss:120b",
 // local
 "qwen2.5-coder:32b", "qwen2.5-coder:14b", "deepseek-coder:6.7b",
@@ -86,9 +88,9 @@ TierHeavy: {
 },
 // TierMax uses ensemblePools — see EnsembleModels()
 TierMax: {
-"devstral-2:123b", "deepseek-v3", "deepseek-r1", "deepseek-v3.2", "kimi-k2-thinking",
-"qwen3-coder:480b", "cogito-2.1:671b", "mistral-large-3:675b",
-"devstral-small-2:24b", "qwen3-coder-next", "glm-5",
+"qwen3-coder:480b", "deepseek-v3.2", "devstral-2:123b", "deepseek-r1", "kimi-k2-thinking",
+"deepseek-v3", "cogito-2.1:671b", "mistral-large-3:675b",
+"qwen3-coder-next", "glm-5", "devstral-small-2:24b",
 },
 TierVision: {
 "qwen3-vl:235b-instruct", "qwen3-vl:235b", "gemini-3-flash-preview",
@@ -100,15 +102,15 @@ TierVision: {
 // ensemblePools: one model per pool is selected for parallel ensemble execution.
 // Pool 1 = coding specialist, Pool 2 = reasoning, Pool 3 = large general.
 var ensemblePools = [][]string{
-{"devstral-small-2:24b", "devstral", "qwen3-coder-next", "devstral-2:123b", "qwen2.5-coder:32b"},
-{"kimi-k2-thinking", "deepseek-r1", "deepseek-r1:70b", "cogito-2.1:671b", "deepseek-v3", "llama3.3:70b"},
-{"mistral-large-3:675b", "minimax-m2.5", "kimi-k2.5", "glm-5", "deepseek-v3.2", "gemma3:27b"},
+{"qwen3-coder-next", "qwen3-coder:480b", "devstral-2:123b", "devstral-small-2:24b", "devstral", "qwen2.5-coder:32b"},
+{"kimi-k2-thinking", "deepseek-r1", "deepseek-r1:70b", "cogito-2.1:671b", "deepseek-v3.2", "llama3.3:70b"},
+{"mistral-large-3:675b", "minimax-m2.5", "kimi-k2.5", "glm-5", "deepseek-v3", "gemma3:27b"},
 }
 
 var defaultModels = map[Tier]string{
 TierTrivial: "gemma3:4b",
 TierFast:    "gemma3:12b",
-TierCode:    "devstral-small-2:24b",
+TierCode:    "qwen3-coder-next",
 TierReason:  "kimi-k2-thinking",
 TierHeavy:   "devstral-2:123b",
 TierMax:     "devstral-2:123b", // single-model fallback when ensemble unavailable
