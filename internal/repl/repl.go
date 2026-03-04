@@ -541,15 +541,17 @@ func Run(cfg Config) error {
 		}
 		if needsAgent {
 			fmt.Printf("%s  ◆ fix agent [%s] — investigating with tools%s\n", colorDim, model, colorReset)
+			stopSpin := startSpinner(string(intent.TaskType))
 			agentCtx, agentCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			agentResp, agentPT, agentCT, agentOK := runFixAgent(agentCtx, client, model, messages, root)
 			agentCancel()
+			elapsed := stopSpin()
 
 			if agentOK {
 				turnTok := agentPT + agentCT
 				_, _, sessTotal := sess.Totals()
-				fmt.Printf("%s◈ Mantis%s  %s[fix-agent · +%d tok · session: %d]%s\n",
-					colorCopper+colorBold, colorReset, colorDim, turnTok, sessTotal+turnTok, colorReset)
+				fmt.Printf("%s◈ Mantis%s  %s[fix-agent · +%d tok · %.1fs · session: %d]%s\n",
+					colorCopper+colorBold, colorReset, colorDim, turnTok, elapsed.Seconds(), sessTotal+turnTok, colorReset)
 				renderResponse(stripInternalBlocks(stripFileBlocks(agentResp)))
 
 				wf := extractAndWriteFiles(agentResp, root)
