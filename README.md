@@ -1,259 +1,207 @@
 # Mantis
 
-**Free AI coding assistant. Better than Claude Code.**
+AI coding assistant with codebase intelligence and persistent project memory.
 
-No API key. No monthly bill. Runs on [Ollama Cloud](https://ollama.com/cloud) free tier or your local machine.
-Built for students with GitHub Education — you already have the tools, now you have the API.
+Mantis combines:
+- an interactive AI REPL (`mantis`)
+- graph-aware repo analysis (`init`, `impact`, `find`, `lint`, `workspace`)
+- runtime + git intelligence (`trace`, `hotspots`, `risky`, `coupling`, `intent`)
 
-```bash
-$ mantis
-```
+## Current Status
 
-That's it. You're in.
-
----
-
-## Why Mantis
-
-| | Claude Code | Copilot | Mantis |
-|---|---|---|---|
-| Cost | ~$30/mo API | $10/mo | **$0** |
-| Multimodal | ✓ | ✗ | ✓ |
-| Persistent memory | ✗ | ✗ | ✓ |
-| Knows your codebase | Partial | Partial | **Yes** |
-| Cross-repo graph | ✗ | ✗ | ✓ |
-| Hallucination check | ✗ | ✗ | ✓ |
-| Convention enforcement | ✗ | ✗ | ✓ |
-| Semantic embeddings | ✗ | ✗ | ✓ |
-| Token waste tracker | ✗ | ✗ | ✓ |
-| Local / offline | ✗ | ✗ | ✓ |
-
----
+- Active Go CLI project (`github.com/seedhire/mantis`)
+- Commands and examples in this README are aligned with current code in `cmd/mantis/main.go`
+- Test suite currently passes locally with `go test ./...` (run on 2026-03-04)
 
 ## Install
 
-### Homebrew (recommended)
+### Homebrew
 ```bash
 brew install seedhire/tap/mantis
 ```
 
-### curl script
+### Install script
 ```bash
-curl -fsSL https://raw.githubusercontent.com/SeedHire/Mantis/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/seedhire/mantis/main/install.sh | sh
 ```
 
-### go install
+### Go install
 ```bash
 go install github.com/seedhire/mantis/cmd/mantis@latest
 ```
 
-### Build from source (local)
+### Build from source
 ```bash
-git clone https://github.com/SeedHire/Mantis
+git clone https://github.com/seedhire/mantis
 cd Mantis
 go build -o mantis ./cmd/mantis
-sudo mv mantis /usr/local/bin/mantis
 ```
 
-Or use the Makefile:
-```bash
-make install        # builds and installs to /usr/local/bin
-```
-
----
-
-## Uninstall
-
-### Remove Homebrew install
-```bash
-brew uninstall mantis
-brew untap seedhire/tap          # optional — removes the tap entirely
-```
-
-### Remove local / go install build
-```bash
-# if installed to /usr/local/bin
-sudo rm -f /usr/local/bin/mantis
-
-# if installed via go install
-rm -f ~/go/bin/mantis
-
-# remove all Mantis project memory from a repo (optional)
-rm -rf .mantis .mantisrc.yml
-```
-
----
-
-## Usage
+## Quick Start
 
 ```bash
-mantis                          # open interactive AI session
-mantis "why does auth break?"   # one-shot question
-mantis --model heavy "redesign the payments module"
-mantis --image screenshot.png   # multimodal — paste a screenshot
+# 1) index your repo (creates .mantis/ + graph DB)
+mantis init
+
+# 2) open interactive assistant
+mantis
+
+# 3) ask one-shot question
+mantis "why is checkout timing out?"
 ```
 
-### Slash commands inside the session
-```
-/file src/auth.go    inject a file into context
-/vision error.png    analyze a screenshot or diagram
-/reset               clear context (brain memory kept)
-/cost                token savings report
-/brain               view project memory
-/save                save session to memory now
-/reject <reason>     log last suggestion as rejected
-/decision <text>     log an architecture decision
-/quit                exit
-```
+First interactive run triggers setup:
+- GitHub login is required
+- Ollama Cloud API key is optional (local Ollama is supported)
 
----
+## Core Workflows
 
-## How it works
-
-Mantis runs a **7-tier model router** — every message is classified by intent and sent to the best available model:
-
-| Tier | Used for | Example models |
-|---|---|---|
-| Trivial | one-liners, definitions | gemma3:4b |
-| Fast | short code questions | gemma3:12b |
-| Code | implement, debug, refactor | devstral-small-2:24b |
-| Reason | architecture, deep analysis | kimi-k2-thinking |
-| Heavy | multi-file, complex design | devstral-2:123b |
-| Max | ensemble: 3 specialists + synthesis | (auto-selected trio) |
-| Vision | screenshots, diagrams | qwen3-vl |
-
-Models are auto-resolved from your Ollama model list — no manual config needed. Quantized variants are preferred for speed tiers.
-
-### Project memory
-On first run, Mantis creates `.mantis/` in your project:
-```
-.mantis/
-├── BRAIN.md          ← rolling project summary, updated each session
-├── CONVENTIONS.md    ← your architecture rules (auto-enforced)
-├── DECISIONS.log     ← timestamped decisions
-├── REJECTED.md       ← approaches tried and failed (AI won't repeat them)
-├── GROUND_TRUTH.json ← live function signatures — prevents hallucination
-└── embeddings.db     ← semantic memory (Ollama + SQLite vector search)
-```
-
-All plain text (except embeddings.db). Human-editable. Committable.
-
-### Codebase intelligence
-Run `mantis init` once to build a live AST dependency graph. The AI then:
-- Bundles only the relevant files for each question (multi-signal scoring)
-- Runs impact analysis before proposing edits
-- Checks AI output against your real function signatures
-- Enforces your architecture rules on every response
-- Uses multi-pass reasoning for complex questions (analysis → solution)
-- Retrieves semantically relevant context from past sessions
-
+### 1) Chat + code in terminal
 ```bash
-mantis init    # index the project (run once)
+mantis
+mantis --image error.png "what is wrong in this UI?"
+mantis --continue
+mantis --plan "build auth + session management"
 ```
 
----
+### 2) Graph-aware change safety
+```bash
+mantis init
+mantis find processPayment
+mantis impact processPayment --risk
+mantis context processPayment --depth 3 --tokens 8000
+mantis lint --strict --ci
+```
+
+### 3) Git history intelligence
+```bash
+mantis hotspots --days 90
+mantis risky --days 90
+mantis coupling src/checkout/service.ts
+mantis intent src/checkout/service.ts
+mantis spec-gaps
+mantis todos
+```
+
+### 4) Runtime trace intelligence
+```bash
+mantis trace ingest traces.json
+mantis trace hotpaths
+mantis trace cold
+mantis trace weight processPayment
+```
+
+### 5) Multi-repo workspace analysis
+```bash
+mantis workspace init ~/api ~/frontend ~/shared
+mantis workspace find UserService
+mantis workspace impact processPayment
+mantis workspace stats
+```
+
+## Interactive Slash Commands
+
+In `mantis` REPL:
+
+- `/help` command list
+- `/init` generate `MANTIS.md` from codebase scan
+- `/file <path>` inject file content
+- `/vision <path>` attach image for multimodal prompt
+- `/fetch <url>` fetch webpage into context
+- `/search <query>` web search (requires `MANTIS_TAVILY_KEY`)
+- `/plan` toggle plan-before-code mode
+- `/context` show token budget breakdown
+- `/brain` show stored memory
+- `/save` save current session summary to memory
+- `/decision <text>` append architecture decision
+- `/reject <reason>` log rejected approach
+- `/test [pkg]` iterative test-fix loop
+- `/commit` generate + preview commit message flow
+- `/cost`, `/stats`, `/models`, `/telemetry on|off`, `/version`, `/quit`
 
 ## CLI Commands
 
-### Intelligence
+Top-level commands:
+
+- `init`, `watch`, `context`
+- `find`, `impact`, `dead`, `circular`, `graph`, `lint`, `tui`
+- `hotspots`, `risky`, `coupling`, `intent`, `spec-gaps`, `todos`
+- `workspace` (`init`, `find`, `impact`, `stats`)
+- `trace` (`ingest`, `hotpaths`, `cold`, `weight`)
+- `handoff`
+
+Global flags:
+
+- `--model <tier>` force routing tier (`trivial|fast|code|reason|heavy|max|vision`)
+- `--budget <tokens>` max session token budget
+- `--image <path>` attach image to query
+- `--plan` pause after plan stage before implementation
+- `--continue` resume most recent session
+
+## Project Memory Files
+
+Running `mantis init` creates `.mantis/` in your repo. Common files:
+
+- `BRAIN.md` rolling context summary
+- `DECISIONS.log` architecture decisions
+- `REJECTED.md` rejected approaches
+- `CONVENTIONS.md` project rules used in response checks
+- `GROUND_TRUTH.json` symbol/signature snapshot for verification
+- `graph.db` dependency graph database
+- `embeddings.db` semantic memory index
+- `sessions/` saved session data
+
+## Configuration
+
+### `.mantisrc.yml`
+
+Used by `mantis lint` for architecture rules.
+
+Example:
+
+```yaml
+version: 1
+rules:
+  - name: no-circular-dependencies
+    type: built_in
+    severity: error
+```
+
+### Environment variables
+
+- `OLLAMA_API_KEY` optional Ollama Cloud key (local Ollama works without it)
+- `MANTIS_TAVILY_KEY` enables `/search` web search
+- `SUPABASE_ANON_KEY` optional telemetry/setup tracking key at build/runtime
+
+## Development
+
 ```bash
-mantis hotspots            # files with highest churn (change frequency)
-mantis risky               # high-risk files: churn × many authors
-mantis coupling [path]     # files that always change together
-mantis intent <path>       # commit intent timeline (feat/fix/refactor)
-mantis todos               # scan for TODO/FIXME/HACK across codebase
-mantis spec-gaps           # detect mismatches between commit intent and code
+make build      # build ./bin/mantis
+make run        # build + run
+make test       # go test ./...
+make lint       # go vet ./...
+make install    # go install with ldflags
 ```
 
-### Graph analysis
+Direct command:
+
 ```bash
-mantis init                # build dependency graph
-mantis find <symbol>       # locate a function/class/type
-mantis impact <symbol>     # trace what depends on a symbol
-mantis dead                # find unreferenced code
-mantis circular            # detect circular dependencies
-mantis graph               # visualize dependency graph
-mantis lint                # check architecture rules
+go test ./...
 ```
 
-### Cross-repo workspace
-```bash
-mantis workspace init ~/api ~/frontend ~/shared-lib
-mantis workspace find <symbol>    # search across all repos
-mantis workspace impact <symbol>  # cross-repo impact analysis
-mantis workspace stats            # per-repo statistics
-```
+## Architecture Overview
 
-### Runtime trace analysis
-```bash
-mantis trace ingest <file>        # ingest OTLP JSON, pprof text, or custom JSON
-mantis trace hotpaths             # top functions by runtime call frequency
-mantis trace cold                 # structurally important but never called at runtime
-mantis trace weight <symbol>      # runtime-weighted impact (structural depth × call freq)
-```
-
-### Session management
-```bash
-mantis handoff             # generate HANDOFF.md for async collaboration
-```
-
----
-
-## Token savings report
-
-At the end of every session:
-```
-╭──────────────────────────────────────────────╮
-│  SESSION SUMMARY — mantis                    │
-├──────────────────────────────────────────────┤
-│  Total tokens      14,832                    │
-│  Route  fast×3  code×7  heavy×1              │
-├──────────────────────────────────────────────┤
-│  WHAT THIS WOULD HAVE COST                   │
-│  GPT-4o             $0.22                    │
-│  Claude Sonnet      $0.18                    │
-│  Claude Opus        $2.40                    │
-│  Mantis cost        $0.00 ✓                  │
-╰──────────────────────────────────────────────╯
-```
-
----
-
-## Project structure
-
-```
-cmd/mantis/          entry point + all CLI commands
-internal/
-  ollama/            Ollama Cloud + local client (streaming + embeddings)
-  router/            7-tier intent classifier + model selector + task templates
-  repl/              interactive AI session (multi-pass reasoning, compression)
-  brain/             persistent project memory (.mantis/)
-  truth/             live function signature index (GROUND_TRUTH.json)
-  verify/            hallucination checker + convention enforcement
-  session/           token tracking + cost report
-  usage/             free-tier usage tracking
-  nl/                NLP dispatcher → codebase intelligence tools
-  graph/             AST dependency graph (SQLite) + cross-repo workspace
-  intel/             temporal analysis, intent gaps, runtime traces, impact
-  parser/            tree-sitter parsers (Go, TypeScript, Python)
-  linter/            architecture rule enforcement
-  tui/               Bubbletea dashboard
-  context/           surgical context bundler (multi-signal scoring)
-  viz/               D3 graph visualizer
-  embeddings/        semantic memory (Ollama embed + SQLite cosine search)
-```
-
----
-
-## GitHub Education
-
-If you have GitHub Education, you already have Claude Pro and Copilot in the terminal.
-Mantis is the missing piece — it gives you the **API layer** those tools don't expose,
-for free, with better codebase understanding than either.
-
----
+- `cmd/mantis` Cobra CLI and command wiring
+- `internal/repl` interactive runtime, slash commands, routing, streaming
+- `internal/router` 7-tier intent routing + model resolution + ensemble pools
+- `internal/brain` persistent memory files in `.mantis/`
+- `internal/graph` AST graph builder/query + workspace graph
+- `internal/intel` impact, dead code, circular, temporal, runtime trace analysis
+- `internal/context` token-budget context bundling
+- `internal/verify` symbol/convention verification and correction loop
+- `internal/ollama` model client for local/cloud inference and embeddings
+- `internal/tui` Bubble Tea dashboard
 
 ## License
 
 MIT
-

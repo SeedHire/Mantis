@@ -6,12 +6,11 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -40,6 +39,7 @@ import (
 	"github.com/seedhire/mantis/internal/telemetry"
 	"github.com/seedhire/mantis/internal/truth"
 	"github.com/seedhire/mantis/internal/usage"
+	"github.com/seedhire/mantis/internal/web"
 	"github.com/seedhire/mantis/internal/verify"
 )
 
@@ -193,6 +193,9 @@ func Run(cfg Config) error {
 		defer dispatcher.Close()
 	}
 
+	// Web fetcher — Jina Reader with cache and raw fallback.
+	webFetcher := web.NewFetcher()
+
 	// Session tracker.
 	sess := session.New()
 	usageTracker := usage.New()
@@ -262,7 +265,8 @@ func Run(cfg Config) error {
 		}
 	}
 
-	fmt.Println() // spacing after banner
+	// One-time command hint — shown once at startup, not repeated every turn.
+	fmt.Printf("%s  /help · /file · /test · /brain · /quit%s\n\n", colorDim, colorReset)
 
 	// One-shot mode: mantis "question"
 	if cfg.InitialQuery != "" {
@@ -287,12 +291,19 @@ func Run(cfg Config) error {
 		readline.PcItem("/plan"),
 		readline.PcItem("/context"),
 		readline.PcItem("/fetch"),
+		readline.PcItem("/search"),
+		readline.PcItem("/test"),
+		readline.PcItem("/commit"),
 		readline.PcItem("/quit"),
 	)
 
+	// Show project name in prompt: "projectname ❯ "
+	projectName := filepath.Base(root)
+	idlePrompt := "\033[38;5;244m" + projectName + "\033[0m \033[38;5;214m❯\033[0m "
+
 	histFile := filepath.Join(os.Getenv("HOME"), ".mantis", "history")
 	rl, err := readline.NewEx(&readline.Config{
-		Prompt:            "\033[38;5;214m❯\033[0m ",
+		Prompt:            idlePrompt,
 		HistoryFile:       histFile,
 		AutoComplete:      slashCompleter,
 		InterruptPrompt:   "^C",
@@ -301,31 +312,77 @@ func Run(cfg Config) error {
 	})
 	if err != nil {
 		// Fallback to plain scanner if readline init fails (e.g. non-TTY).
-		return runWithScanner(cfg, client, sess, b, dispatcher, messages, truthWriter, usageTracker, routerStore)
+		return runWithScanner(cfg, client, sess, b, dispatcher, messages, truthWriter, usageTracker, routerStore, webFetcher)
 	}
 	defer rl.Close()
 
-	// Ctrl+C → graceful shutdown with session report.
+	// ── Soft-interrupt state ─────────────────────────────────────────────────
+	// Ctrl+C during generation cancels the current stream (soft).
+	// Ctrl+C when idle: first press shows hint; second press within 2s exits.
+	var activeCancelMu sync.Mutex
+	var activeCancelFn context.CancelFunc
+	var lastInterruptAt time.Time
+
+	setActiveCancel := func(cancel context.CancelFunc) {
+		activeCancelMu.Lock()
+		activeCancelFn = cancel
+		activeCancelMu.Unlock()
+	}
+	clearActiveCancel := func() {
+		activeCancelMu.Lock()
+		activeCancelFn = nil
+		activeCancelMu.Unlock()
+	}
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
-		<-sigCh
-		fmt.Println()
-		tlog.Flush()
-		endSession(sess, b, messages, embStore)
-		rl.Close()
-		os.Exit(0)
+		for sig := range sigCh {
+			if sig == syscall.SIGTERM {
+				// Hard exit on SIGTERM (process manager / kill request).
+				fmt.Println()
+				tlog.Flush()
+				endSession(sess, b, messages, embStore)
+				rl.Close()
+				os.Exit(0)
+			}
+			// SIGINT (Ctrl+C) — soft cancel.
+			activeCancelMu.Lock()
+			cancel := activeCancelFn
+			activeCancelMu.Unlock()
+
+			if cancel != nil {
+				// Generation is running — cancel it and return to prompt.
+				cancel()
+				fmt.Printf("\r\033[K%s  ✗ cancelled%s\n", colorDim, colorReset)
+			} else {
+				// Idle at prompt — two-tap to exit.
+				if time.Since(lastInterruptAt) < 2*time.Second {
+					fmt.Println()
+					tlog.Flush()
+					endSession(sess, b, messages, embStore)
+					rl.Close()
+					os.Exit(0)
+				}
+				lastInterruptAt = time.Now()
+				fmt.Printf("\n%s  Ctrl+C again to exit%s\n", colorDim, colorReset)
+			}
+		}
 	}()
 
 	turn := 0
 	planMode := cfg.PlanMode
 	for {
 		printSep()
-		fmt.Printf("%s  /help  /cost  /brain  /quit%s\n", colorDim, colorReset)
 		line, err := rl.Readline()
 		if err == readline.ErrInterrupt {
-			if len(line) == 0 {
+			// Two-tap: first Ctrl+C shows hint, second within 2s exits.
+			if time.Since(lastInterruptAt) < 2*time.Second {
 				break
+			}
+			lastInterruptAt = time.Now()
+			if len(line) == 0 {
+				fmt.Printf("%s  Ctrl+C again to exit%s\n", colorDim, colorReset)
 			}
 			continue
 		} else if err == io.EOF {
@@ -333,7 +390,6 @@ func Run(cfg Config) error {
 		}
 		input := strings.TrimSpace(line)
 		if input == "" {
-			fmt.Printf("%s  (nothing to send — type a message or /help)%s\n", colorDim, colorReset)
 			continue
 		}
 
@@ -342,7 +398,7 @@ func Run(cfg Config) error {
 
 		// Slash commands.
 		if strings.HasPrefix(input, "/") {
-			if quit := handleSlashCommand(input, sess, b, &messages, client, &brainContext, &planMode, cfg); quit {
+			if quit := handleSlashCommand(input, sess, b, &messages, client, &brainContext, &planMode, cfg, webFetcher); quit {
 				break
 			}
 			continue
@@ -369,6 +425,8 @@ func Run(cfg Config) error {
 		turnStart := time.Now()
 		showRouting(intent, model, turn, pipeline.ShouldRun(intent, input))
 		printSep()
+		// Update prompt to show active tier badge while model generates.
+		rl.SetPrompt(tierPromptStr(intent.Tier))
 
 		// Update system prompt for this tier's reasoning depth.
 		// Skill budget scales with both tier AND request scope (word count).
@@ -469,7 +527,12 @@ func Run(cfg Config) error {
 			cfg.ImagePath = ""
 		} else if toolCtx == "" {
 			// Lazy context injection: wrap user message with README/symbols when relevant.
-			if ctxMsg := contextMessageFor(input, root, brainContext, truthWriter); ctxMsg != nil {
+			// Get graph querier if available for graph context injection.
+			var graphQuerier *graph.Querier
+			if dispatcher != nil && dispatcher.IsAvailable() {
+				graphQuerier = dispatcher.Querier()
+			}
+			if ctxMsg := contextMessageFor(input, root, brainContext, truthWriter, graphQuerier); ctxMsg != nil {
 				// Merge context injection with enriched userContent (build output, project files).
 				if msg, ok := ctxMsg.(ollama.Message); ok {
 					msg.Content = strings.Replace(msg.Content, "\n\nNow answer: "+input, "\n\nNow answer: "+userContent, 1)
@@ -502,12 +565,14 @@ func Run(cfg Config) error {
 						agent.ShouldRunMultiAgent(impact) {
 						toolkit := agent.NewToolkit(root, querier, embStore)
 						agentCtx, agentCancel := context.WithTimeout(context.Background(), 15*time.Minute)
+						setActiveCancel(agentCancel)
 						combined, agentErr := agent.Run(
 							agentCtx, input, impact, toolkit, client,
 							buildSystemPrompt(brainContext, tierSkills, router.TierCode),
 							mantisDir,
 						)
 						agentCancel()
+						clearActiveCancel()
 						if agentErr == nil {
 							fmt.Printf("%s◈ Mantis%s %s[multi-agent · %d files · %d packages]%s\n",
 								colorCopper+colorBold, colorReset, colorDim,
@@ -519,12 +584,32 @@ func Run(cfg Config) error {
 							}
 							messages = append(messages, ollama.Message{Role: "assistant", Content: combined})
 							sess.Add(model, intent.Tier, 0, 0, hasImage)
+							tlog.LogChat(telemetry.ChatTurn{
+								SessionID:    sessID,
+								Turn:         turn,
+								Tier:         intent.Tier.String(),
+								Model:        model,
+								UserMsg:      input,
+								AssistantMsg: combined,
+							})
 							continue
 						}
 						fmt.Printf("%s  [multi-agent failed: %v — falling back]%s\n\n", colorRed, agentErr, colorReset)
 					}
 				}
 			}
+		}
+
+		// ── Iterative test loop for test-related fix requests ────────────────
+		// Detects "fix tests", "tests are failing", etc. and routes to the
+		// test loop instead of the generic fix agent.
+		if intent.TaskType == "fix" && intent.Tier == router.TierCode && isTestFixRequest(input) {
+			fmt.Printf("%s  ◆ test loop — running iterative test→fix cycle%s\n", colorDim, colorReset)
+			packages := extractTestPackage(input)
+			testRoot, _ := os.Getwd()
+		runTestLoopCommand(testRoot, client, packages)
+			sess.Add(model, intent.Tier, 0, 0, hasImage)
+			continue
 		}
 
 		// ── Single-agent fix loop for code-tier fix/debug/deploy tasks ──────
@@ -584,6 +669,17 @@ func Run(cfg Config) error {
 					FilesWritten: writtenPaths,
 					InputSnippet: input,
 				})
+				tlog.LogChat(telemetry.ChatTurn{
+					SessionID:    sessID,
+					Turn:         turn,
+					Tier:         intent.Tier.String(),
+					Model:        model,
+					UserMsg:      input,
+					AssistantMsg: agentResp,
+					PromptTok:    agentPT,
+					ComplTok:     agentCT,
+					LatencyMS:    time.Since(turnStart).Milliseconds(),
+				})
 				if warn := usageTracker.Add(turnTok, false, hasImage); warn != "" {
 					fmt.Printf("%s%s%s\n\n", colorRed, warn, colorReset)
 				}
@@ -599,6 +695,7 @@ func Run(cfg Config) error {
 		if pipeline.ShouldRun(intent, input) {
 			pipelineOpts := pipeline.Options{AvailableModels: availableModels, Root: root, PlanOnly: planMode}
 			pipelineCtx, pipelineCancel := context.WithTimeout(context.Background(), 20*time.Minute)
+			setActiveCancel(pipelineCancel)
 			sysPrompt := buildSystemPrompt(brainContext, tierSkills, router.TierCode)
 			pRes, pErr := pipeline.Run(
 				pipelineCtx, client, input,
@@ -606,6 +703,7 @@ func Run(cfg Config) error {
 				pipelineOpts,
 			)
 			pipelineCancel()
+			clearActiveCancel()
 
 			if pErr != nil {
 				// If the pipeline captured partial code output (e.g. timeout after
@@ -653,12 +751,14 @@ func Run(cfg Config) error {
 				// User approved — continue with CODE+TESTS stages.
 				fmt.Printf("%s● plan approved — starting implementation%s\n", colorGold, colorReset)
 				contCtx, contCancel := context.WithTimeout(context.Background(), 20*time.Minute)
+				setActiveCancel(contCancel)
 				pRes, pErr = pipeline.ContinuePlan(
 					contCtx, client, input, pRes.PlanText,
 					sysPrompt,
 					pipeline.Options{AvailableModels: availableModels, Root: root},
 				)
 				contCancel()
+				clearActiveCancel()
 				if pErr != nil {
 					fmt.Printf("%s  [implementation failed: %v]%s\n\n", colorRed, pErr, colorReset)
 					continue
@@ -705,6 +805,17 @@ func Run(cfg Config) error {
 					FilesWritten: pipeWrittenPaths,
 					InputSnippet: input,
 				})
+				tlog.LogChat(telemetry.ChatTurn{
+					SessionID:    sessID,
+					Turn:         turn,
+					Tier:         intent.Tier.String(),
+					Model:        model,
+					UserMsg:      input,
+					AssistantMsg: pRes.Combined,
+					PromptTok:    pRes.PromptTok,
+					ComplTok:     pRes.ComplTok,
+					LatencyMS:    time.Since(turnStart).Milliseconds(),
+				})
 				if warn := usageTracker.Add(totalTok, true, hasImage); warn != "" {
 					fmt.Printf("%s%s%s\n\n", colorRed, warn, colorReset)
 				}
@@ -722,8 +833,10 @@ func Run(cfg Config) error {
 		if intent.Tier == router.TierReason || intent.Tier == router.TierHeavy {
 			// BUG-06: pass a per-turn context so Ctrl+C can cancel the analysis pass.
 			turnCtx, turnCancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			setActiveCancel(turnCancel)
 			messages = multiPassReasoning(turnCtx, client, model, intent.Tier, messages)
 			turnCancel()
+			clearActiveCancel()
 		}
 
 		// Show memory retrieval indicator if relevant chunks were found.
@@ -731,9 +844,13 @@ func Run(cfg Config) error {
 			fmt.Printf("%s  ◉ %d memory chunk(s)%s\n", colorDim, memChunksFound, colorReset)
 		}
 
-		// Show spinner while model generates, then render formatted output.
+		// Show spinner while waiting for first token; then stream tokens live to stdout.
+		// After completion, erase raw output and glamour-render the full response.
 		stopSpin := startSpinner(string(intent.TaskType))
+		sp := newStreamPrinter(stopSpin)
+
 		streamCtx, streamCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		setActiveCancel(streamCancel)
 		var rb strings.Builder
 		var promptTok, completionTok int
 		var streamErr error
@@ -741,12 +858,23 @@ func Run(cfg Config) error {
 		if intent.Tier == router.TierMax {
 			promptTok, completionTok, streamErr = streamEnsemble(streamCtx, client, availableModels, messages, &rb)
 		} else {
-			promptTok, completionTok, streamErr = streamWithFallback(streamCtx, client, model, intent.Tier, messages, &rb)
+			promptTok, completionTok, streamErr = streamWithFallback(streamCtx, client, model, intent.Tier, messages, &rb, sp.onChunk)
 		}
 		streamCancel()
-		spinElapsed := stopSpin()
+		clearActiveCancel()
+		spinElapsed := sp.stop()
+		// If spinner was never stopped (TierMax or no live chunks), stop it now.
+		if !sp.started {
+			spinElapsed = stopSpin()
+		}
 
 		if streamErr != nil {
+			rl.SetPrompt(idlePrompt)
+			messages = messages[:len(messages)-1]
+			// context.Canceled = user pressed Ctrl+C — cancel message already shown.
+			if errors.Is(streamErr, context.Canceled) {
+				continue
+			}
 			fmt.Printf("\n%s⚠ %v%s\n\n", colorRed, streamErr, colorReset)
 			tlog.Log(telemetry.Event{
 				SessionID:    sessID,
@@ -759,15 +887,19 @@ func Run(cfg Config) error {
 				InputSnippet: input,
 				Error:        streamErr.Error(),
 			})
-			messages = messages[:len(messages)-1]
 			continue
 		}
+
+		// Reset prompt back to plain ❯ after response.
+		rl.SetPrompt(idlePrompt)
 
 		// Render the full response as formatted markdown.
 		turnTok := promptTok + completionTok
 		_, _, sessTotal := sess.Totals()
-		fmt.Printf("%s◈ Mantis%s  %s[+%d tok · %.1fs · session: %d]%s\n",
-			colorCopper+colorBold, colorReset, colorDim, turnTok, spinElapsed.Seconds(), sessTotal+turnTok, colorReset)
+		fmt.Printf("%s◈ Mantis%s  %s%s%s  %s+%d tok · %.1fs · session: %d%s\n",
+			colorCopper+colorBold, colorReset,
+			colorCopper, model, colorReset,
+			colorDim, turnTok, spinElapsed.Seconds(), sessTotal+turnTok, colorReset)
 		renderResponse(stripInternalBlocks(stripFileBlocks(rb.String())))
 
 		// Write any file code blocks from the response to disk.
@@ -810,49 +942,80 @@ func Run(cfg Config) error {
 			FilesWritten: writtenPaths,
 			InputSnippet: input,
 		})
+		tlog.LogChat(telemetry.ChatTurn{
+			SessionID:    sessID,
+			Turn:         turn,
+			Tier:         intent.Tier.String(),
+			Model:        model,
+			UserMsg:      input,
+			AssistantMsg: rb.String(),
+			PromptTok:    promptTok,
+			ComplTok:     completionTok,
+			LatencyMS:    time.Since(turnStart).Milliseconds(),
+		})
 
 		if warn := usageTracker.Add(promptTok+completionTok,
 			intent.Tier == router.TierHeavy, hasImage); warn != "" {
 			fmt.Printf("%s%s%s\n\n", colorRed, warn, colorReset)
 		}
 
-		// Verify response against ground truth — re-prompt once on hallucination.
-		if vr := verify.Check(rb.String(), truthWriter); !vr.Clean {
-			// Attempt self-healing: re-prompt with corrections.
-			corrections := verify.SuggestCorrections(vr.UnknownSymbols, truthWriter)
-			if corrections != "" {
-				fmt.Printf("%s  [verifying symbols… re-prompting for accuracy]%s\n", colorDim, colorReset)
+		// Detect syntax errors in code blocks via tree-sitter.
+		if syntaxErrs := verify.DetectSyntaxErrors(rb.String()); len(syntaxErrs) > 0 {
+			fmt.Printf("%s⚠ Syntax errors detected in generated code:%s\n", colorRed, colorReset)
+			for _, se := range syntaxErrs {
+				fmt.Printf("%s  line %d:%d — %s%s\n", colorRed, se.Line, se.Column, se.Message, colorReset)
+			}
+			fmt.Println()
+		}
+
+		// Verify response against ground truth — retry up to 3 times for hallucinations.
+		if vr := verify.CheckWithAST(rb.String(), truthWriter); !vr.Clean {
+			prevUnknown := strings.Join(vr.UnknownSymbols, ",")
+			const maxRetries = 3
+			for retry := 0; retry < maxRetries; retry++ {
+				corrections := verify.SuggestCorrections(vr.UnknownSymbols, truthWriter)
+				if corrections == "" {
+					fmt.Printf("%s%s%s\n\n", colorRed, vr.Warning, colorReset)
+					break
+				}
+				fmt.Printf("%s  [verifying symbols… re-prompting for accuracy (%d/%d)]%s\n",
+					colorDim, retry+1, maxRetries, colorReset)
 				correctionMsg := fmt.Sprintf(
 					"Your previous answer referenced symbols that don't exist in this project: %s\n"+
 						"The actual symbols in this codebase are:\n%s\n"+
 						"Please correct your answer using only real symbols.",
 					strings.Join(vr.UnknownSymbols, ", "), corrections)
 
-				// BUG-04: copy slice before append to avoid aliasing the backing array.
 				retryMsgs := append(append([]interface{}{}, messages...), ollama.Message{Role: "user", Content: correctionMsg})
 				var rb2 strings.Builder
 				retryCtx, retryCancel := context.WithTimeout(context.Background(), 3*time.Minute)
 				pt2, ct2, err2 := streamWithFallback(retryCtx, client, model, intent.Tier, retryMsgs, &rb2)
 				retryCancel()
 
-				if err2 == nil && strings.TrimSpace(rb2.String()) != "" {
-					// Replace original response with corrected one.
-					messages[len(messages)-1] = ollama.Message{Role: "assistant", Content: rb2.String()}
-					sess.Add(model, intent.Tier, pt2, ct2, false)
-					fmt.Printf("%s◈ Mantis%s %s(corrected)%s\n", colorCopper+colorBold, colorReset, colorDim, colorReset)
-					renderResponse(stripInternalBlocks(stripFileBlocks(rb2.String())))
-					if wf := extractAndWriteFiles(rb2.String(), root); len(wf) > 0 {
-						printWrittenFiles(wf)
-					}
-
-					if vr2 := verify.Check(rb2.String(), truthWriter); !vr2.Clean {
-						fmt.Printf("%s%s%s\n\n", colorRed, vr2.Warning, colorReset)
-					}
-				} else {
+				if err2 != nil || strings.TrimSpace(rb2.String()) == "" {
 					fmt.Printf("%s%s%s\n\n", colorRed, vr.Warning, colorReset)
+					break
 				}
-			} else {
-				fmt.Printf("%s%s%s\n\n", colorRed, vr.Warning, colorReset)
+
+				messages[len(messages)-1] = ollama.Message{Role: "assistant", Content: rb2.String()}
+				sess.Add(model, intent.Tier, pt2, ct2, false)
+				fmt.Printf("%s◈ Mantis%s %s(corrected)%s\n", colorCopper+colorBold, colorReset, colorDim, colorReset)
+				renderResponse(stripInternalBlocks(stripFileBlocks(rb2.String())))
+				if wf := extractAndWriteFiles(rb2.String(), root); len(wf) > 0 {
+					printWrittenFiles(wf)
+				}
+
+				vr = verify.CheckWithAST(rb2.String(), truthWriter)
+				if vr.Clean {
+					break
+				}
+				// Stuck detection: same unknown symbols after retry → stop
+				currentUnknown := strings.Join(vr.UnknownSymbols, ",")
+				if currentUnknown == prevUnknown {
+					fmt.Printf("%s%s%s\n\n", colorRed, vr.Warning, colorReset)
+					break
+				}
+				prevUnknown = currentUnknown
 			}
 		}
 
@@ -956,7 +1119,13 @@ func runOnce(cfg Config, client *ollama.Client, sess *session.Session,
 	*messages = append(*messages, ollama.Message{Role: "assistant", Content: response})
 	sess.Add(model, intent.Tier, promptTok, completionTok, hasImage)
 	_ = ut.Add(promptTok+completionTok, intent.Tier == router.TierHeavy, hasImage)
-	if vr := verify.Check(response, tw); !vr.Clean {
+	if syntaxErrs := verify.DetectSyntaxErrors(response); len(syntaxErrs) > 0 {
+		fmt.Printf("\n%s⚠ Syntax errors detected:%s\n", colorRed, colorReset)
+		for _, se := range syntaxErrs {
+			fmt.Printf("%s  line %d:%d — %s%s\n", colorRed, se.Line, se.Column, se.Message, colorReset)
+		}
+	}
+	if vr := verify.CheckWithAST(response, tw); !vr.Clean {
 		fmt.Printf("\n%s%s%s\n", colorRed, vr.Warning, colorReset)
 	}
 	fmt.Println(sess.Report())
@@ -964,7 +1133,7 @@ func runOnce(cfg Config, client *ollama.Client, sess *session.Session,
 }
 
 func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
-	messages *[]interface{}, client *ollama.Client, brainContext *string, planMode *bool, cfg Config) (quit bool) {
+	messages *[]interface{}, client *ollama.Client, brainContext *string, planMode *bool, cfg Config, webFetcher *web.Fetcher) (quit bool) {
 
 	parts := strings.Fields(input)
 	cmd := parts[0]
@@ -1107,14 +1276,64 @@ func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
 		if len(parts) < 2 {
 			fmt.Printf("%susage: /fetch <url>%s\n\n", colorDim, colorReset)
 		} else {
-			content := fetchURL(parts[1])
-			if content != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			content, err := webFetcher.Fetch(ctx, parts[1])
+			cancel()
+			if err != nil {
+				fmt.Printf("%s✗ fetch failed: %v%s\n\n", colorRed, err, colorReset)
+			} else if content != "" {
 				*messages = append(*messages, ollama.Message{
 					Role: "user", Content: "<web_context url=\"" + parts[1] + "\">\n" + content + "\n</web_context>",
 				})
 				fmt.Printf("%s● fetched %s — injected into context%s\n\n", colorGold, parts[1], colorReset)
 			}
 		}
+	case "/search":
+		if len(parts) < 2 {
+			fmt.Printf("%susage: /search <query>%s\n\n", colorDim, colorReset)
+		} else {
+			query := strings.Join(parts[1:], " ")
+			if !web.HasSearchKey() {
+				fmt.Printf("%s● web search requires MANTIS_TAVILY_KEY%s\n", colorGold, colorReset)
+				fmt.Printf("%s  get a free key at https://tavily.com%s\n\n", colorDim, colorReset)
+			} else {
+				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				results, err := web.Search(ctx, query)
+				cancel()
+				if err != nil {
+					fmt.Printf("%s✗ search failed: %v%s\n\n", colorRed, err, colorReset)
+				} else if len(results) == 0 {
+					fmt.Printf("%sno results found%s\n\n", colorDim, colorReset)
+				} else {
+					var sb strings.Builder
+					for i, r := range results {
+						fmt.Printf("  %s%d.%s %s\n", colorGold, i+1, colorReset, r.Title)
+						fmt.Printf("     %s%s%s\n", colorDim, r.URL, colorReset)
+						if r.Snippet != "" {
+							snippet := r.Snippet
+							if len(snippet) > 120 {
+								snippet = snippet[:120] + "..."
+							}
+							fmt.Printf("     %s%s%s\n", colorDim, snippet, colorReset)
+						}
+						sb.WriteString(fmt.Sprintf("%d. [%s](%s)\n   %s\n\n", i+1, r.Title, r.URL, r.Snippet))
+					}
+					fmt.Println()
+					*messages = append(*messages, ollama.Message{
+						Role: "user", Content: "<search_results query=\"" + query + "\">\n" + sb.String() + "</search_results>",
+					})
+				}
+			}
+		}
+	case "/test":
+		packages := ""
+		if len(parts) >= 2 {
+			packages = strings.Join(parts[1:], " ")
+		}
+		testRoot, _ := os.Getwd()
+		runTestLoopCommand(testRoot, client, packages)
+	case "/commit":
+		handleCommitCommand(client, cfg)
 	default:
 		fmt.Printf("%sunknown command — /help%s\n\n", colorDim, colorReset)
 	}
@@ -1193,39 +1412,163 @@ func handleContextCommand(sess *session.Session, messages []interface{}, brainCt
 	}
 }
 
-// fetchURL retrieves a web page, strips HTML, and returns truncated plain text.
-func fetchURL(rawURL string) string {
-	if !strings.HasPrefix(rawURL, "http://") && !strings.HasPrefix(rawURL, "https://") {
-		rawURL = "https://" + rawURL
+// isTestFixRequest detects if the user's message is about fixing failing tests.
+func isTestFixRequest(input string) bool {
+	lo := strings.ToLower(input)
+	testKeywords := []string{
+		"fix test", "fix the test", "fix failing test", "fix broken test",
+		"tests are failing", "tests are broken", "test failure",
+		"tests fail", "test fails", "make tests pass", "make the tests pass",
+		"fix unit test", "fix integration test",
+		"run tests and fix", "run the tests and fix",
+	}
+	for _, kw := range testKeywords {
+		if strings.Contains(lo, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// extractTestPackage attempts to extract a specific test package path from the input.
+// e.g. "fix tests in ./internal/router/..." → "./internal/router/..."
+func extractTestPackage(input string) string {
+	// Look for Go-style package paths.
+	re := regexp.MustCompile(`(\.?/[\w/.-]+(?:\.\.\.)?)\s*`)
+	if m := re.FindStringSubmatch(input); len(m) > 0 {
+		return m[1]
+	}
+	return ""
+}
+
+// runTestLoopCommand runs the iterative test loop from the /test slash command.
+func runTestLoopCommand(root string, client *ollama.Client, packages string) {
+	toolkit := agent.NewToolkit(root, nil, nil)
+	tl := &agent.TestLoop{
+		Toolkit:  toolkit,
+		Client:   client,
+		Root:     root,
+		Packages: packages,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
-	req, err := makeHTTPRequest(ctx, rawURL)
+	result, err := tl.Run(ctx)
 	if err != nil {
-		fmt.Printf("%s✗ fetch failed: %v%s\n\n", colorRed, err, colorReset)
-		return ""
-	}
-	resp, err := defaultHTTPClient().Do(req)
-	if err != nil {
-		fmt.Printf("%s✗ fetch failed: %v%s\n\n", colorRed, err, colorReset)
-		return ""
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
-	if err != nil {
-		fmt.Printf("%s✗ read failed: %v%s\n\n", colorRed, err, colorReset)
-		return ""
+		fmt.Printf("%s✗ test loop failed: %v%s\n\n", colorRed, err, colorReset)
+		return
 	}
 
-	text := stripHTML(string(body))
-	// Truncate to ~4K tokens worth.
-	if len(text) > 16000 {
-		text = text[:16000] + "\n[truncated]"
+	if result.Passed {
+		fmt.Printf("\n%s✓ All tests pass after %d iteration(s)%s\n", colorGreen, result.Iterations, colorReset)
+	} else {
+		fmt.Printf("\n%s✗ Tests still failing after %d iteration(s)%s\n", colorRed, result.Iterations, colorReset)
+		if result.StuckReason != "" {
+			fmt.Printf("%s  reason: %s%s\n", colorDim, result.StuckReason, colorReset)
+		}
+		for _, f := range result.Failures {
+			fmt.Printf("%s  • %s%s\n", colorDim, f.String(), colorReset)
+		}
 	}
-	return text
+	if result.FixSummary != "" {
+		fmt.Printf("\n%sFix summary:%s %s\n", colorDim, colorReset, result.FixSummary)
+	}
+	fmt.Println()
+}
+
+
+// handleCommitCommand generates a commit message from the current diff,
+// shows a preview, and commits on user approval.
+func handleCommitCommand(client *ollama.Client, cfg Config) {
+	root, _ := os.Getwd()
+
+	toolkit := agent.NewToolkit(root, nil, nil)
+	diff := toolkit.GitDiff()
+	if strings.TrimSpace(diff) == "" {
+		fmt.Printf("%s● no changes to commit%s\n\n", colorDim, colorReset)
+		return
+	}
+
+	// Truncate diff for the model.
+	if len(diff) > 8000 {
+		diff = diff[:8000] + "\n[truncated]"
+	}
+
+	// Generate commit message via model.
+	fmt.Printf("%s  generating commit message...%s\n", colorDim, colorReset)
+	model := router.ModelFor(router.TierFast)
+	msgs := []interface{}{
+		ollama.Message{Role: "system", Content: "You are a git commit message generator. Output ONLY the commit message, nothing else. Use conventional commit format (feat/fix/refactor/docs/test/chore). First line: type(scope): short summary (max 72 chars). Optional body after blank line for details."},
+		ollama.Message{Role: "user", Content: "Generate a commit message for this diff:\n\n" + diff},
+	}
+
+	var buf strings.Builder
+	_, _, err := client.StreamChat(context.Background(), model, msgs, nil, func(c string) { buf.WriteString(c) })
+	if err != nil {
+		fmt.Printf("%s✗ failed to generate commit message: %v%s\n\n", colorRed, err, colorReset)
+		return
+	}
+
+	message := strings.TrimSpace(buf.String())
+	// Strip markdown code fences if model wrapped it.
+	message = strings.TrimPrefix(message, "```")
+	message = strings.TrimSuffix(message, "```")
+	message = strings.TrimSpace(message)
+
+	// Show preview.
+	fmt.Printf("\n%s╭─ Commit Preview ─╮%s\n", colorGold, colorReset)
+	fmt.Printf("%s  message: %s%s\n", colorDim, message, colorReset)
+
+	// Show staged files.
+	status, _ := toolkit.RunBash("git status --short", 5)
+	if status != "" {
+		fmt.Printf("%s  changes:%s\n", colorDim, colorReset)
+		for _, line := range strings.Split(status, "\n") {
+			if line != "" {
+				fmt.Printf("%s    %s%s\n", colorDim, line, colorReset)
+			}
+		}
+	}
+	fmt.Printf("%s╰──────────────────╯%s\n", colorGold, colorReset)
+
+	// Ask for approval.
+	fmt.Printf("\n  Stage all & commit? [y/n/e(dit)]: ")
+	var answer string
+	fmt.Scanln(&answer)
+	answer = strings.ToLower(strings.TrimSpace(answer))
+
+	if answer == "e" || answer == "edit" {
+		fmt.Printf("  Enter commit message: ")
+		reader := bufio.NewReader(os.Stdin)
+		line, _ := reader.ReadString('\n')
+		message = strings.TrimSpace(line)
+		if message == "" {
+			fmt.Printf("%s● cancelled%s\n\n", colorDim, colorReset)
+			return
+		}
+		answer = "y"
+	}
+
+	if answer != "y" && answer != "yes" {
+		fmt.Printf("%s● cancelled%s\n\n", colorDim, colorReset)
+		return
+	}
+
+	// Stage all changes and commit.
+	out, code := toolkit.RunBash("git add -A", 10)
+	if code != 0 {
+		fmt.Printf("%s✗ git add failed: %s%s\n\n", colorRed, out, colorReset)
+		return
+	}
+
+	out, code = toolkit.RunBash(fmt.Sprintf("git commit -m %q", message), 10)
+	if code != 0 {
+		fmt.Printf("%s✗ git commit failed: %s%s\n\n", colorRed, out, colorReset)
+		return
+	}
+
+	fmt.Printf("\n%s✓ committed: %s%s\n\n", colorGreen, message, colorReset)
 }
 
 // buildSystemPrompt returns the base system prompt (tier-independent).
@@ -1348,8 +1691,9 @@ Then give your final answer after </thinking>. Example:
 }
 
 // contextMessageFor returns a context injection message for this turn, or nil.
-// Injects README for project questions, ContextSnippet for code questions.
-func contextMessageFor(input, root string, brainContext string, tw *truth.Writer) interface{} {
+// Injects README for project questions, ContextSnippet for code questions,
+// and graph context when file paths or symbols are detected.
+func contextMessageFor(input, root string, brainContext string, tw *truth.Writer, querier *graph.Querier) interface{} {
 	lower := strings.ToLower(input)
 	isProjectQ := strings.Contains(lower, "project") || strings.Contains(lower, "what is") ||
 		strings.Contains(lower, "what does") || strings.Contains(lower, "what are") ||
@@ -1375,6 +1719,16 @@ func contextMessageFor(input, root string, brainContext string, tw *truth.Writer
 	if isCodeQ && tw != nil {
 		if snippet := tw.ContextSnippetN(8, 800); snippet != "" {
 			parts = append(parts, "Codebase symbols (verified):\n"+snippet)
+		}
+	}
+
+	// Graph context: auto-inject related file signatures when files/symbols are detected.
+	mentionedFiles := extractMentionedFiles(input, querier)
+	if len(mentionedFiles) > 0 && querier != nil {
+		if graphCtx, related := graphContextFor(mentionedFiles, root, querier); graphCtx != "" {
+			parts = append(parts, graphCtx)
+			fmt.Printf("%s  ● graph: %s → %d related file(s) injected%s\n",
+				colorDim, mentionedFiles[0], len(related), colorReset)
 		}
 	}
 
@@ -2177,7 +2531,7 @@ func renderResponse(content string) {
 		w = 100
 	}
 	r, err := glamour.NewTermRenderer(
-		glamour.WithStandardStyle("dracula"),
+		glamour.WithStandardStyle("dark"),
 		glamour.WithWordWrap(w-4),
 	)
 	if err != nil {
@@ -2293,7 +2647,7 @@ func startSpinner(taskType string) func() time.Duration {
 				return
 			case <-ticker.C:
 				elapsed := time.Since(start).Seconds()
-				fmt.Printf("\r%s%s %s · %.1fs%s",
+				fmt.Printf("\r%s%s %s · %.1fs  Ctrl+C to cancel%s",
 					colorDim, frames[i%len(frames)], msgs[msgIdx], elapsed, colorReset)
 				i++
 				// advance faster through task leads (~1.5s each), slower through generic (~3s)
@@ -2309,6 +2663,59 @@ func startSpinner(taskType string) func() time.Duration {
 	}()
 	return func() time.Duration { close(done); return time.Since(start) }
 }
+// streamPrinter handles real-time token streaming to stdout.
+// On first chunk it stops the spinner and starts printing raw tokens.
+// After all chunks: sp.stop() erases the raw output and returns elapsed time,
+// so the caller can glamour-render the fully assembled response cleanly.
+type streamPrinter struct {
+	stopFn    func() time.Duration // spinner stop function
+	started   bool
+	lineCount int  // newlines seen so far (for cursor-up erase)
+	elapsed   time.Duration
+	width     int
+}
+
+func newStreamPrinter(stopFn func() time.Duration) *streamPrinter {
+	w, _, err := term.GetSize(int(os.Stdout.Fd()))
+	if err != nil || w <= 0 {
+		w = 100
+	}
+	return &streamPrinter{stopFn: stopFn, width: w}
+}
+
+// onChunk is passed to streamWithFallback as the live callback.
+func (sp *streamPrinter) onChunk(chunk string) {
+	if !sp.started {
+		sp.started = true
+		// Stop spinner and clear its line before we start printing tokens.
+		sp.elapsed = sp.stopFn()
+		fmt.Print("\r\033[K") // clear spinner line
+	}
+	// Print raw chunk in dim color (will be erased and glamour-rendered after done).
+	fmt.Print(colorDim + chunk + colorReset)
+	// Count logical lines (accounting for line wrapping at terminal width).
+	for _, r := range chunk {
+		if r == '\n' {
+			sp.lineCount++
+		}
+	}
+}
+
+// stop erases the raw streaming output from the terminal and returns elapsed time.
+// If streaming never started (error before first token), stops the spinner instead.
+func (sp *streamPrinter) stop() time.Duration {
+	if !sp.started {
+		return sp.stopFn()
+	}
+	// Move cursor up past all streamed lines + clear from cursor to end of screen.
+	if sp.lineCount > 0 {
+		fmt.Printf("\033[%dA\033[J", sp.lineCount+1)
+	} else {
+		fmt.Print("\r\033[K")
+	}
+	return sp.elapsed
+}
+
 func printBanner() {
 	c := colorCopper + colorBold
 	r := colorReset
@@ -2339,7 +2746,10 @@ func printHelp() {
 		{"/init", "analyze codebase and generate MANTIS.md"},
 		{"/file <path>", "inject a file into context"},
 		{"/vision <path>", "analyze an image or screenshot"},
-		{"/fetch <url>", "fetch a web page into context"},
+		{"/fetch <url>", "fetch a web page into context (Jina Reader)"},
+		{"/search <query>", "web search (Tavily) — top 5 results"},
+		{"/test [pkg]", "run tests → fix failures → repeat until green"},
+		{"/commit", "generate commit message, preview, commit"},
 		{"/plan", "toggle plan mode (review before code)"},
 		{"/context", "show context window token breakdown"},
 		{"/reset", "clear conversation (brain memory kept)"},
@@ -2385,8 +2795,19 @@ func tierBadge(t router.Tier) string {
 	return c + colorBold + "[" + t.String() + "]" + colorReset
 }
 
+// tierPromptStr returns the readline prompt string with the active tier colored badge.
+// Displayed during model generation so the user can see which tier is active.
+func tierPromptStr(t router.Tier) string {
+	c, ok := tierColors[t]
+	if !ok {
+		c = colorDim
+	}
+	return c + colorBold + "[" + t.String() + "]" + colorReset + " \033[38;5;214m❯\033[0m "
+}
+
 func showRouting(intent router.Intent, model string, turn int, isPipeline bool) {
 	badge := tierBadge(intent.Tier)
+	confStr := fmt.Sprintf("%s%d%%%s", colorDim, int(intent.Confidence*100), colorReset)
 	graphTag := ""
 	if intent.NeedsGraph {
 		graphTag = " " + colorGold + "[graph]" + colorReset
@@ -2395,14 +2816,14 @@ func showRouting(intent router.Intent, model string, turn int, isPipeline bool) 
 
 	switch {
 	case intent.Tier == router.TierMax:
-		fmt.Printf("%s ┌ #%d%s  %s  ensemble · multi-model%s\n",
-			colorDim, turn, colorReset, badge, graphTag)
+		fmt.Printf("%s ┌ #%d%s  %s  ensemble · multi-model  %s%s\n",
+			colorDim, turn, colorReset, badge, confStr, graphTag)
 	case isPipeline:
-		fmt.Printf("%s ┌ #%d%s  %s  pipeline · plan→code+tests · %s%s\n",
-			colorDim, turn, colorReset, badge, modelStyled, graphTag)
+		fmt.Printf("%s ┌ #%d%s  %s  pipeline · %s  %s%s\n",
+			colorDim, turn, colorReset, badge, modelStyled, confStr, graphTag)
 	default:
-		fmt.Printf("%s ┌ #%d%s  %s  %s · %s%s\n",
-			colorDim, turn, colorReset, badge, intent.TaskType, modelStyled, graphTag)
+		fmt.Printf("%s ┌ #%d%s  %s  %s · %s  %s%s\n",
+			colorDim, turn, colorReset, badge, intent.TaskType, modelStyled, confStr, graphTag)
 	}
 }
 
@@ -2682,8 +3103,10 @@ func streamEnsemble(ctx context.Context, client *ollama.Client,
 
 
 // on 404 until one works. On 400 "prompt too long" it retries with trimmed context.
+// An optional onLive callback (variadic, take at most one) is called for each chunk
+// in addition to accumulating into rb. Used for real-time token streaming to stdout.
 func streamWithFallback(ctx context.Context, client *ollama.Client, model string,
-	tier router.Tier, messages []interface{}, rb *strings.Builder) (int, int, error) {
+	tier router.Tier, messages []interface{}, rb *strings.Builder, onLive ...func(string)) (int, int, error) {
 
 	tried := map[string]bool{}
 	candidates := []string{model}
@@ -2695,8 +3118,12 @@ func streamWithFallback(ctx context.Context, client *ollama.Client, model string
 		}
 		tried[m] = true
 
+		liveCallback := func(chunk string) {}
+		if len(onLive) > 0 && onLive[0] != nil {
+			liveCallback = onLive[0]
+		}
 		pt, ct, err := client.StreamChat(ctx, m, messages, nil,
-			func(chunk string) { rb.WriteString(chunk) })
+			func(chunk string) { rb.WriteString(chunk); liveCallback(chunk) })
 
 		if err == nil {
 			if m != model {
@@ -3048,7 +3475,7 @@ func extToLang(ext string) string {
 // runWithScanner is a bare-bones fallback REPL used when readline can't init (e.g. piped input).
 func runWithScanner(cfg Config, client *ollama.Client, sess *session.Session,
 	b *brain.Brain, dispatcher *nl.Dispatcher, messages []interface{},
-	tw *truth.Writer, ut *usage.Tracker, rs router.EmbedStore) error {
+	tw *truth.Writer, ut *usage.Tracker, rs router.EmbedStore, webFetcher *web.Fetcher) error {
 
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
@@ -3064,7 +3491,7 @@ func runWithScanner(cfg Config, client *ollama.Client, sess *session.Session,
 			continue
 		}
 		if strings.HasPrefix(input, "/") {
-			if quit := handleSlashCommand(input, sess, b, &messages, client, &scannerBrainCtx, &scannerPlanMode, cfg); quit {
+			if quit := handleSlashCommand(input, sess, b, &messages, client, &scannerBrainCtx, &scannerPlanMode, cfg, webFetcher); quit {
 				break
 			}
 			continue
@@ -3076,44 +3503,4 @@ func runWithScanner(cfg Config, client *ollama.Client, sess *session.Session,
 	}
 	endSession(sess, b, messages, nil)
 	return nil
-}
-
-// htmlTagRe matches HTML tags for stripping.
-var htmlTagRe = regexp.MustCompile(`<[^>]*>`)
-
-// spaceRe collapses runs of whitespace; package-level to avoid per-call recompilation (BUG-18).
-var spaceRe = regexp.MustCompile(`\s+`)
-
-// stripHTML removes HTML tags and decodes common entities, returning plain text.
-func stripHTML(s string) string {
-	text := htmlTagRe.ReplaceAllString(s, " ")
-	// Collapse whitespace (spaceRe is a package-level var — BUG-18).
-	text = spaceRe.ReplaceAllString(text, " ")
-	// Decode common entities.
-	r := strings.NewReplacer(
-		"&amp;", "&", "&lt;", "<", "&gt;", ">",
-		"&quot;", "\"", "&#39;", "'", "&nbsp;", " ",
-	)
-	return strings.TrimSpace(r.Replace(text))
-}
-
-// makeHTTPRequest creates a new GET request with a browser-like User-Agent.
-func makeHTTPRequest(ctx context.Context, url string) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", "Mantis/1.0")
-	req.Header.Set("Accept", "text/html,text/plain,application/json")
-	return req, nil
-}
-
-// defaultHTTPClient returns a shared HTTP client with reasonable timeouts.
-func defaultHTTPClient() *http.Client {
-	return &http.Client{
-		Timeout: 15 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
-		},
-	}
 }

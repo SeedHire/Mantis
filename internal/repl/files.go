@@ -8,10 +8,67 @@ import (
 "strings"
 )
 
+// diffLines produces a compact unified diff between old and new content.
+// Returns empty string if the content is identical.
+// Shows at most 8 diff lines; truncates the rest with a count.
+func diffLines(old, newContent string) string {
+	if old == newContent {
+		return ""
+	}
+	oldLines := strings.Split(old, "\n")
+	newLines := strings.Split(newContent, "\n")
+
+	// Simple line diff: collect added/removed lines (no context).
+	oldSet := make(map[string]bool, len(oldLines))
+	for _, l := range oldLines {
+		oldSet[l] = true
+	}
+	newSet := make(map[string]bool, len(newLines))
+	for _, l := range newLines {
+		newSet[l] = true
+	}
+
+	const maxShow = 8
+	var parts []string
+	added, removed := 0, 0
+
+	// Removed lines (in old but not in new).
+	for _, l := range oldLines {
+		if !newSet[l] && l != "" {
+			removed++
+			if len(parts) < maxShow {
+				parts = append(parts, colorRed+"-  "+l+colorReset)
+			}
+		}
+	}
+	// Added lines (in new but not in old).
+	for _, l := range newLines {
+		if !oldSet[l] && l != "" {
+			added++
+			if len(parts) < maxShow {
+				parts = append(parts, colorGreen+"+  "+l+colorReset)
+			}
+		}
+	}
+
+	if len(parts) == 0 {
+		return ""
+	}
+
+	total := added + removed
+	shown := len(parts)
+	result := strings.Join(parts, "\n")
+	if shown < total {
+		result += fmt.Sprintf("\n%s   … %d more line(s)%s", colorDim, total-shown, colorReset)
+	}
+	return result
+}
+
 // WrittenFile records a file that was written from an AI response.
 type WrittenFile struct {
 Path    string
-Created bool // true = new file, false = overwritten
+Created bool   // true = new file, false = overwritten
+Diff    string // non-empty for modified files: compact +/- diff summary
 }
 
 // extractAndWriteFiles scans the AI response for fenced code blocks tagged
@@ -56,13 +113,26 @@ dest := filepath.Join(root, clean)
 _, statErr := os.Stat(dest)
 isNew := os.IsNotExist(statErr)
 
+// Capture old content for diff display before overwriting.
+var oldContent string
+if !isNew {
+	if b, err := os.ReadFile(dest); err == nil {
+		oldContent = string(b)
+	}
+}
+
 if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 continue
 }
 if err := os.WriteFile(dest, []byte(content+"\n"), 0o644); err != nil {
 continue
 }
-written = append(written, WrittenFile{Path: clean, Created: isNew})
+
+diff := ""
+if !isNew {
+	diff = diffLines(oldContent, content+"\n")
+}
+written = append(written, WrittenFile{Path: clean, Created: isNew, Diff: diff})
 }
 
 return written
@@ -88,6 +158,7 @@ var knownExtensionless = map[string]bool{
 }
 
 // printWrittenFiles prints a compact summary of files Mantis wrote to disk.
+// Modified files include an inline +/- diff of up to 8 changed lines.
 func printWrittenFiles(files []WrittenFile) {
 if len(files) == 0 {
 return
@@ -98,6 +169,12 @@ if !f.Created {
 icon = "✎"
 }
 fmt.Printf("%s%s %s%s\n", colorGreen, icon, f.Path, colorReset)
+if f.Diff != "" {
+// Indent each diff line for visual grouping under the file path.
+for _, line := range strings.Split(f.Diff, "\n") {
+	fmt.Printf("   %s\n", line)
+}
+}
 }
 fmt.Println()
 }

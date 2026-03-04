@@ -76,3 +76,47 @@ func TestIssueRefRegex(t *testing.T) {
 		}
 	}
 }
+
+// TestInferTypeEdgeCases covers extra patterns not in TestInferTypeConventional.
+func TestInferTypeEdgeCases(t *testing.T) {
+	tests := []struct {
+		msg      string
+		wantType string
+	}{
+		{"Test user login flow", "test"},          // contains "test"
+		{"Write tests for payment", "test"},        // contains "test"
+		{"chore: update dependencies", "chore"},    // no keyword match → default
+		{"bump version to 1.2.3", "chore"},         // no keyword match → default
+		{"perf: speed up query", "chore"},          // no "perf" case → default
+		{"style: fix indentation", "chore"},        // HasPrefix("fix") false; no keyword → default
+		{"", "chore"},                              // empty → fallback
+	}
+	for _, tt := range tests {
+		got := inferType(tt.msg)
+		if got != tt.wantType {
+			t.Errorf("inferType(%q) = %q, want %q", tt.msg, got, tt.wantType)
+		}
+	}
+}
+
+// ── Benchmarks ────────────────────────────────────────────────────────────────
+
+// BenchmarkInferType benchmarks the inferType function across all pattern categories.
+func BenchmarkInferType(b *testing.B) {
+	msgs := []string{
+		"fix null pointer in auth",
+		"add login page",
+		"refactor router logic",
+		"update documentation",
+		"write tests for session",
+		"clean up dead code",
+		"implement retry mechanism",
+		"bump version to v2.0",
+		"perf: optimise query",
+		"style: fix indentation",
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = inferType(msgs[i%len(msgs)])
+	}
+}

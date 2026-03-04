@@ -21,6 +21,7 @@ import (
 	"github.com/seedhire/mantis/internal/graph"
 	"github.com/seedhire/mantis/internal/intel"
 	"github.com/seedhire/mantis/internal/linter"
+	"github.com/seedhire/mantis/internal/mcp"
 	"github.com/seedhire/mantis/internal/parser"
 	"github.com/seedhire/mantis/internal/repl"
 	"github.com/seedhire/mantis/internal/tui"
@@ -1298,6 +1299,38 @@ func waitForInterrupt() {
 	fmt.Println()
 }
 
+// ── MCP server ──────────────────────────────────────────────────────────────
+
+var mcpCmd = &cobra.Command{
+	Use:   "mcp",
+	Short: "Start MCP server over stdio (for Claude Code, Cursor, etc.)",
+	Long: `Starts a Model Context Protocol (MCP) server over stdio.
+
+Exposes Mantis graph intelligence as tools that any MCP-compatible
+AI client can call. Requires 'mantis init' to have been run first.
+
+Configure in your AI tool:
+  {
+    "mcpServers": {
+      "mantis": { "command": "mantis", "args": ["mcp"] }
+    }
+  }`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		root, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		db, err := openDB(root)
+		if err != nil {
+			return fmt.Errorf("graph not initialized — run 'mantis init' first: %w", err)
+		}
+		defer db.Close()
+
+		srv := mcp.NewServer(db, root, version)
+		return srv.Run()
+	},
+}
+
 // ── main ──────────────────────────────────────────────────────────────────────
 
 func init() {
@@ -1334,7 +1367,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&replPlan, "plan", false, "Plan mode: review plan before code execution")
 	rootCmd.Flags().BoolVar(&replContinue, "continue", false, "Resume most recent session")
 
-	rootCmd.AddCommand(initCmd, contextCmd, watchCmd, findCmd, impactCmd, deadCmd, circularCmd, graphCmd, lintCmd, tuiCmd, handoffCmd, hotspotsCmd, riskyCmd, couplingCmd, intentCmd, todosCmd, specGapsCmd, workspaceCmd, traceCmd)
+	rootCmd.AddCommand(initCmd, contextCmd, watchCmd, findCmd, impactCmd, deadCmd, circularCmd, graphCmd, lintCmd, tuiCmd, handoffCmd, hotspotsCmd, riskyCmd, couplingCmd, intentCmd, todosCmd, specGapsCmd, workspaceCmd, traceCmd, mcpCmd)
 
 	workspaceCmd.AddCommand(wsInitCmd, wsFindCmd, wsImpactCmd, wsStatsCmd)
 	traceCmd.AddCommand(traceIngestCmd, traceHotpathsCmd, traceColdCmd, traceWeightCmd)

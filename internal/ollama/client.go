@@ -120,6 +120,15 @@ func NewFromEnv() *Client {
 	return New(os.Getenv("OLLAMA_API_KEY"))
 }
 
+// NewWithBaseURL creates a Client targeting a custom base URL (e.g. an httptest.Server).
+// Useful for testing and self-hosted Ollama deployments.
+func NewWithBaseURL(baseURL string) *Client {
+	return &Client{
+		baseURL:    baseURL,
+		httpClient: &http.Client{},
+	}
+}
+
 // IsCloud reports whether this client is using Ollama Cloud.
 func (c *Client) IsCloud() bool { return c.isCloud }
 

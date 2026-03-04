@@ -196,6 +196,82 @@ func TestExtractJSON(t *testing.T) {
 	}
 }
 
+// ── EditFile ──────────────────────────────────────────────────────────────────
+
+func TestEditFile(t *testing.T) {
+	tk, root := newTestToolkit(t)
+	original := "package main\n\nfunc Hello() string {\n\treturn \"world\"\n}\n"
+	if err := os.WriteFile(filepath.Join(root, "hello.go"), []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := tk.EditFile("hello.go", "\"world\"", "\"mantis\""); err != nil {
+		t.Fatalf("EditFile: %v", err)
+	}
+
+	b, err := os.ReadFile(filepath.Join(root, "hello.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "package main\n\nfunc Hello() string {\n\treturn \"mantis\"\n}\n" {
+		t.Errorf("unexpected content after edit: %q", b)
+	}
+}
+
+func TestEditFile_OldStringNotFound(t *testing.T) {
+	tk, root := newTestToolkit(t)
+	if err := os.WriteFile(filepath.Join(root, "f.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := tk.EditFile("f.go", "nonexistent", "replacement")
+	if err == nil {
+		t.Error("expected error when old_string not found")
+	}
+}
+
+func TestEditFile_AmbiguousMatch(t *testing.T) {
+	tk, root := newTestToolkit(t)
+	content := "foo bar foo"
+	if err := os.WriteFile(filepath.Join(root, "f.txt"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := tk.EditFile("f.txt", "foo", "baz")
+	if err == nil {
+		t.Error("expected error when old_string matches multiple times")
+	}
+}
+
+func TestEditFile_PathTraversal(t *testing.T) {
+	tk, _ := newTestToolkit(t)
+	err := tk.EditFile("../../etc/passwd", "root", "evil")
+	if err == nil {
+		t.Error("expected error for path traversal in EditFile")
+	}
+}
+
+func TestDispatch_EditFile(t *testing.T) {
+	tk, root := newTestToolkit(t)
+	if err := os.WriteFile(filepath.Join(root, "src.go"), []byte("return 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := json.Marshal(map[string]string{
+		"path":       "src.go",
+		"old_string": "return 1",
+		"new_string": "return 42",
+	})
+	out, err := tk.Dispatch(context.Background(), "edit_file", args)
+	if err != nil {
+		t.Fatalf("Dispatch edit_file: %v", err)
+	}
+	if out == "" {
+		t.Error("expected non-empty output from edit_file dispatch")
+	}
+	b, _ := os.ReadFile(filepath.Join(root, "src.go"))
+	if string(b) != "return 42\n" {
+		t.Errorf("file content after dispatch = %q", b)
+	}
+}
+
 // ── ShouldRunMultiAgent ───────────────────────────────────────────────────────
 
 func TestShouldRunMultiAgent(t *testing.T) {

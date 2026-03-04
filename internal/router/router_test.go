@@ -171,3 +171,101 @@ func TestPickBySizeEmpty(t *testing.T) {
 		t.Errorf("pickBySize(nil) = %q, want empty", got)
 	}
 }
+
+// ── Golden-set quality evaluation ────────────────────────────────────────────
+
+// TestClassifyGoldenSet measures classification accuracy over all RouterExamples.
+// Fails if accuracy drops below 80 % — a regression guard for the scoring logic.
+func TestClassifyGoldenSet(t *testing.T) {
+	total := len(RouterExamples)
+	if total == 0 {
+		t.Fatal("RouterExamples is empty")
+	}
+
+	correct := 0
+	for _, ex := range RouterExamples {
+		intent := Classify(ex.Query, false)
+		if intent.Tier == ex.Tier {
+			correct++
+		} else {
+			t.Logf("MISS query=%q  got=%s  want=%s", ex.Query, intent.Tier, ex.Tier)
+		}
+	}
+
+	accuracy := float64(correct) / float64(total) * 100
+	t.Logf("golden-set accuracy: %d/%d = %.1f%%", correct, total, accuracy)
+
+	const minAccuracy = 80.0
+	if accuracy < minAccuracy {
+		t.Errorf("accuracy %.1f%% below threshold %.0f%%", accuracy, minAccuracy)
+	}
+}
+
+// ── Dampener regressions ──────────────────────────────────────────────────────
+
+// TestShortMessageDampener verifies that ≤4-word messages do not route to
+// Heavy or Max (regression for the short-message dampener: heavy*0.35, max*0.35).
+func TestShortMessageDampener(t *testing.T) {
+	cases := []string{
+		"build a server",
+		"help me build",
+		"what is goroutine",
+		"fix the code",
+	}
+	for _, msg := range cases {
+		intent := Classify(msg, false)
+		if intent.Tier == TierHeavy || intent.Tier == TierMax {
+			t.Errorf("short message %q routed to %s — dampener not applied", msg, intent.Tier)
+		}
+	}
+}
+
+// TestQuestionFormDampener verifies trailing '?' boosts TierReason over TierHeavy.
+func TestQuestionFormDampener(t *testing.T) {
+	cases := []struct {
+		query    string
+		wantNot  []Tier // these tiers should NOT win
+	}{
+		{
+			"how does the auth flow work?",
+			[]Tier{TierHeavy, TierMax},
+		},
+		{
+			"what causes a deadlock in goroutines?",
+			[]Tier{TierHeavy, TierMax},
+		},
+	}
+	for _, c := range cases {
+		intent := Classify(c.query, false)
+		for _, bad := range c.wantNot {
+			if intent.Tier == bad {
+				t.Errorf("question %q routed to %s — question dampener not applied", c.query, bad)
+			}
+		}
+	}
+}
+
+// TestTerminalErrorFastPath verifies that a pasted panic/error message routes
+// to TierFast (it's already a captured error, not a heavy design question).
+func TestTerminalErrorFastPath(t *testing.T) {
+	panicMsg := "panic: runtime error: index out of range [3] with length 3"
+	intent := Classify(panicMsg, false)
+	if intent.Tier != TierFast {
+		t.Errorf("panic paste routed to %s, want TierFast", intent.Tier)
+	}
+}
+
+// ── Benchmarks ────────────────────────────────────────────────────────────────
+
+func BenchmarkClassify(b *testing.B) {
+	msgs := []string{
+		"fix the null pointer in auth.go",
+		"implement retry mechanism with exponential backoff",
+		"explain the tradeoffs of redis vs sqlite",
+		"what is a goroutine",
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		Classify(msgs[i%len(msgs)], false)
+	}
+}

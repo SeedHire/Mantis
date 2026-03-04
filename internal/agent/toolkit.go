@@ -65,12 +65,17 @@ var allowedPrefixes = []string{
 	"make",
 	// Kubernetes
 	"kubectl ",
-	// Git
+	// Git (read)
 	"git diff", "git status", "git log", "git show",
+	// Git (write — gated by approval in dedicated tools)
+	"git add", "git commit", "git checkout -b", "git reset HEAD",
 	// Shell diagnostics
 	"cat ", "head ", "tail ", "ls ", "find ", "grep ",
 	"pwd", "which ", "echo ", "wc ", "env",
 }
+
+// ApprovalFunc asks the user for confirmation. Returns true if approved.
+type ApprovalFunc func(prompt string) bool
 
 // AgentToolkit provides typed tool access for coding agents.
 // All file and bash operations are scoped to projectRoot for safety.
@@ -79,6 +84,7 @@ type AgentToolkit struct {
 	querier     *graph.Querier
 	embStore    *embeddings.Store
 	fileMu      sync.Mutex // guards WriteFile against parallel worker races
+	ApproveFunc ApprovalFunc // if set, git write ops require approval
 }
 
 // NewToolkit creates a toolkit bound to the given project root.
@@ -219,12 +225,164 @@ func (t *AgentToolkit) EditFile(path, oldString, newString string) error {
 	return os.WriteFile(abs, []byte(strings.Replace(content, oldString, newString, 1)), 0o644)
 }
 
+// RunTests detects the project's test runner and executes tests, returning
+// structured failure output instead of raw stdout.
+func (t *AgentToolkit) RunTests(packages string, timeoutSec int) (string, int) {
+	runner, cmd := DetectTestRunner(t.projectRoot)
+	if runner == RunnerUnknown {
+		return "error: could not detect test runner (no go.mod, package.json, Cargo.toml, or pyproject.toml)", 1
+	}
+
+	// Scope to specific packages if requested.
+	testCmd := cmd
+	if packages != "" {
+		if runner == RunnerGo {
+			testCmd = "go test " + packages
+		} else {
+			testCmd = cmd + " " + packages
+		}
+	}
+
+	if timeoutSec <= 0 {
+		timeoutSec = 120
+	}
+
+	output, exitCode := t.RunBash(testCmd, timeoutSec)
+
+	// If tests failed, parse and format structured output.
+	if exitCode != 0 {
+		failures := ParseTestOutput(runner, output)
+		if len(failures) > 0 {
+			var sb strings.Builder
+			fmt.Fprintf(&sb, "exit %d — %d test failure(s):\n\n", exitCode, len(failures))
+			for i, f := range failures {
+				fmt.Fprintf(&sb, "%d. %s\n", i+1, f.String())
+			}
+			sb.WriteString("\n--- Raw output (last 4000 chars) ---\n")
+			if len(output) > 4000 {
+				output = output[len(output)-4000:]
+			}
+			sb.WriteString(output)
+			return sb.String(), exitCode
+		}
+	}
+
+	return output, exitCode
+}
+
 // FindSymbol looks up a symbol by name in the dependency graph.
 func (t *AgentToolkit) FindSymbol(name string) ([]*graph.Node, error) {
 	if t.querier == nil {
 		return nil, fmt.Errorf("graph querier not available")
 	}
 	return t.querier.FindNodeByName(name)
+}
+
+// ── Git write tools ───────────────────────────────────────────────────────────
+
+// GitStage stages files for commit. Requires approval.
+func (t *AgentToolkit) GitStage(paths []string) (string, error) {
+	if len(paths) == 0 {
+		return "", fmt.Errorf("no paths specified")
+	}
+	desc := fmt.Sprintf("stage %d file(s): %s", len(paths), strings.Join(paths, ", "))
+	if !t.approve(desc) {
+		return "denied by user", nil
+	}
+	args := append([]string{"add"}, paths...)
+	out, code := t.runGit(args...)
+	if code != 0 {
+		return out, fmt.Errorf("git add failed (exit %d): %s", code, out)
+	}
+	return fmt.Sprintf("staged %d file(s)", len(paths)), nil
+}
+
+// GitCommit creates a commit with the given message. Requires approval.
+func (t *AgentToolkit) GitCommit(message string) (string, error) {
+	if message == "" {
+		return "", fmt.Errorf("empty commit message")
+	}
+	// Show what will be committed.
+	staged, _ := t.runGit("diff", "--cached", "--stat")
+	desc := fmt.Sprintf("commit with message: %q\n  staged:\n%s", message, staged)
+	if !t.approve(desc) {
+		return "denied by user", nil
+	}
+	out, code := t.runGit("commit", "-m", message)
+	if code != 0 {
+		return out, fmt.Errorf("git commit failed (exit %d): %s", code, out)
+	}
+	return out, nil
+}
+
+// GitBranch creates and switches to a new branch. Requires approval.
+func (t *AgentToolkit) GitBranch(name string) (string, error) {
+	if name == "" {
+		return "", fmt.Errorf("empty branch name")
+	}
+	desc := fmt.Sprintf("create branch: %s", name)
+	if !t.approve(desc) {
+		return "denied by user", nil
+	}
+	out, code := t.runGit("checkout", "-b", name)
+	if code != 0 {
+		return out, fmt.Errorf("git checkout -b failed (exit %d): %s", code, out)
+	}
+	return out, nil
+}
+
+// GitUnstage unstages files. Requires approval.
+func (t *AgentToolkit) GitUnstage(paths []string) (string, error) {
+	if len(paths) == 0 {
+		return "", fmt.Errorf("no paths specified")
+	}
+	desc := fmt.Sprintf("unstage %d file(s): %s", len(paths), strings.Join(paths, ", "))
+	if !t.approve(desc) {
+		return "denied by user", nil
+	}
+	args := append([]string{"reset", "HEAD"}, paths...)
+	out, code := t.runGit(args...)
+	if code != 0 {
+		return out, fmt.Errorf("git reset HEAD failed (exit %d): %s", code, out)
+	}
+	return fmt.Sprintf("unstaged %d file(s)", len(paths)), nil
+}
+
+// GitDiff returns the current diff (staged + unstaged).
+func (t *AgentToolkit) GitDiff() string {
+	staged, _ := t.runGit("diff", "--cached")
+	unstaged, _ := t.runGit("diff")
+	var sb strings.Builder
+	if staged != "" {
+		sb.WriteString("=== Staged changes ===\n")
+		sb.WriteString(staged)
+		sb.WriteString("\n")
+	}
+	if unstaged != "" {
+		sb.WriteString("=== Unstaged changes ===\n")
+		sb.WriteString(unstaged)
+	}
+	return sb.String()
+}
+
+func (t *AgentToolkit) approve(desc string) bool {
+	if t.ApproveFunc == nil {
+		return true // no gate configured
+	}
+	return t.ApproveFunc(desc)
+}
+
+func (t *AgentToolkit) runGit(args ...string) (string, int) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = t.projectRoot
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return strings.TrimSpace(string(out)), exitErr.ExitCode()
+		}
+		return err.Error(), 1
+	}
+	return strings.TrimSpace(string(out)), 0
 }
 
 // ── Ollama tool definitions ───────────────────────────────────────────────────
@@ -307,6 +465,62 @@ func (t *AgentToolkit) Tools() []ollama.Tool {
 						"new_string": {"type":"string","description":"Replacement text"}
 					},
 					"required": ["path","old_string","new_string"]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: ollama.ToolFunction{
+				Name:        "run_tests",
+				Description: "Run the project's test suite and return structured failure output. Auto-detects test runner (go test, npm test, pytest, cargo test).",
+				Parameters: rawJSON(`{
+					"type": "object",
+					"properties": {
+						"packages":    {"type":"string","description":"Optional: specific package/path to test (e.g. './internal/router/...'). Empty = run all tests."},
+						"timeout_sec": {"type":"integer","description":"Timeout in seconds (default 120)"}
+					}
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: ollama.ToolFunction{
+				Name:        "git_stage",
+				Description: "Stage files for the next git commit.",
+				Parameters: rawJSON(`{
+					"type": "object",
+					"properties": {
+						"paths": {"type":"array","items":{"type":"string"},"description":"File paths to stage (relative to project root)"}
+					},
+					"required": ["paths"]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: ollama.ToolFunction{
+				Name:        "git_commit",
+				Description: "Create a git commit with the staged changes.",
+				Parameters: rawJSON(`{
+					"type": "object",
+					"properties": {
+						"message": {"type":"string","description":"Commit message"}
+					},
+					"required": ["message"]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: ollama.ToolFunction{
+				Name:        "git_branch",
+				Description: "Create and switch to a new git branch.",
+				Parameters: rawJSON(`{
+					"type": "object",
+					"properties": {
+						"name": {"type":"string","description":"Branch name to create"}
+					},
+					"required": ["name"]
 				}`),
 			},
 		},
@@ -404,6 +618,47 @@ func (t *AgentToolkit) Dispatch(ctx context.Context, toolName string, argsRaw js
 			return "", err
 		}
 		return fmt.Sprintf("edited %s", args.Path), nil
+
+	case "run_tests":
+		var args struct {
+			Packages   string `json:"packages"`
+			TimeoutSec int    `json:"timeout_sec"`
+		}
+		if err := json.Unmarshal(argsRaw, &args); err != nil {
+			return "", fmt.Errorf("bad args: %w", err)
+		}
+		out, code := t.RunTests(args.Packages, args.TimeoutSec)
+		if code != 0 {
+			return fmt.Sprintf("exit %d\n%s", code, out), nil
+		}
+		return out, nil
+
+	case "git_stage":
+		var args struct {
+			Paths []string `json:"paths"`
+		}
+		if err := json.Unmarshal(argsRaw, &args); err != nil {
+			return "", fmt.Errorf("bad args: %w", err)
+		}
+		return t.GitStage(args.Paths)
+
+	case "git_commit":
+		var args struct {
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal(argsRaw, &args); err != nil {
+			return "", fmt.Errorf("bad args: %w", err)
+		}
+		return t.GitCommit(args.Message)
+
+	case "git_branch":
+		var args struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(argsRaw, &args); err != nil {
+			return "", fmt.Errorf("bad args: %w", err)
+		}
+		return t.GitBranch(args.Name)
 
 	case "finish":
 		var args struct {

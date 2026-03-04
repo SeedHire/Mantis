@@ -110,3 +110,45 @@ func TestTruncateAtBoundaryFallsBackToLine(t *testing.T) {
 		t.Error("should end with truncation marker")
 	}
 }
+
+// ── Benchmarks ────────────────────────────────────────────────────────────────
+
+// BenchmarkEstimateTokens benchmarks token estimation on a 1000-char code string.
+func BenchmarkEstimateTokens(b *testing.B) {
+	code := strings.Repeat("func foo() { return 42 }\n", 40) // ~1000 chars
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = EstimateTokens(code)
+	}
+}
+
+// BenchmarkTrimToTokenBudget benchmarks priority-based trimming of 10 sections.
+func BenchmarkTrimToTokenBudget(b *testing.B) {
+	sections := make([]Section, 10)
+	for i := range sections {
+		sections[i] = Section{
+			Content:  strings.Repeat("x", 140), // ~40 tokens each
+			Priority: i + 1,
+			Label:    "section",
+		}
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = TrimToTokenBudget(sections, 4000)
+	}
+}
+
+// BenchmarkTruncateAtBoundary benchmarks boundary-aware truncation of a 5000-char Go file.
+func BenchmarkTruncateAtBoundary(b *testing.B) {
+	// Build a realistic-looking Go file (~5000 chars).
+	var sb strings.Builder
+	sb.WriteString("package main\n\n")
+	for i := 0; i < 50; i++ {
+		sb.WriteString("func doWork() {\n\tx := computeValue()\n\t_ = x\n}\n\n")
+	}
+	content := sb.String()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = truncateAtBoundary(content, 2000)
+	}
+}

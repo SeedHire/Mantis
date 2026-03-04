@@ -22,6 +22,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/seedhire/mantis/internal/agent"
 	"github.com/seedhire/mantis/internal/autofix"
 	"github.com/seedhire/mantis/internal/ollama"
 	"github.com/seedhire/mantis/internal/router"
@@ -72,10 +73,11 @@ func progressTicker(stage string) (incr func(), stop func() time.Duration) {
 // Options controls pipeline execution behaviour.
 type Options struct {
 	AvailableModels []ollama.ModelInfo
-	SkipTests       bool   // skip test generation for faster turnaround
-	Root            string // project root for build verification; empty = skip
-	MaxRetries      int    // max CODE stage retries on build failure (default 3)
-	PlanOnly        bool   // stop after PLAN stage and return for user approval
+	SkipTests       bool          // skip test generation for faster turnaround
+	Root            string        // project root for build verification; empty = skip
+	MaxRetries      int           // max CODE stage retries on build failure (default 3)
+	PlanOnly        bool          // stop after PLAN stage and return for user approval
+	TaskTimeout     time.Duration // per-task timeout (default 8m); 0 = no individual deadline
 }
 
 // Result holds aggregated pipeline output and token counts.
@@ -170,7 +172,7 @@ func Run(
 		// Task-based execution: each task gets its own focused prompt.
 		fmt.Printf("%s  ◆ coding   [%s] — %d tasks%s\n", pColorDim, codeModel, len(tasks), pColorReset)
 		codeStart := time.Now()
-		runTaskBased(ctx, client, codeModel, systemPrompt, userRequest, res.PlanText, tasks, res, opts.Root)
+		runTaskBased(ctx, client, codeModel, systemPrompt, userRequest, res.PlanText, tasks, res, opts.Root, opts.TaskTimeout)
 		codeElapsed := time.Since(codeStart)
 
 		done := 0
@@ -225,7 +227,7 @@ func Run(
 			if opts.Root == "" || attempt == maxRetries {
 				break
 			}
-			written := writeCodeFiles(res.CodeText, opts.Root)
+			written := extractAndApplyChanges(res.CodeText, opts.Root)
 			if len(written) == 0 {
 				break
 			}
@@ -249,8 +251,8 @@ func Run(
 
 			retryMsg := fmt.Sprintf(
 				"Build failed with the following error:\n\n```\n%s\n```\n\n"+
-					"Fix only the affected function(s). Do not rewrite unchanged parts. "+
-					"Output the corrected file(s) using ```lang:filepath fences.",
+					"Fix only the affected function(s). Use ```edit:filepath blocks with <<<SEARCH/===/ >>>SEARCH markers "+
+					"to patch existing files. Only use ```lang:filepath for brand new files.",
 				buildErrStr)
 			if len(codeMsgs) > 2 {
 				codeMsgs = codeMsgs[:2]
@@ -297,6 +299,13 @@ func Run(
 		res.PromptTok += testOut.pt
 		res.ComplTok += testOut.ct
 		fmt.Printf("%s  ✓ tests ready  %s(%.1fs · %d tokens)%s\n", pColorGold, pColorDim, testOut.elapsed.Seconds(), testOut.pt+testOut.ct, pColorReset)
+	}
+
+	// ── Stage 4: TEST VERIFICATION (optional) ────────────────────────────────
+	// If files were written to disk, run the test suite and iteratively fix
+	// failures. Only runs when root is set and a test runner is detected.
+	if opts.Root != "" && !opts.SkipTests {
+		runPipelineTestLoop(ctx, client, opts.Root, res)
 	}
 
 	res.Combined = assemble(res.PlanText, res.CodeText, res.TestText)
@@ -358,7 +367,7 @@ func ContinuePlan(
 		if opts.Root == "" || attempt == maxRetries {
 			break
 		}
-		written := writeCodeFiles(res.CodeText, opts.Root)
+		written := extractAndApplyChanges(res.CodeText, opts.Root)
 		if len(written) == 0 {
 			break
 		}
@@ -379,7 +388,8 @@ func ContinuePlan(
 		lastBuildErr = buildErrStr
 		fmt.Printf("%s  [build error — retry %d/%d]%s\n", pColorDim, attempt+1, maxRetries, pColorReset)
 		retryMsg := fmt.Sprintf(
-			"Build failed with the following error:\n\n```\n%s\n```\n\nFix only the affected function(s).",
+			"Build failed with the following error:\n\n```\n%s\n```\n\n"+
+				"Fix only the affected function(s). Use ```edit:filepath blocks with <<<SEARCH/===/ >>>SEARCH markers.",
 			buildErrStr)
 		if len(codeMsgs) > 2 {
 			codeMsgs = codeMsgs[:2]
@@ -422,6 +432,11 @@ func ContinuePlan(
 		res.PromptTok += testOut.pt
 		res.ComplTok += testOut.ct
 		fmt.Printf("%s  ✓ tests ready  %s(%.1fs · %d tokens)%s\n", pColorGold, pColorDim, testOut.elapsed.Seconds(), testOut.pt+testOut.ct, pColorReset)
+	}
+
+	// ── Stage 4: TEST VERIFICATION (optional) ────────────────────────────────
+	if opts.Root != "" && !opts.SkipTests {
+		runPipelineTestLoop(ctx, client, opts.Root, res)
 	}
 
 	res.Combined = assemble(res.PlanText, res.CodeText, res.TestText)
@@ -567,6 +582,7 @@ func runTaskBased(
 	tasks []Task,
 	res *Result,
 	root string,
+	taskTimeout time.Duration,
 ) {
 	fmt.Printf("\n%s  ── tasks ──%s\n", pColorDim, pColorReset)
 	printTaskList(tasks)
@@ -580,6 +596,11 @@ func runTaskBased(
 	stopSpinner := taskSpinner(tasks, len(tasks), &mu)
 	defer stopSpinner()
 
+	// defaultTaskTimeout is 8 minutes per task — generous but bounded.
+	if taskTimeout <= 0 {
+		taskTimeout = 8 * time.Minute
+	}
+
 	// runOneTask executes a single task and updates its status.
 	runOneTask := func(i int, priorCode string) {
 		mu.Lock()
@@ -589,6 +610,10 @@ func runTaskBased(
 		updateTaskLine(tasks, i, len(tasks), 0)
 		mu.Unlock()
 
+		// Each task gets its own deadline so a slow task doesn't starve siblings.
+		taskCtx, taskCancel := context.WithTimeout(ctx, taskTimeout)
+		defer taskCancel()
+
 		taskPrompt := taskCodePrompt(userRequest, planText, tasks[i].Title, priorCode)
 		msgs := []interface{}{
 			ollama.Message{Role: "system", Content: systemPrompt + taskStageSuffix},
@@ -596,7 +621,7 @@ func runTaskBased(
 		}
 
 		var buf strings.Builder
-		pt, ct, err := client.StreamChat(ctx, codeModel, msgs, nil, func(c string) {
+		pt, ct, err := client.StreamChat(taskCtx, codeModel, msgs, nil, func(c string) {
 			buf.WriteString(c)
 			atomic.AddInt64(&tasks[i].streamTok, 1)
 		})
@@ -613,7 +638,7 @@ func runTaskBased(
 				allCode.WriteString(partial)
 				allCode.WriteString("\n\n")
 				if root != "" {
-					tasks[i].FileCount = len(writeCodeFiles(partial, root))
+					tasks[i].FileCount = len(extractAndApplyChanges(partial, root))
 				}
 			}
 			tasks[i].Status = "failed"
@@ -631,7 +656,7 @@ func runTaskBased(
 
 		// Write files to disk immediately so user sees progress.
 		if root != "" {
-			tasks[i].FileCount = len(writeCodeFiles(code, root))
+			tasks[i].FileCount = len(extractAndApplyChanges(code, root))
 		}
 		updateTaskLine(tasks, i, len(tasks), 0)
 	}
@@ -684,8 +709,17 @@ const taskStageSuffix = `
 ## Your role: IMPLEMENTER (single task)
 You are implementing ONE specific task from a larger plan.
 - Output ONLY the files needed for THIS task — do not implement other tasks.
-- Use ` + "```lang:filepath" + ` fences for EVERY file.
-- Include config/manifest files (package.json, tsconfig.json, etc.) ONLY if this is the setup/config task.
+- For NEW files: use ` + "```lang:filepath" + ` fences with full content.
+- For EXISTING files: use ` + "```edit:filepath" + ` fences with SEARCH/REPLACE markers:
+  ` + "```edit:path/to/file.go" + `
+  <<<SEARCH
+  exact old text
+  ===
+  exact new text
+  >>>SEARCH
+  ` + "```" + `
+- Never output the full content of an existing file — only the changed sections.
+- Include config/manifest files ONLY if this is the setup/config task.
 - Handle all error cases. No stubs. No TODOs.
 - If prior tasks already created files you need to import from, assume they exist.
 
@@ -825,6 +859,45 @@ func stripStagePreamble(text, marker string) string {
 	return text[idx:]
 }
 
+// ── Stage 4: Test verification ─────────────────────────────────────────────────
+
+// runPipelineTestLoop runs the iterative test loop after pipeline code generation.
+// It auto-detects the test runner and attempts to fix any failing tests.
+func runPipelineTestLoop(ctx context.Context, client *ollama.Client, root string, res *Result) {
+	runner, _ := agent.DetectTestRunner(root)
+	if runner == agent.RunnerUnknown {
+		return // no test runner detected — skip silently
+	}
+
+	fmt.Printf("%s  ◆ verifying   [test loop]%s\n", pColorDim, pColorReset)
+
+	toolkit := agent.NewToolkit(root, nil, nil)
+	tl := &agent.TestLoop{
+		Toolkit: toolkit,
+		Client:  client,
+		Root:    root,
+		MaxIter: 3, // keep pipeline test loop tighter than standalone
+	}
+
+	loopCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	result, err := tl.Run(loopCtx)
+	if err != nil {
+		fmt.Printf("%s  ⚠ test loop error: %v%s\n", pColorDim, err, pColorReset)
+		return
+	}
+
+	if result.Passed {
+		fmt.Printf("%s  ✓ tests verified  %s(%d iteration(s))%s\n", pColorGold, pColorDim, result.Iterations, pColorReset)
+	} else {
+		fmt.Printf("%s  ⚠ tests still failing after %d iteration(s)%s\n", pColorDim, result.Iterations, pColorReset)
+		if result.StuckReason != "" {
+			fmt.Printf("%s    %s%s\n", pColorDim, result.StuckReason, pColorReset)
+		}
+	}
+}
+
 // ── Complexity detector ────────────────────────────────────────────────────────
 
 func isComplexBuild(lower string) bool {
@@ -949,13 +1022,24 @@ const codeStageSuffix = `
 
 ## Your role: IMPLEMENTER
 Write the complete, production-ready implementation based on the plan.
-- Use ` + "```lang:filepath" + ` fences for EVERY file — source files AND config/manifest files.
-- This explicitly includes: package.json, requirements.txt, Cargo.toml, go.mod, go.sum, Makefile, .env.example, tsconfig.json, vite.config.ts, docker-compose.yml, Dockerfile, pyproject.toml — EVERY file that must exist on disk.
-- NEVER output JSON, YAML, TOML, or any config content as bare text or bare ` + "```json" + ` blocks. Every file MUST have a filepath: ` + "```json:backend/package.json" + `.
+
+### File output formats:
+- For NEW files: use ` + "```lang:filepath" + ` fences with full content.
+- For EXISTING files: use ` + "```edit:filepath" + ` fences with SEARCH/REPLACE markers:
+  ` + "```edit:path/to/file.go" + `
+  <<<SEARCH
+  exact old text to find
+  ===
+  exact replacement text
+  >>>SEARCH
+  ` + "```" + `
+  Multiple <<<SEARCH...>>>SEARCH sections per block are allowed for multiple edits to the same file.
+- NEVER output the full content of an existing file. Only output the changed sections using edit blocks.
+- Config/manifest files (package.json, tsconfig.json, etc.) that are NEW use ` + "```lang:filepath" + ` with full content.
 - Handle all error cases. No stubs. No TODOs left unimplemented.
 - Validate inputs at boundaries. Return structured errors.
 
-CRITICAL: Begin your response IMMEDIATELY with the first ` + "```lang:filepath" + ` code block. Do NOT write any preamble, "I'll implement...", "Let me create...", "I need to...", or any explanation before the first code block. Code first, nothing else before it.
+CRITICAL: Begin your response IMMEDIATELY with the first code block. Do NOT write any preamble.
 `
 
 const testStageSuffix = `
@@ -981,9 +1065,9 @@ func codeUserPrompt(req, plan string) string {
 		"Implement the following based on the plan provided.\n\n"+
 			"## Original Request\n%s\n\n"+
 			"## Implementation Plan\n%s\n\n"+
-			"Write the complete implementation now. Every file — including package.json, tsconfig.json, "+
-			"requirements.txt, Makefile, .env.example, and any other config/manifest file — must use "+
-			"`lang:filepath` fences (e.g. ```json:backend/package.json). No bare JSON or YAML blocks.",
+			"Write the implementation now. For NEW files use `lang:filepath` fences. "+
+			"For EXISTING files use `edit:filepath` fences with <<<SEARCH/===/>>>SEARCH markers. "+
+			"Never output the full content of an existing file.",
 		req, plan,
 	)
 }
