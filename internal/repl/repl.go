@@ -542,7 +542,7 @@ func Run(cfg Config) error {
 		if needsAgent {
 			fmt.Printf("%s  ◆ fix agent [%s] — investigating with tools%s\n", colorDim, model, colorReset)
 			stopSpin := startSpinner(string(intent.TaskType))
-			agentCtx, agentCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			agentCtx, agentCancel := context.WithTimeout(context.Background(), 10*time.Minute)
 			agentResp, agentPT, agentCT, agentOK := runFixAgent(agentCtx, client, model, messages, root)
 			agentCancel()
 			elapsed := stopSpin()
@@ -1515,6 +1515,22 @@ func fixAgentTools() []ollama.Tool {
 				Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Relative directory path (default: .)"}},"required":[]}`),
 			},
 		},
+		{
+			Type: "function",
+			Function: ollama.ToolFunction{
+				Name:        "write_file",
+				Description: "Create or overwrite a file. Use for creating new files. For modifying existing files, prefer edit_file.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Relative file path"},"content":{"type":"string","description":"File content to write"}},"required":["path","content"]}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: ollama.ToolFunction{
+				Name:        "search_files",
+				Description: "Search for a text pattern across project files (like grep -r). Returns matching lines with file paths.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string","description":"Text or regex pattern to search for"},"path":{"type":"string","description":"Directory to search in (default: .)"}},"required":["pattern"]}`),
+			},
+		},
 	}
 }
 
@@ -1552,6 +1568,39 @@ func fixAgentAllowedCmd(cmd string) bool {
 		}
 	}
 	return false
+}
+
+// fixToolArgSummary returns a short summary of tool arguments for progress output.
+func fixToolArgSummary(name string, args json.RawMessage) string {
+	var generic map[string]interface{}
+	_ = json.Unmarshal(args, &generic)
+	switch name {
+	case "run_command":
+		if cmd, ok := generic["command"].(string); ok {
+			if len(cmd) > 60 {
+				cmd = cmd[:60] + "…"
+			}
+			return cmd
+		}
+	case "read_file", "write_file":
+		if p, ok := generic["path"].(string); ok {
+			return p
+		}
+	case "edit_file":
+		if p, ok := generic["path"].(string); ok {
+			return p
+		}
+	case "list_files":
+		if p, ok := generic["path"].(string); ok && p != "" {
+			return p
+		}
+		return "."
+	case "search_files":
+		if p, ok := generic["pattern"].(string); ok {
+			return p
+		}
+	}
+	return ""
 }
 
 // dispatchFixTool executes a single tool call for the fix agent loop.
@@ -1616,7 +1665,7 @@ func dispatchFixTool(root, toolName string, argsRaw json.RawMessage) string {
 		if !fixAgentAllowedCmd(args.Command) {
 			return fmt.Sprintf("error: command not allowed: %q", args.Command)
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, "sh", "-c", args.Command)
 		cmd.Dir = root
@@ -1658,6 +1707,61 @@ func dispatchFixTool(root, toolName string, argsRaw json.RawMessage) string {
 		}
 		return sb.String()
 
+	case "write_file":
+		var args struct {
+			Path    string `json:"path"`
+			Content string `json:"content"`
+		}
+		if err := json.Unmarshal(argsRaw, &args); err != nil {
+			return "error: bad arguments"
+		}
+		abs := filepath.Join(root, filepath.Clean(args.Path))
+		if abs != root && !strings.HasPrefix(abs, root+string(filepath.Separator)) {
+			return "error: path escapes project root"
+		}
+		// Create parent directories if needed.
+		if dir := filepath.Dir(abs); dir != root {
+			_ = os.MkdirAll(dir, 0o755)
+		}
+		if err := os.WriteFile(abs, []byte(args.Content), 0o644); err != nil {
+			return fmt.Sprintf("error: %v", err)
+		}
+		return fmt.Sprintf("wrote %s (%d bytes)", args.Path, len(args.Content))
+
+	case "search_files":
+		var args struct {
+			Pattern string `json:"pattern"`
+			Path    string `json:"path"`
+		}
+		if err := json.Unmarshal(argsRaw, &args); err != nil {
+			return "error: bad arguments"
+		}
+		dir := root
+		if args.Path != "" {
+			dir = filepath.Join(root, filepath.Clean(args.Path))
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "grep", "-rn", "--include=*.ts", "--include=*.tsx",
+			"--include=*.js", "--include=*.jsx", "--include=*.json", "--include=*.go",
+			"--include=*.py", "--include=*.yaml", "--include=*.yml", "--include=*.toml",
+			"--include=*.md", "--include=Makefile", "--include=Dockerfile",
+			"-l", args.Pattern, dir)
+		var out bytes.Buffer
+		cmd.Stdout = &out
+		cmd.Stderr = &out
+		_ = cmd.Run()
+		output := out.String()
+		// Make paths relative to root.
+		output = strings.ReplaceAll(output, root+"/", "")
+		if len(output) > 4000 {
+			output = output[:4000] + "\n… (truncated)"
+		}
+		if output == "" {
+			return "no matches found"
+		}
+		return output
+
 	default:
 		return fmt.Sprintf("error: unknown tool %q", toolName)
 	}
@@ -1675,12 +1779,36 @@ func runFixAgent(
 	messages []interface{},
 	root string,
 ) (string, int, int, bool) {
-	const maxIter = 5
+	const maxIter = 12
 	tools := fixAgentTools()
 
-	// Copy messages so we don't mutate the caller's slice during the loop.
-	agentMsgs := make([]interface{}, len(messages))
-	copy(agentMsgs, messages)
+	// Inject a fix-agent system prompt that instructs iterative build→fix→rebuild.
+	fixSysPrompt := ollama.Message{
+		Role: "system",
+		Content: `You are an autonomous fix agent. You MUST run commands yourself — never ask the user to run them.
+
+WORKFLOW:
+1. Run the failing build/deploy command with run_command to capture the ACTUAL error
+2. Read the relevant files mentioned in the error with read_file
+3. Fix the issue with edit_file (modify existing) or write_file (create new)
+4. Run the build command AGAIN to check if it's fixed
+5. If there are MORE errors, repeat from step 2
+6. Keep iterating until the build passes or you've exhausted all options
+
+KEY RULES:
+- NEVER tell the user to run a command. Run it yourself.
+- NEVER ask for more information. Investigate with tools.
+- If a package can't be installed (network error), replace it with a built-in alternative.
+- After each fix, ALWAYS re-run the build to verify.
+- Use edit_file for surgical changes to existing files.
+- Use write_file to create new files that are missing.
+- Use search_files to find imports, usages, and definitions.`,
+	}
+
+	// Copy messages and prepend fix system prompt.
+	agentMsgs := make([]interface{}, 0, len(messages)+1)
+	agentMsgs = append(agentMsgs, fixSysPrompt)
+	agentMsgs = append(agentMsgs, messages...)
 
 	var totalPT, totalCT int
 	var lastContent string
@@ -1703,12 +1831,16 @@ func runFixAgent(
 
 		agentMsgs = append(agentMsgs, ollama.Message{Role: "assistant", Content: result.Content})
 		for _, tc := range result.ToolCalls {
+			// Print progress so user sees what's happening.
+			fmt.Printf("\r\033[K%s  ▸ %s(%s)%s", colorDim, tc.Function.Name,
+				fixToolArgSummary(tc.Function.Name, tc.Function.Arguments), colorReset)
 			toolOut := dispatchFixTool(root, tc.Function.Name, tc.Function.Arguments)
 			agentMsgs = append(agentMsgs, ollama.ToolMessage{
 				Role:    "tool",
 				Content: toolOut,
 			})
 		}
+		fmt.Println() // Newline after tool progress.
 	}
 
 	if nativeToolsWork && strings.TrimSpace(lastContent) != "" {
@@ -1748,7 +1880,7 @@ func runTextFixAgent(
 	messages []interface{},
 	root string,
 ) (string, int, int, bool) {
-	const maxIter = 5
+	const maxIter = 12
 
 	toolPrompt := `You have access to these tools. To use a tool, output a line starting with TOOL_CALL: followed by the JSON.
 Do NOT suggest commands for the user to run. Run them yourself using TOOL_CALL.
@@ -1758,10 +1890,14 @@ Available tools:
 2. read_file - Read a project file. Example: TOOL_CALL: {"tool":"read_file","args":{"path":"Makefile"}}
 3. list_files - List directory contents. Example: TOOL_CALL: {"tool":"list_files","args":{"path":"."}}
 4. edit_file - Apply a targeted replacement to an existing file. Example: TOOL_CALL: {"tool":"edit_file","args":{"path":"main.go","old_string":"oldCode()","new_string":"newCode()"}}
+5. write_file - Create a new file. Example: TOOL_CALL: {"tool":"write_file","args":{"path":"src/pages/_app.tsx","content":"import React..."}}
+6. search_files - Search for a pattern across project files. Example: TOOL_CALL: {"tool":"search_files","args":{"pattern":"import.*socket"}}
 
 IMPORTANT: Always run the failing command first to see the actual error, then read relevant files, then apply the fix.
-IMPORTANT: Use edit_file to modify existing files (targeted old→new replacement). Only use write_file fenced blocks for creating new files.
-After investigation, provide corrected files using edit_file calls or fenced code blocks with the filepath: ` + "```lang:filepath"
+IMPORTANT: After fixing, run the build command AGAIN to check if there are more errors. Keep iterating until the build passes.
+IMPORTANT: Use edit_file to modify existing files (targeted old→new replacement). Use write_file to create new files.
+IMPORTANT: If a dependency can't be installed, replace it with built-in alternatives (e.g. fetch instead of axios, native WebSocket instead of socket.io).
+After investigation, provide corrected files using edit_file/write_file calls or fenced code blocks with the filepath: ` + "```lang:filepath"
 
 	agentMsgs := make([]interface{}, 0, len(messages)+3)
 	agentMsgs = append(agentMsgs, ollama.Message{Role: "system", Content: toolPrompt})
