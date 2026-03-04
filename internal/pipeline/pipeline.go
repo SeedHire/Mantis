@@ -91,10 +91,11 @@ type Result struct {
 
 // Task represents a single implementation task parsed from the plan.
 type Task struct {
-	ID     int
-	Title  string
-	Status string // "pending", "running", "done", "failed"
-	Output string // generated code for this task
+	ID        int
+	Title     string
+	Status    string // "pending", "running", "done", "failed"
+	Output    string // generated code for this task
+	FileCount int    // number of files written to disk for this task
 }
 
 // ShouldRun returns true when the message is complex enough to warrant the pipeline.
@@ -165,7 +166,7 @@ func Run(
 		// Task-based execution: each task gets its own focused prompt.
 		fmt.Printf("%s  ◆ coding   [%s] — %d tasks%s\n", pColorDim, codeModel, len(tasks), pColorReset)
 		codeStart := time.Now()
-		runTaskBased(ctx, client, codeModel, systemPrompt, userRequest, res.PlanText, tasks, res)
+		runTaskBased(ctx, client, codeModel, systemPrompt, userRequest, res.PlanText, tasks, res, opts.Root)
 		codeElapsed := time.Since(codeStart)
 
 		done := 0
@@ -454,51 +455,76 @@ func parseTasks(planText string) []Task {
 	return tasks
 }
 
+// taskIcon returns the display icon and color for a task status.
+func taskIcon(status string, spinFrame int) (string, string) {
+	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+	switch status {
+	case "running":
+		return frames[spinFrame%len(frames)], pColorGold
+	case "done":
+		return "✓", "\033[38;5;70m"
+	case "failed":
+		return "✗", "\033[38;5;196m"
+	default:
+		return "○", pColorDim
+	}
+}
+
 // printTaskList renders the current task status to the terminal.
 func printTaskList(tasks []Task) {
 	for _, t := range tasks {
-		icon := "○"
-		color := pColorDim
-		switch t.Status {
-		case "running":
-			icon = "◉"
-			color = pColorGold
-		case "done":
-			icon = "✓"
-			color = "\033[38;5;70m" // green
-		case "failed":
-			icon = "✗"
-			color = "\033[38;5;196m" // red
+		icon, color := taskIcon(t.Status, 0)
+		suffix := ""
+		if t.Status == "done" && t.FileCount > 0 {
+			suffix = fmt.Sprintf(" %s(%d files)%s", pColorDim, t.FileCount, pColorReset)
 		}
-		fmt.Printf("  %s%s %s%s\n", color, icon, t.Title, pColorReset)
+		fmt.Printf("  %s%s %s%s%s\n", color, icon, t.Title, pColorReset, suffix)
 	}
 }
 
 // updateTaskLine reprints a single task line in-place using ANSI cursor movement.
-func updateTaskLine(task Task, totalTasks int) {
-	icon := "○"
-	color := pColorDim
-	switch task.Status {
-	case "running":
-		icon = "◉"
-		color = pColorGold
-	case "done":
-		icon = "✓"
-		color = "\033[38;5;70m"
-	case "failed":
-		icon = "✗"
-		color = "\033[38;5;196m"
+func updateTaskLine(task Task, totalTasks, spinFrame int) {
+	icon, color := taskIcon(task.Status, spinFrame)
+	suffix := ""
+	if task.Status == "done" && task.FileCount > 0 {
+		suffix = fmt.Sprintf(" %s(%d files)%s", pColorDim, task.FileCount, pColorReset)
 	}
-	// Move cursor up to the task's line, rewrite it, move back down.
 	linesUp := totalTasks - task.ID + 1
-	fmt.Printf("\033[%dA\r\033[K  %s%s %s%s\033[%dB\r",
-		linesUp, color, icon, task.Title, pColorReset, linesUp)
+	fmt.Printf("\033[%dA\r\033[K  %s%s %s%s%s\033[%dB\r",
+		linesUp, color, icon, task.Title, pColorReset, suffix, linesUp)
+}
+
+// taskSpinner starts a background goroutine that animates spinner icons
+// on all "running" tasks. Returns a stop function.
+func taskSpinner(tasks []Task, totalTasks int, mu *sync.Mutex) func() {
+	done := make(chan struct{})
+	go func() {
+		frame := 0
+		ticker := time.NewTicker(120 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				frame++
+				mu.Lock()
+				for i := range tasks {
+					if tasks[i].Status == "running" {
+						updateTaskLine(tasks[i], totalTasks, frame)
+					}
+				}
+				mu.Unlock()
+			}
+		}
+	}()
+	return func() { close(done) }
 }
 
 // runTaskBased executes the code stage as individual task-by-task prompts
 // instead of one monolithic generation. The first task (usually setup/config)
 // runs sequentially, then remaining tasks run in parallel batches.
-// The TUI shows progress as tasks complete.
+// The TUI shows live animated spinners on running tasks and writes files immediately.
 func runTaskBased(
 	ctx context.Context,
 	client *ollama.Client,
@@ -508,6 +534,7 @@ func runTaskBased(
 	planText string,
 	tasks []Task,
 	res *Result,
+	root string,
 ) {
 	fmt.Printf("\n%s  ── tasks ──%s\n", pColorDim, pColorReset)
 	printTaskList(tasks)
@@ -517,11 +544,15 @@ func runTaskBased(
 	var allCode strings.Builder
 	var totalPT, totalCT int
 
+	// Start the spinner animation for running tasks.
+	stopSpinner := taskSpinner(tasks, len(tasks), &mu)
+	defer stopSpinner()
+
 	// runOneTask executes a single task and updates its status.
 	runOneTask := func(i int, priorCode string) {
 		mu.Lock()
 		tasks[i].Status = "running"
-		updateTaskLine(tasks[i], len(tasks))
+		updateTaskLine(tasks[i], len(tasks), 0)
 		mu.Unlock()
 
 		taskPrompt := taskCodePrompt(userRequest, planText, tasks[i].Title, priorCode)
@@ -541,19 +572,28 @@ func runTaskBased(
 				tasks[i].Output = partial
 				allCode.WriteString(partial)
 				allCode.WriteString("\n\n")
+				if root != "" {
+					tasks[i].FileCount = len(writeCodeFiles(partial, root))
+				}
 			}
 			tasks[i].Status = "failed"
-			updateTaskLine(tasks[i], len(tasks))
+			updateTaskLine(tasks[i], len(tasks), 0)
 			return
 		}
 
-		tasks[i].Output = buf.String()
+		code := buf.String()
+		tasks[i].Output = code
 		tasks[i].Status = "done"
-		updateTaskLine(tasks[i], len(tasks))
-		allCode.WriteString(buf.String())
+		allCode.WriteString(code)
 		allCode.WriteString("\n\n")
 		totalPT += pt
 		totalCT += ct
+
+		// Write files to disk immediately so user sees progress.
+		if root != "" {
+			tasks[i].FileCount = len(writeCodeFiles(code, root))
+		}
+		updateTaskLine(tasks[i], len(tasks), 0)
 	}
 
 	// Phase 1: Run first task sequentially (setup/config — others depend on it).
