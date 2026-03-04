@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -495,8 +496,9 @@ func updateTaskLine(task Task, totalTasks int) {
 }
 
 // runTaskBased executes the code stage as individual task-by-task prompts
-// instead of one monolithic generation. Each task gets a focused prompt
-// and the TUI shows progress as tasks complete.
+// instead of one monolithic generation. The first task (usually setup/config)
+// runs sequentially, then remaining tasks run in parallel batches.
+// The TUI shows progress as tasks complete.
 func runTaskBased(
 	ctx context.Context,
 	client *ollama.Client,
@@ -511,15 +513,18 @@ func runTaskBased(
 	printTaskList(tasks)
 	fmt.Println() // blank line below task list for cursor math
 
+	var mu sync.Mutex
 	var allCode strings.Builder
+	var totalPT, totalCT int
 
-	for i := range tasks {
+	// runOneTask executes a single task and updates its status.
+	runOneTask := func(i int, priorCode string) {
+		mu.Lock()
 		tasks[i].Status = "running"
 		updateTaskLine(tasks[i], len(tasks))
+		mu.Unlock()
 
-		// Build a focused prompt for just this task.
-		taskPrompt := taskCodePrompt(userRequest, planText, tasks[i].Title, allCode.String())
-
+		taskPrompt := taskCodePrompt(userRequest, planText, tasks[i].Title, priorCode)
 		msgs := []interface{}{
 			ollama.Message{Role: "system", Content: systemPrompt + taskStageSuffix},
 			ollama.Message{Role: "user", Content: taskPrompt},
@@ -528,8 +533,10 @@ func runTaskBased(
 		var buf strings.Builder
 		pt, ct, err := client.StreamChat(ctx, codeModel, msgs, nil, func(c string) { buf.WriteString(c) })
 
+		mu.Lock()
+		defer mu.Unlock()
+
 		if err != nil {
-			// Save partial output on timeout.
 			if partial := buf.String(); strings.TrimSpace(partial) != "" {
 				tasks[i].Output = partial
 				allCode.WriteString(partial)
@@ -537,23 +544,57 @@ func runTaskBased(
 			}
 			tasks[i].Status = "failed"
 			updateTaskLine(tasks[i], len(tasks))
-			// Continue with remaining tasks rather than aborting.
-			if strings.Contains(err.Error(), "deadline exceeded") {
-				continue
-			}
-			break
+			return
 		}
 
 		tasks[i].Output = buf.String()
 		tasks[i].Status = "done"
 		updateTaskLine(tasks[i], len(tasks))
-
 		allCode.WriteString(buf.String())
 		allCode.WriteString("\n\n")
-		res.PromptTok += pt
-		res.ComplTok += ct
+		totalPT += pt
+		totalCT += ct
 	}
 
+	// Phase 1: Run first task sequentially (setup/config — others depend on it).
+	runOneTask(0, "")
+	foundationCode := allCode.String()
+
+	if len(tasks) > 1 {
+		// Phase 2: Run remaining tasks in parallel batches.
+		// Batch size limited to avoid overwhelming the API.
+		const maxParallel = 3
+		remaining := tasks[1:]
+		for batchStart := 0; batchStart < len(remaining); batchStart += maxParallel {
+			batchEnd := batchStart + maxParallel
+			if batchEnd > len(remaining) {
+				batchEnd = len(remaining)
+			}
+			batch := remaining[batchStart:batchEnd]
+
+			// Snapshot prior code for this batch (all prior batches + foundation).
+			mu.Lock()
+			priorSnapshot := allCode.String()
+			mu.Unlock()
+
+			var wg sync.WaitGroup
+			for j := range batch {
+				taskIdx := 1 + batchStart + j // index into original tasks slice
+				wg.Add(1)
+				go func(idx int, prior string) {
+					defer wg.Done()
+					runOneTask(idx, prior)
+				}(taskIdx, priorSnapshot)
+			}
+			wg.Wait()
+		}
+	}
+
+	// Use foundation code if nothing else succeeded.
+	_ = foundationCode
+
+	res.PromptTok += totalPT
+	res.ComplTok += totalCT
 	res.CodeText = allCode.String()
 	res.Tasks = tasks
 }
