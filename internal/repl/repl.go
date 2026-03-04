@@ -2558,13 +2558,30 @@ func streamWithFallback(ctx context.Context, client *ollama.Client, model string
 			return 0, 0, err2
 		}
 
+		// Role alternation violation — fix message ordering and retry.
+		if strings.Contains(errStr, "400") && strings.Contains(errStr, "roles must alternate") {
+			rb.Reset()
+			fmt.Printf("%s  [fixing message order…]%s\n", colorDim, colorReset)
+			trimmed := trimToMinimal(messages)
+			pt, ct, err2 := client.StreamChat(ctx, m, trimmed, nil,
+				func(chunk string) { rb.WriteString(chunk) })
+			if err2 == nil {
+				if m != model {
+					router.SetResolved(tier, m)
+				}
+				return pt, ct, nil
+			}
+			return 0, 0, err2
+		}
+
 		return 0, 0, err // non-recoverable error, bail
 	}
 	return 0, 0, fmt.Errorf("no available model found for tier %s — run /models to see what's available", tier)
 }
 
-// trimToMinimal keeps the system message and the last 3 user+assistant messages.
+// trimToMinimal keeps the system message and the last 3 user+assistant pairs.
 // Used as a last resort when the full context exceeds the model's window.
+// Ensures strict user/assistant alternation to satisfy the Ollama API.
 func trimToMinimal(messages []interface{}) []interface{} {
 	var sys interface{}
 	var recent []interface{}
@@ -2572,22 +2589,49 @@ func trimToMinimal(messages []interface{}) []interface{} {
 		if msg, ok := m.(ollama.Message); ok {
 			if msg.Role == "system" {
 				sys = m
-			} else {
+			} else if msg.Role == "user" || msg.Role == "assistant" {
 				recent = append(recent, m)
 			}
+			// Drop tool messages — they break alternation after trimming.
 		} else if img, ok := m.(ollama.ImageMessage); ok && img.Role == "user" {
 			recent = append(recent, m)
 		}
+		// Drop ToolMessage entries silently.
 	}
 	var out []interface{}
 	if sys != nil {
 		out = append(out, sys)
 	}
-	// Keep last 3 messages (user+assistant pairs) instead of just 1
+	// Keep last 6 messages (≈3 user+assistant pairs).
 	if len(recent) > 6 {
 		recent = recent[len(recent)-6:]
 	}
-	out = append(out, recent...)
+	// Enforce strict alternation: first kept message must be "user".
+	for len(recent) > 0 {
+		if msg, ok := recent[0].(ollama.Message); ok && msg.Role == "user" {
+			break
+		}
+		recent = recent[1:]
+	}
+	// Remove consecutive same-role messages.
+	var deduped []interface{}
+	lastRole := ""
+	for _, m := range recent {
+		role := ""
+		if msg, ok := m.(ollama.Message); ok {
+			role = msg.Role
+		} else if _, ok := m.(ollama.ImageMessage); ok {
+			role = "user"
+		}
+		if role == lastRole {
+			// Merge into previous by replacing it.
+			deduped[len(deduped)-1] = m
+		} else {
+			deduped = append(deduped, m)
+			lastRole = role
+		}
+	}
+	out = append(out, deduped...)
 	return out
 }
 
