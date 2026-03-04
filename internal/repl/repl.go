@@ -596,7 +596,7 @@ func Run(cfg Config) error {
 		//   plan (reason model) → code + tests (code model, parallel)
 		if pipeline.ShouldRun(intent, input) {
 			pipelineOpts := pipeline.Options{AvailableModels: availableModels, Root: root, PlanOnly: planMode}
-			pipelineCtx, pipelineCancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			pipelineCtx, pipelineCancel := context.WithTimeout(context.Background(), 20*time.Minute)
 			sysPrompt := buildSystemPrompt(brainContext, tierSkills, router.TierCode)
 			pRes, pErr := pipeline.Run(
 				pipelineCtx, client, input,
@@ -606,13 +606,21 @@ func Run(cfg Config) error {
 			pipelineCancel()
 
 			if pErr != nil {
-				fmt.Printf("%s  [pipeline failed: %v — falling back to single model]%s\n\n",
-					colorRed, pErr, colorReset)
-				// Carry the plan from stage 1 into the single-model fallback context.
-				if pRes != nil && pRes.PlanText != "" {
-					input = "Here is the plan I already made:\n\n" + pRes.PlanText + "\n\nNow implement it for this request:\n" + input
+				// If the pipeline captured partial code output (e.g. timeout after
+				// streaming 18k tokens), use it rather than discarding.
+				if pRes != nil && len(pRes.CodeText) > 500 {
+					fmt.Printf("%s  [pipeline timed out — using %d chars of partial code]%s\n\n",
+						colorDim, len(pRes.CodeText), colorReset)
+					pErr = nil // treat as success with partial output
+				} else {
+					fmt.Printf("%s  [pipeline failed: %v — falling back to single model]%s\n\n",
+						colorRed, pErr, colorReset)
+					// Carry the plan from stage 1 into the single-model fallback context.
+					if pRes != nil && pRes.PlanText != "" {
+						input = "Here is the plan I already made:\n\n" + pRes.PlanText + "\n\nNow implement it for this request:\n" + input
+					}
+					// Fall through to single-model path below.
 				}
-				// Fall through to single-model path below.
 			} else if planMode && pRes.CodeText == "" {
 				// Plan Mode: show plan and ask for approval before coding.
 				fmt.Printf("\n%s◈ Mantis — Plan ready%s\n", colorCopper+colorBold, colorReset)
@@ -626,7 +634,7 @@ func Run(cfg Config) error {
 				}
 				// User approved — continue with CODE+TESTS stages.
 				fmt.Printf("%s● plan approved — starting implementation%s\n", colorGold, colorReset)
-				contCtx, contCancel := context.WithTimeout(context.Background(), 10*time.Minute)
+				contCtx, contCancel := context.WithTimeout(context.Background(), 20*time.Minute)
 				pRes, pErr = pipeline.ContinuePlan(
 					contCtx, client, input, pRes.PlanText,
 					sysPrompt,

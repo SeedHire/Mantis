@@ -166,7 +166,20 @@ func Run(
 		codeIncr, codeStop := progressTicker("coding")
 		pt, ct, err := client.StreamChat(ctx, codeModel, codeMsgs, nil, func(c string) { codeBuf.WriteString(c); codeIncr() })
 		codeStop()
+		// Save whatever was streamed, even on timeout — partial output is
+		// still useful (e.g. 18k tokens of code before deadline exceeded).
+		if partial := codeBuf.String(); strings.TrimSpace(partial) != "" {
+			res.CodeText = partial
+		}
 		if err != nil {
+			if strings.Contains(err.Error(), "deadline exceeded") && len(res.CodeText) > 500 {
+				res.PromptTok += pt
+				res.ComplTok += ct
+				codeTokTotal += pt + ct
+				fmt.Printf("%s  ⚠ code stage timed out but captured %d chars of partial output%s\n",
+					pColorDim, len(res.CodeText), pColorReset)
+				break
+			}
 			return res, fmt.Errorf("code stage: %w", err)
 		}
 		res.CodeText = codeBuf.String()
@@ -291,7 +304,18 @@ func ContinuePlan(
 		codeIncr, codeStop := progressTicker("coding")
 		pt, ct, err := client.StreamChat(ctx, codeModel, codeMsgs, nil, func(c string) { codeBuf.WriteString(c); codeIncr() })
 		codeStop()
+		if partial := codeBuf.String(); strings.TrimSpace(partial) != "" {
+			res.CodeText = partial
+		}
 		if err != nil {
+			if strings.Contains(err.Error(), "deadline exceeded") && len(res.CodeText) > 500 {
+				res.PromptTok += pt
+				res.ComplTok += ct
+				codeTokTotal += pt + ct
+				fmt.Printf("%s  ⚠ code stage timed out but captured %d chars of partial output%s\n",
+					pColorDim, len(res.CodeText), pColorReset)
+				break
+			}
 			return res, fmt.Errorf("code stage: %w", err)
 		}
 		res.CodeText = codeBuf.String()
