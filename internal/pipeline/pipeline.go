@@ -85,6 +85,15 @@ type Result struct {
 	Combined  string // assembled markdown, ready for renderResponse + extractAndWriteFiles
 	PromptTok int
 	ComplTok  int
+	Tasks     []Task // parsed tasks with status (for TUI display)
+}
+
+// Task represents a single implementation task parsed from the plan.
+type Task struct {
+	ID     int
+	Title  string
+	Status string // "pending", "running", "done", "failed"
+	Output string // generated code for this task
 }
 
 // ShouldRun returns true when the message is complex enough to warrant the pipeline.
@@ -145,92 +154,109 @@ func Run(
 		return res, nil
 	}
 
-	// ── Stage 2: CODE — bounded agentic retry loop ────────────────────────────
-	fmt.Printf("%s  ◆ coding   [%s]%s\n", pColorDim, codeModel, pColorReset)
+	// ── Stage 2: CODE — task-based or monolithic ─────────────────────────────
+	// Try to parse discrete tasks from the plan. If found, execute them
+	// one-by-one with focused prompts and live TUI progress. Otherwise
+	// fall back to the monolithic code stage.
+	tasks := parseTasks(res.PlanText)
 
-	maxRetries := opts.MaxRetries
-	if maxRetries <= 0 {
-		maxRetries = 3
-	}
+	if len(tasks) >= 2 {
+		// Task-based execution: each task gets its own focused prompt.
+		fmt.Printf("%s  ◆ coding   [%s] — %d tasks%s\n", pColorDim, codeModel, len(tasks), pColorReset)
+		codeStart := time.Now()
+		runTaskBased(ctx, client, codeModel, systemPrompt, userRequest, res.PlanText, tasks, res)
+		codeElapsed := time.Since(codeStart)
 
-	codeMsgs := []interface{}{
-		ollama.Message{Role: "system", Content: systemPrompt + codeStageSuffix},
-		ollama.Message{Role: "user", Content: codeUserPrompt(userRequest, res.PlanText)},
-	}
-
-	var lastBuildErr string
-	codeStart := time.Now()
-	var codeTokTotal int
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		var codeBuf strings.Builder
-		codeIncr, codeStop := progressTicker("coding")
-		pt, ct, err := client.StreamChat(ctx, codeModel, codeMsgs, nil, func(c string) { codeBuf.WriteString(c); codeIncr() })
-		codeStop()
-		// Save whatever was streamed, even on timeout — partial output is
-		// still useful (e.g. 18k tokens of code before deadline exceeded).
-		if partial := codeBuf.String(); strings.TrimSpace(partial) != "" {
-			res.CodeText = partial
+		done := 0
+		for _, t := range tasks {
+			if t.Status == "done" {
+				done++
+			}
 		}
-		if err != nil {
-			if strings.Contains(err.Error(), "deadline exceeded") && len(res.CodeText) > 500 {
-				res.PromptTok += pt
-				res.ComplTok += ct
-				codeTokTotal += pt + ct
-				fmt.Printf("%s  ⚠ code stage timed out but captured %d chars of partial output%s\n",
-					pColorDim, len(res.CodeText), pColorReset)
+		fmt.Printf("%s  ✓ code ready  %s(%d/%d tasks · %.1fs · %d tokens)%s\n",
+			pColorGold, pColorDim, done, len(tasks), codeElapsed.Seconds(), res.PromptTok+res.ComplTok, pColorReset)
+	} else {
+		// Monolithic fallback for plans without clear task breakdown.
+		fmt.Printf("%s  ◆ coding   [%s]%s\n", pColorDim, codeModel, pColorReset)
+
+		maxRetries := opts.MaxRetries
+		if maxRetries <= 0 {
+			maxRetries = 3
+		}
+
+		codeMsgs := []interface{}{
+			ollama.Message{Role: "system", Content: systemPrompt + codeStageSuffix},
+			ollama.Message{Role: "user", Content: codeUserPrompt(userRequest, res.PlanText)},
+		}
+
+		var lastBuildErr string
+		codeStart := time.Now()
+		var codeTokTotal int
+		for attempt := 0; attempt <= maxRetries; attempt++ {
+			var codeBuf strings.Builder
+			codeIncr, codeStop := progressTicker("coding")
+			pt, ct, err := client.StreamChat(ctx, codeModel, codeMsgs, nil, func(c string) { codeBuf.WriteString(c); codeIncr() })
+			codeStop()
+			if partial := codeBuf.String(); strings.TrimSpace(partial) != "" {
+				res.CodeText = partial
+			}
+			if err != nil {
+				if strings.Contains(err.Error(), "deadline exceeded") && len(res.CodeText) > 500 {
+					res.PromptTok += pt
+					res.ComplTok += ct
+					codeTokTotal += pt + ct
+					fmt.Printf("%s  ⚠ code stage timed out but captured %d chars of partial output%s\n",
+						pColorDim, len(res.CodeText), pColorReset)
+					break
+				}
+				return res, fmt.Errorf("code stage: %w", err)
+			}
+			res.CodeText = codeBuf.String()
+			res.PromptTok += pt
+			res.ComplTok += ct
+			codeTokTotal += pt + ct
+
+			if opts.Root == "" || attempt == maxRetries {
 				break
 			}
-			return res, fmt.Errorf("code stage: %w", err)
-		}
-		res.CodeText = codeBuf.String()
-		res.PromptTok += pt
-		res.ComplTok += ct
-		codeTokTotal += pt + ct
-
-		// Write files and verify build (only if Root provided).
-		if opts.Root == "" || attempt == maxRetries {
-			break
-		}
-		written := writeCodeFiles(res.CodeText, opts.Root)
-		if len(written) == 0 {
-			break // no files to check
-		}
-		buildResult := autofix.Check(opts.Root, written)
-		if buildResult == nil || buildResult.Passed {
-			break // success
-		}
-
-		buildErrStr := buildResult.Output
-		if buildErrStr == lastBuildErr {
-			// Truncate for display but keep it informative.
-			errPreview := buildErrStr
-			if len(errPreview) > 200 {
-				errPreview = errPreview[:200] + "…"
+			written := writeCodeFiles(res.CodeText, opts.Root)
+			if len(written) == 0 {
+				break
 			}
-			fmt.Printf("%s  [stuck: same build error twice — stopping retry]%s\n", pColorDim, pColorReset)
-			fmt.Printf("%s  %s%s\n", pColorDim, errPreview, pColorReset)
-			break
-		}
-		lastBuildErr = buildErrStr
-		fmt.Printf("%s  [build error — retry %d/%d]%s\n", pColorDim, attempt+1, maxRetries, pColorReset)
+			buildResult := autofix.Check(opts.Root, written)
+			if buildResult == nil || buildResult.Passed {
+				break
+			}
 
-		retryMsg := fmt.Sprintf(
-			"Build failed with the following error:\n\n```\n%s\n```\n\n"+
-				"Fix only the affected function(s). Do not rewrite unchanged parts. "+
-				"Output the corrected file(s) using ```lang:filepath fences.",
-			buildErrStr)
-		// Keep messages bounded: system + original user + latest assistant + latest error.
-		// Trim any prior retry turns before appending the new ones.
-		if len(codeMsgs) > 2 {
-			codeMsgs = codeMsgs[:2]
+			buildErrStr := buildResult.Output
+			if buildErrStr == lastBuildErr {
+				errPreview := buildErrStr
+				if len(errPreview) > 200 {
+					errPreview = errPreview[:200] + "…"
+				}
+				fmt.Printf("%s  [stuck: same build error twice — stopping retry]%s\n", pColorDim, pColorReset)
+				fmt.Printf("%s  %s%s\n", pColorDim, errPreview, pColorReset)
+				break
+			}
+			lastBuildErr = buildErrStr
+			fmt.Printf("%s  [build error — retry %d/%d]%s\n", pColorDim, attempt+1, maxRetries, pColorReset)
+
+			retryMsg := fmt.Sprintf(
+				"Build failed with the following error:\n\n```\n%s\n```\n\n"+
+					"Fix only the affected function(s). Do not rewrite unchanged parts. "+
+					"Output the corrected file(s) using ```lang:filepath fences.",
+				buildErrStr)
+			if len(codeMsgs) > 2 {
+				codeMsgs = codeMsgs[:2]
+			}
+			codeMsgs = append(codeMsgs,
+				ollama.Message{Role: "assistant", Content: res.CodeText},
+				ollama.Message{Role: "user", Content: retryMsg},
+			)
 		}
-		codeMsgs = append(codeMsgs,
-			ollama.Message{Role: "assistant", Content: res.CodeText},
-			ollama.Message{Role: "user", Content: retryMsg},
-		)
+		codeElapsed := time.Since(codeStart)
+		fmt.Printf("%s  ✓ code ready  %s(%.1fs · %d tokens)%s\n", pColorGold, pColorDim, codeElapsed.Seconds(), codeTokTotal, pColorReset)
 	}
-	codeElapsed := time.Since(codeStart)
-	fmt.Printf("%s  ✓ code ready  %s(%.1fs · %d tokens)%s\n", pColorGold, pColorDim, codeElapsed.Seconds(), codeTokTotal, pColorReset)
 
 	// ── Stage 3: TESTS in parallel ────────────────────────────────────────────
 	type stageOut struct {
@@ -394,6 +420,188 @@ func ContinuePlan(
 
 	res.Combined = assemble(res.PlanText, res.CodeText, res.TestText)
 	return res, nil
+}
+
+// ── Task-based execution ──────────────────────────────────────────────────────
+
+// parseTasks extracts individual tasks from the plan's "### Task Breakdown" section.
+// Supports numbered lists (1. ...), bullet lists (- ...), and checkbox lists (- [ ] ...).
+func parseTasks(planText string) []Task {
+	section := extractSection(planText, "Task Breakdown")
+	if section == "" {
+		return nil
+	}
+
+	var tasks []Task
+	taskRe := regexp.MustCompile(`(?m)^(?:\d+[\.\)]\s*|\-\s*(?:\[[ x]\]\s*)?|\*\s*)(.+)$`)
+	for _, m := range taskRe.FindAllStringSubmatch(section, -1) {
+		title := strings.TrimSpace(m[1])
+		if title == "" {
+			continue
+		}
+		// Skip sub-items (indented lines) — they're details, not top-level tasks.
+		lineIdx := strings.Index(section, m[0])
+		if lineIdx > 0 && (section[lineIdx-1] == ' ' || section[lineIdx-1] == '\t') {
+			continue
+		}
+		tasks = append(tasks, Task{
+			ID:     len(tasks) + 1,
+			Title:  title,
+			Status: "pending",
+		})
+	}
+	return tasks
+}
+
+// printTaskList renders the current task status to the terminal.
+func printTaskList(tasks []Task) {
+	for _, t := range tasks {
+		icon := "○"
+		color := pColorDim
+		switch t.Status {
+		case "running":
+			icon = "◉"
+			color = pColorGold
+		case "done":
+			icon = "✓"
+			color = "\033[38;5;70m" // green
+		case "failed":
+			icon = "✗"
+			color = "\033[38;5;196m" // red
+		}
+		fmt.Printf("  %s%s %s%s\n", color, icon, t.Title, pColorReset)
+	}
+}
+
+// updateTaskLine reprints a single task line in-place using ANSI cursor movement.
+func updateTaskLine(task Task, totalTasks int) {
+	icon := "○"
+	color := pColorDim
+	switch task.Status {
+	case "running":
+		icon = "◉"
+		color = pColorGold
+	case "done":
+		icon = "✓"
+		color = "\033[38;5;70m"
+	case "failed":
+		icon = "✗"
+		color = "\033[38;5;196m"
+	}
+	// Move cursor up to the task's line, rewrite it, move back down.
+	linesUp := totalTasks - task.ID + 1
+	fmt.Printf("\033[%dA\r\033[K  %s%s %s%s\033[%dB\r",
+		linesUp, color, icon, task.Title, pColorReset, linesUp)
+}
+
+// runTaskBased executes the code stage as individual task-by-task prompts
+// instead of one monolithic generation. Each task gets a focused prompt
+// and the TUI shows progress as tasks complete.
+func runTaskBased(
+	ctx context.Context,
+	client *ollama.Client,
+	codeModel string,
+	systemPrompt string,
+	userRequest string,
+	planText string,
+	tasks []Task,
+	res *Result,
+) {
+	fmt.Printf("\n%s  ── tasks ──%s\n", pColorDim, pColorReset)
+	printTaskList(tasks)
+	fmt.Println() // blank line below task list for cursor math
+
+	var allCode strings.Builder
+
+	for i := range tasks {
+		tasks[i].Status = "running"
+		updateTaskLine(tasks[i], len(tasks))
+
+		// Build a focused prompt for just this task.
+		taskPrompt := taskCodePrompt(userRequest, planText, tasks[i].Title, allCode.String())
+
+		msgs := []interface{}{
+			ollama.Message{Role: "system", Content: systemPrompt + taskStageSuffix},
+			ollama.Message{Role: "user", Content: taskPrompt},
+		}
+
+		var buf strings.Builder
+		pt, ct, err := client.StreamChat(ctx, codeModel, msgs, nil, func(c string) { buf.WriteString(c) })
+
+		if err != nil {
+			// Save partial output on timeout.
+			if partial := buf.String(); strings.TrimSpace(partial) != "" {
+				tasks[i].Output = partial
+				allCode.WriteString(partial)
+				allCode.WriteString("\n\n")
+			}
+			tasks[i].Status = "failed"
+			updateTaskLine(tasks[i], len(tasks))
+			// Continue with remaining tasks rather than aborting.
+			if strings.Contains(err.Error(), "deadline exceeded") {
+				continue
+			}
+			break
+		}
+
+		tasks[i].Output = buf.String()
+		tasks[i].Status = "done"
+		updateTaskLine(tasks[i], len(tasks))
+
+		allCode.WriteString(buf.String())
+		allCode.WriteString("\n\n")
+		res.PromptTok += pt
+		res.ComplTok += ct
+	}
+
+	res.CodeText = allCode.String()
+	res.Tasks = tasks
+}
+
+const taskStageSuffix = `
+
+## Your role: IMPLEMENTER (single task)
+You are implementing ONE specific task from a larger plan.
+- Output ONLY the files needed for THIS task — do not implement other tasks.
+- Use ` + "```lang:filepath" + ` fences for EVERY file.
+- Include config/manifest files (package.json, tsconfig.json, etc.) ONLY if this is the setup/config task.
+- Handle all error cases. No stubs. No TODOs.
+- If prior tasks already created files you need to import from, assume they exist.
+
+CRITICAL: Begin IMMEDIATELY with code blocks. No preamble.
+`
+
+func taskCodePrompt(request, plan, taskTitle, priorCode string) string {
+	var sb strings.Builder
+	sb.WriteString("## Original Request\n")
+	sb.WriteString(request)
+	sb.WriteString("\n\n## Full Plan\n")
+	sb.WriteString(plan)
+	sb.WriteString("\n\n## YOUR CURRENT TASK\nImplement ONLY this task: **")
+	sb.WriteString(taskTitle)
+	sb.WriteString("**\n\nOutput only the files needed for this specific task.")
+
+	if priorCode != "" {
+		// Give context of what's already been implemented (file list only, not full content).
+		fileRe := regexp.MustCompile("(?m)^```[a-zA-Z0-9_+-]*[:/ ]([^\\s`]+)")
+		var priorFiles []string
+		seen := map[string]bool{}
+		for _, m := range fileRe.FindAllStringSubmatch(priorCode, -1) {
+			if len(m) >= 2 && !seen[m[1]] {
+				priorFiles = append(priorFiles, m[1])
+				seen[m[1]] = true
+			}
+		}
+		if len(priorFiles) > 0 {
+			sb.WriteString("\n\n## Already implemented files (import from these, don't recreate):\n")
+			for _, f := range priorFiles {
+				sb.WriteString("- ")
+				sb.WriteString(f)
+				sb.WriteString("\n")
+			}
+		}
+	}
+	return sb.String()
 }
 
 // assemble stitches the three stage outputs into clean markdown.
@@ -601,6 +809,17 @@ Use these exact headers:
 ### Files
 ### Architecture
 ### Task Breakdown
+
+IMPORTANT: The "### Task Breakdown" section MUST use a numbered list of discrete, implementable tasks.
+Each task should be a single sentence describing ONE unit of work. Example:
+1. Set up project config files (package.json, tsconfig.json, .env.example)
+2. Create database schema and models
+3. Implement user authentication (register, login, JWT)
+4. Build expense CRUD API endpoints
+5. Implement debt simplification algorithm
+6. Create frontend components and pages
+7. Add error handling and validation
+
 ### Risks & Edge Cases
 ### Assumptions
 `
