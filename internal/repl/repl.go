@@ -86,6 +86,8 @@ type Config struct {
 	PlanMode bool
 	// Continue resumes the most recent session
 	Continue bool
+	// Version is the build version string (injected via ldflags)
+	Version string
 }
 
 // Run starts the interactive REPL. Blocks until the user quits.
@@ -340,7 +342,7 @@ func Run(cfg Config) error {
 
 		// Slash commands.
 		if strings.HasPrefix(input, "/") {
-			if quit := handleSlashCommand(input, sess, b, &messages, client, &brainContext, &planMode); quit {
+			if quit := handleSlashCommand(input, sess, b, &messages, client, &brainContext, &planMode, cfg); quit {
 				break
 			}
 			continue
@@ -942,7 +944,7 @@ func runOnce(cfg Config, client *ollama.Client, sess *session.Session,
 }
 
 func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
-	messages *[]interface{}, client *ollama.Client, brainContext *string, planMode *bool) (quit bool) {
+	messages *[]interface{}, client *ollama.Client, brainContext *string, planMode *bool, cfg Config) (quit bool) {
 
 	parts := strings.Fields(input)
 	cmd := parts[0]
@@ -952,6 +954,12 @@ func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
 		return true
 	case "/help":
 		printHelp()
+	case "/version":
+		v := cfg.Version
+		if v == "" {
+			v = "dev"
+		}
+		fmt.Printf("%s● mantis %s%s\n\n", colorGold, v, colorReset)
 	case "/reset":
 		*messages = (*messages)[:1]
 		fmt.Printf("%s● context cleared (brain memory kept)%s\n\n", colorGold, colorReset)
@@ -2324,6 +2332,7 @@ func printHelp() {
 		{"/reject <reason>", "log last suggestion as rejected approach"},
 		{"/decision <text>", "log an architecture decision"},
 		{"/telemetry on|off", "enable / disable anonymous usage upload"},
+		{"/version", "show current version"},
 		{"/quit", "exit  (also Ctrl+C)"},
 	}
 	for _, c := range cmds {
@@ -3035,7 +3044,7 @@ func runWithScanner(cfg Config, client *ollama.Client, sess *session.Session,
 			continue
 		}
 		if strings.HasPrefix(input, "/") {
-			if quit := handleSlashCommand(input, sess, b, &messages, client, &scannerBrainCtx, &scannerPlanMode); quit {
+			if quit := handleSlashCommand(input, sess, b, &messages, client, &scannerBrainCtx, &scannerPlanMode, cfg); quit {
 				break
 			}
 			continue

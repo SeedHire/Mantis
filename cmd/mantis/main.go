@@ -44,6 +44,7 @@ var rootCmd = &cobra.Command{
 			ImagePath: replImage,
 			PlanMode:  replPlan,
 			Continue:  replContinue,
+			Version:   version,
 		}
 		if len(args) > 0 {
 			cfg.InitialQuery = strings.Join(args, " ")
