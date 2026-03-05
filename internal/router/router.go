@@ -389,7 +389,7 @@ func classify(ctx context.Context, message string, hasImage bool, store EmbedSto
 	}
 	for _, kw := range trivialKeywords {
 		if strings.Contains(lower, kw) {
-			scores[TierTrivial] += 0.8
+			scores[TierTrivial] += 1.0
 		}
 	}
 
@@ -461,18 +461,18 @@ func classify(ctx context.Context, message string, hasImage bool, store EmbedSto
 
 var maxKeywords = []string{
 "find all bug", "find bugs", "audit", "code review", "review all",
-"best approach", "compare approach", "which is better", "pros and cons",
+"compare approach", "compare approaches", "compare all", "which is better", "pros and cons",
 "comprehensive", "thorough", "deep dive", "full analysis",
 "all issues", "all problem", "security", "vulnerability",
 "production ready", "production-ready", "before deploy", "before release",
-"should i use", "tradeoff",
 }
 
 var reasonKeywords = []string{
 "why does", "explain how", "how does", "how do i decide",
-"architecture", "design pattern", "trade-off", "when to use",
-"difference between", "what is the best way", "what approach",
+"architecture", "design pattern", "trade-off", "tradeoff", "tradeoffs", "when to use",
+"difference between", "what is the best way", "what approach", "best approach",
 "reasoning", "analyse", "analyze", "pros", "cons",
+"should i use", "when should i use", "how should i",
 // Moved from heavyKeywords — "explain the whole X" is a reasoning question.
 "explain the whole", "explain the entire",
 }
@@ -485,10 +485,13 @@ var heavyKeywords = []string{
 // Specific multi-file project builds (not generic "build a X").
 "create a full", "create an app", "build a full", "build a backend",
 "build a rest api", "build a graphql", "build a microservice",
-"build a complete", "build the entire",
+"build a complete", "build the entire", "the entire", "implement the entire",
 "clone", "scaffold", "full stack", "full-stack", "entire app",
 "rest api", "graphql api", "microservice", "backend for",
 "setup project", "initialize project",
+"implement the whole", "build the whole", "refactor the whole",
+"the whole service", "the whole system", "the whole module", "the whole package",
+"whole notification", "whole user", "whole payment", "whole auth",
 }
 
 var codeKeywords = []string{
@@ -501,7 +504,7 @@ var codeKeywords = []string{
 
 var fastKeywords = []string{
 "what does", "what is this", "explain this line", "what type",
-"how to use", "example of", "show me", "snippet",
+"how to use", "how to", "how do i", "how do you", "example of", "show me", "snippet",
 }
 
 var trivialKeywords = []string{

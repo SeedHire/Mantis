@@ -173,14 +173,18 @@ func Run(cfg Config) error {
 	var embStore *embeddings.Store
 	var routerStore router.EmbedStore
 	mantisDir := filepath.Join(root, ".mantis")
+	// shutdownCtx is cancelled when the REPL exits, signalling background goroutines to stop.
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
+	defer shutdownCancel()
 	if es, err := embeddings.Open(mantisDir, client); err == nil {
 		embStore = es
 		defer embStore.Close()
 		adapter := &routerEmbedAdapter{store: embStore}
 		routerStore = adapter
 		// Re-index brain files and router examples in background.
+		// Uses shutdownCtx so the goroutine stops cleanly when the REPL exits.
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			ctx, cancel := context.WithTimeout(shutdownCtx, 90*time.Second)
 			defer cancel()
 			_ = embStore.IndexBrainFiles(ctx, mantisDir)
 			router.IndexRouterExamples(adapter)
@@ -555,7 +559,7 @@ func Run(cfg Config) error {
 		messages = append(messages, userMsg)
 
 		// Proactive context compression — compress old turns before they cause overflow.
-		messages = compressIfNeeded(messages, client)
+		messages = compressIfNeeded(turnCtx, messages, client)
 
 		// ── Multi-agent fan-out for complex multi-package tasks ───────────────
 		// Gate: TierHeavy or TierCode, graph available, impact spans 4+ files
@@ -775,7 +779,9 @@ func Run(cfg Config) error {
 					colorCopper+colorBold, colorReset, colorDim, totalTok, colorReset)
 
 				// Save full output to .mantis/last-pipeline.md, show compact summary on CLI.
-				pipeline.SaveOutput(root, pRes.Combined)
+				if err := pipeline.SaveOutput(root, pRes.Combined); err != nil {
+					fmt.Printf("%s  ⚠ could not save pipeline output: %v%s\n", colorDim, err, colorReset)
+				}
 				renderResponse(pipeline.CompactSummary(pRes))
 
 				// Write code files to disk — try Combined first, fall back to raw CodeText.
@@ -1521,7 +1527,7 @@ func handleCommitCommand(client *ollama.Client, cfg Config) {
 	}
 
 	var buf strings.Builder
-	_, _, err := client.StreamChat(context.Background(), model, msgs, nil, func(c string) { buf.WriteString(c) })
+	_, _, err := client.StreamChat(context.Background(), model, msgs, &ollama.ModelOptions{Temperature: 0.3, NumCtx: 8192}, func(c string) { buf.WriteString(c) })
 	if err != nil {
 		fmt.Printf("%s✗ failed to generate commit message: %v%s\n\n", colorRed, err, colorReset)
 		return
@@ -1643,7 +1649,7 @@ func handlePRCommand(client *ollama.Client) {
 	}
 
 	var buf strings.Builder
-	_, _, err := client.StreamChat(context.Background(), model, msgs, nil, func(c string) { buf.WriteString(c) })
+	_, _, err := client.StreamChat(context.Background(), model, msgs, &ollama.ModelOptions{Temperature: 0.3, NumCtx: 8192}, func(c string) { buf.WriteString(c) })
 	if err != nil {
 		fmt.Printf("%s✗ failed to generate PR description: %v%s\n\n", colorRed, err, colorReset)
 		return
@@ -2400,7 +2406,7 @@ KEY RULES:
 	// Try native tool calling first.
 	nativeToolsWork := true
 	for iter := 0; iter < maxIter; iter++ {
-		result, err := client.ChatWithTools(ctx, model, agentMsgs, tools, nil)
+		result, err := client.ChatWithTools(ctx, model, agentMsgs, tools, &ollama.ModelOptions{Temperature: 0.15, NumCtx: 32768})
 		if err != nil {
 			nativeToolsWork = false
 			break
@@ -2506,7 +2512,7 @@ After investigation, provide corrected files using edit_file/write_file calls or
 
 	for iter := 0; iter < maxIter; iter++ {
 		var buf bytes.Buffer
-		pt, ct, err := client.StreamChat(ctx, model, agentMsgs, nil, func(chunk string) {
+		pt, ct, err := client.StreamChat(ctx, model, agentMsgs, &ollama.ModelOptions{Temperature: 0.15, NumCtx: 32768}, func(chunk string) {
 			buf.WriteString(chunk)
 		})
 		if err != nil {
@@ -3224,7 +3230,7 @@ func streamEnsemble(ctx context.Context, client *ollama.Client,
 			defer wg.Done()
 			mStart := time.Now()
 			var buf strings.Builder
-			pt, ct, err := client.StreamChat(ctx, model, messages, nil,
+			pt, ct, err := client.StreamChat(ctx, model, messages, &ollama.ModelOptions{Temperature: 0.15, NumCtx: 32768},
 				func(chunk string) { buf.WriteString(chunk) })
 			results[idx] = modelResult{model, buf.String(), pt, ct, err}
 			mu.Lock()
@@ -3288,7 +3294,7 @@ func streamEnsemble(ctx context.Context, client *ollama.Client,
 		ollama.Message{Role: "user", Content: synthPrompt.String()},
 	}
 	synthModel := router.ModelFor(router.TierReason)
-	spt, sct, err := client.StreamChat(ctx, synthModel, synthMessages, nil,
+	spt, sct, err := client.StreamChat(ctx, synthModel, synthMessages, &ollama.ModelOptions{Temperature: 0.3, NumCtx: 32768},
 		func(chunk string) { rb.WriteString(chunk) })
 	if err != nil {
 		// Synthesis failed — just return the longest good response.
@@ -3308,9 +3314,29 @@ func streamEnsemble(ctx context.Context, client *ollama.Client,
 // on 404 until one works. On 400 "prompt too long" it retries with trimmed context.
 // An optional onLive callback (variadic, take at most one) is called for each chunk
 // in addition to accumulating into rb. Used for real-time token streaming to stdout.
+// modelOptsForTier returns temperature and context window settings per tier.
+// Lower temperature → more deterministic, better for code.
+// Higher temperature → more creative, better for explanations.
+// NumCtx=32768 maximises the context window for models that support it.
+func modelOptsForTier(tier router.Tier) *ollama.ModelOptions {
+	temp := 0.5 // default: balanced
+	switch tier {
+	case router.TierTrivial, router.TierFast:
+		temp = 0.5
+	case router.TierCode:
+		temp = 0.15 // deterministic code generation
+	case router.TierReason:
+		temp = 0.3 // analytical but not rigid
+	case router.TierHeavy, router.TierMax:
+		temp = 0.2 // complex code needs consistency
+	}
+	return &ollama.ModelOptions{Temperature: temp, NumCtx: 32768}
+}
+
 func streamWithFallback(ctx context.Context, client *ollama.Client, model string,
 	tier router.Tier, messages []interface{}, rb *strings.Builder, onLive ...func(string)) (int, int, error) {
 
+	opts := modelOptsForTier(tier)
 	tried := map[string]bool{}
 	candidates := []string{model}
 	candidates = append(candidates, router.PreferredModels(tier)...)
@@ -3325,7 +3351,7 @@ func streamWithFallback(ctx context.Context, client *ollama.Client, model string
 		if len(onLive) > 0 && onLive[0] != nil {
 			liveCallback = onLive[0]
 		}
-		pt, ct, err := client.StreamChat(ctx, m, messages, nil,
+		pt, ct, err := client.StreamChat(ctx, m, messages, opts,
 			func(chunk string) { rb.WriteString(chunk); liveCallback(chunk) })
 
 		if err == nil {
@@ -3341,6 +3367,41 @@ func streamWithFallback(ctx context.Context, client *ollama.Client, model string
 		if strings.Contains(errStr, "404") || strings.Contains(errStr, "not found") {
 			rb.Reset()
 			fmt.Printf("%s  [%s not available, trying next…]%s\n", colorDim, m, colorReset)
+			continue
+		}
+
+		// Rate limited or server overloaded — retry with exponential backoff before falling back.
+		if strings.Contains(errStr, "429") || strings.Contains(errStr, "503") ||
+			strings.Contains(errStr, "rate limit") || strings.Contains(errStr, "overloaded") {
+			const maxRetries = 3
+			for attempt := 0; attempt < maxRetries; attempt++ {
+				wait := time.Duration(1<<uint(attempt)) * 2 * time.Second // 2s, 4s, 8s
+				fmt.Printf("%s  [rate limited — retrying in %s (%d/%d)]%s\n",
+					colorDim, wait, attempt+1, maxRetries, colorReset)
+				select {
+				case <-ctx.Done():
+					return 0, 0, ctx.Err()
+				case <-time.After(wait):
+				}
+				rb.Reset()
+				pt, ct, err2 := client.StreamChat(ctx, m, messages, opts,
+					func(chunk string) { rb.WriteString(chunk); liveCallback(chunk) })
+				if err2 == nil {
+					if m != model {
+						fmt.Printf("%s  [switched to %s]%s\n", colorDim, m, colorReset)
+						router.SetResolved(tier, m)
+					}
+					return pt, ct, nil
+				}
+				if !strings.Contains(err2.Error(), "429") && !strings.Contains(err2.Error(), "503") {
+					err = err2
+					break // different error, stop retry loop
+				}
+				err = err2
+			}
+			// Rate limit persisted — fall through to next candidate.
+			rb.Reset()
+			fmt.Printf("%s  [%s still rate limited, trying next…]%s\n", colorDim, m, colorReset)
 			continue
 		}
 
@@ -3495,7 +3556,7 @@ func multiPassReasoning(ctx context.Context, client *ollama.Client, model string
 // compressIfNeeded proactively compresses conversation history when it gets too large.
 // Instead of waiting for a 400 error, it summarizes old turns at ~80% capacity.
 // Estimates tokens as len/3.5 (LLaMA-family average for code).
-func compressIfNeeded(messages []interface{}, client *ollama.Client) []interface{} {
+func compressIfNeeded(callerCtx context.Context, messages []interface{}, client *ollama.Client) []interface{} {
 	// Estimate total tokens in conversation.
 	totalChars := 0
 	for _, m := range messages {
@@ -3563,10 +3624,9 @@ func compressIfNeeded(messages []interface{}, client *ollama.Client) []interface
 	}
 
 	var summaryBuf strings.Builder
-	// BUG-14: defer cancel so the context is released even if StreamChat panics.
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(callerCtx, 30*time.Second)
 	defer cancel()
-	_, _, err := client.StreamChat(ctx, summaryModel, summaryMsgs, nil,
+	_, _, err := client.StreamChat(ctx, summaryModel, summaryMsgs, &ollama.ModelOptions{Temperature: 0.3, NumCtx: 16384},
 		func(chunk string) { summaryBuf.WriteString(chunk) })
 
 	if err != nil || strings.TrimSpace(summaryBuf.String()) == "" {

@@ -16,12 +16,15 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/term"
 
 	"github.com/seedhire/mantis/internal/agent"
 	"github.com/seedhire/mantis/internal/autofix"
@@ -34,6 +37,13 @@ const (
 	pColorReset = "\033[0m"
 	pColorGold  = "\033[38;5;220m"
 	pColorDim   = "\033[38;5;244m"
+)
+
+// planOpts and codeOpts set temperature and context window per stage.
+// Low temperature improves determinism for code; 32768 context fits most projects.
+var (
+	planOpts = &ollama.ModelOptions{Temperature: 0.3, NumCtx: 32768}
+	codeOpts = &ollama.ModelOptions{Temperature: 0.15, NumCtx: 32768}
 )
 
 // doneVerbs is a pool of fun completion words, shown at the end of a pipeline run.
@@ -164,14 +174,14 @@ func Run(
 	}
 	var planBuf strings.Builder
 	planIncr, planStop := progressTicker("planning")
-	pt, ct, err := client.StreamChat(ctx, planModel, planMsgs, nil, func(c string) { planBuf.WriteString(c); planIncr() })
+	pt, ct, err := client.StreamChat(ctx, planModel, planMsgs, planOpts, func(c string) { planBuf.WriteString(c); planIncr() })
 	planElapsed := planStop()
 	if err != nil {
 		// Plan model unavailable — fall back to code model so the pipeline still runs.
 		fmt.Printf("%s  ⚠ plan model unavailable, falling back to %s%s\n", pColorDim, codeModel, pColorReset)
 		planBuf.Reset()
 		planIncr2, planStop2 := progressTicker("planning")
-		pt, ct, err = client.StreamChat(ctx, codeModel, planMsgs, nil, func(c string) { planBuf.WriteString(c); planIncr2() })
+		pt, ct, err = client.StreamChat(ctx, codeModel, planMsgs, codeOpts, func(c string) { planBuf.WriteString(c); planIncr2() })
 		planElapsed = planStop2()
 		if err != nil {
 			return nil, fmt.Errorf("plan stage: %w", err)
@@ -230,7 +240,7 @@ func Run(
 		for attempt := 0; attempt <= maxRetries; attempt++ {
 			var codeBuf strings.Builder
 			codeIncr, codeStop := progressTicker("coding")
-			pt, ct, err := client.StreamChat(ctx, codeModel, codeMsgs, nil, func(c string) { codeBuf.WriteString(c); codeIncr() })
+			pt, ct, err := client.StreamChat(ctx, codeModel, codeMsgs, codeOpts, func(c string) { codeBuf.WriteString(c); codeIncr() })
 			codeStop()
 			if partial := codeBuf.String(); strings.TrimSpace(partial) != "" {
 				res.CodeText = partial
@@ -314,7 +324,7 @@ func Run(
 		}
 		var buf strings.Builder
 		testIncr, testStop := progressTicker("testing")
-		pt, ct, err := client.StreamChat(ctx, codeModel, msgs, nil, func(c string) { buf.WriteString(c); testIncr() })
+		pt, ct, err := client.StreamChat(ctx, codeModel, msgs, codeOpts, func(c string) { buf.WriteString(c); testIncr() })
 		testElapsed := testStop()
 		testCh <- stageOut{buf.String(), pt, ct, testElapsed, err}
 	}()
@@ -372,7 +382,7 @@ func ContinuePlan(
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		var codeBuf strings.Builder
 		codeIncr, codeStop := progressTicker("coding")
-		pt, ct, err := client.StreamChat(ctx, codeModel, codeMsgs, nil, func(c string) { codeBuf.WriteString(c); codeIncr() })
+		pt, ct, err := client.StreamChat(ctx, codeModel, codeMsgs, codeOpts, func(c string) { codeBuf.WriteString(c); codeIncr() })
 		codeStop()
 		if partial := codeBuf.String(); strings.TrimSpace(partial) != "" {
 			res.CodeText = partial
@@ -451,7 +461,7 @@ func ContinuePlan(
 		}
 		var buf strings.Builder
 		testIncr, testStop := progressTicker("testing")
-		pt, ct, err := client.StreamChat(ctx, codeModel, msgs, nil, func(c string) { buf.WriteString(c); testIncr() })
+		pt, ct, err := client.StreamChat(ctx, codeModel, msgs, codeOpts, func(c string) { buf.WriteString(c); testIncr() })
 		testElapsed := testStop()
 		testCh <- stageOut{buf.String(), pt, ct, testElapsed, err}
 	}()
@@ -554,26 +564,59 @@ func taskSuffix(t *Task) string {
 	}
 }
 
+// termWidth returns the current terminal width, defaulting to 80.
+func termWidth() int {
+	w, _, err := term.GetSize(int(os.Stdout.Fd()))
+	if err != nil || w <= 0 {
+		return 80
+	}
+	return w
+}
+
+// truncateTitle shortens a task title so the full line fits in one terminal row.
+// overhead accounts for "  X " prefix (4 chars) + suffix (up to ~30 chars).
+func truncateTitle(title string, maxWidth int) string {
+	// Reserve space for: "  X " prefix (4) + suffix stats (~35) + safety margin
+	available := maxWidth - 40
+	if available < 20 {
+		available = 20
+	}
+	if len(title) <= available {
+		return title
+	}
+	return title[:available-1] + "…"
+}
+
 // printTaskList renders the current task status to the terminal.
 func printTaskList(tasks []Task) {
+	w := termWidth()
 	for i := range tasks {
 		icon, iconColor, titleColor := taskIcon(tasks[i].Status, 0)
-		fmt.Printf("  %s%s %s%s%s%s\n", iconColor, icon, titleColor, tasks[i].Title, pColorReset, taskSuffix(&tasks[i]))
+		title := truncateTitle(tasks[i].Title, w)
+		fmt.Printf("  %s%s %s%s%s%s\n", iconColor, icon, titleColor, title, pColorReset, taskSuffix(&tasks[i]))
 	}
 }
 
 // updateTaskLine reprints a single task line in-place using ANSI cursor movement.
+// Cursor sits after the blank line below the task list, so we need +2:
+// +1 for the target line itself, +1 for the blank line separator.
 func updateTaskLine(tasks []Task, idx, totalTasks, spinFrame int) {
+	if idx < 0 || idx >= len(tasks) || totalTasks <= 0 {
+		return
+	}
 	t := &tasks[idx]
 	icon, iconColor, titleColor := taskIcon(t.Status, spinFrame)
-	linesUp := totalTasks - t.ID + 1
+	title := truncateTitle(t.Title, termWidth())
+	linesUp := totalTasks - t.ID + 2 // +2: blank line + 1-based ID offset
 	fmt.Printf("\033[%dA\r\033[K  %s%s %s%s%s%s\033[%dB\r",
-		linesUp, iconColor, icon, titleColor, t.Title, pColorReset, taskSuffix(t), linesUp)
+		linesUp, iconColor, icon, titleColor, title, pColorReset, taskSuffix(t), linesUp)
 }
 
 // taskSpinner starts a background goroutine that animates spinner icons
 // on all "running" tasks. Returns a stop function.
-func taskSpinner(tasks []Task, totalTasks int, mu *sync.Mutex) func() {
+// outMu protects stdout writes so ANSI escape sequences don't interleave
+// between the spinner goroutine and the main task goroutines.
+func taskSpinner(tasks []Task, totalTasks int, mu *sync.Mutex, outMu *sync.Mutex) func() {
 	done := make(chan struct{})
 	go func() {
 		frame := 0
@@ -586,11 +629,13 @@ func taskSpinner(tasks []Task, totalTasks int, mu *sync.Mutex) func() {
 			case <-ticker.C:
 				frame++
 				mu.Lock()
+				outMu.Lock()
 				for i := range tasks {
 					if tasks[i].Status == "running" {
 						updateTaskLine(tasks, i, totalTasks, frame)
 					}
 				}
+				outMu.Unlock()
 				mu.Unlock()
 			}
 		}
@@ -619,11 +664,13 @@ func runTaskBased(
 	fmt.Println() // blank line below task list for cursor math
 
 	var mu sync.Mutex
+	var outMu sync.Mutex // protects stdout ANSI writes from interleaving
 	var allCode strings.Builder
 	var totalPT, totalCT int
+	var allWrittenFiles []string // tracks all files written across tasks
 
 	// Start the spinner animation for running tasks.
-	stopSpinner := taskSpinner(tasks, len(tasks), &mu)
+	stopSpinner := taskSpinner(tasks, len(tasks), &mu, &outMu)
 	defer stopSpinner()
 
 	// defaultTaskTimeout is 8 minutes per task — generous but bounded.
@@ -632,26 +679,28 @@ func runTaskBased(
 	}
 
 	// runOneTask executes a single task and updates its status.
-	runOneTask := func(i int, priorCode string) {
+	runOneTask := func(i int, writtenFiles []string) {
 		mu.Lock()
 		tasks[i].Status = "running"
 		tasks[i].StartTime = time.Now()
 		atomic.StoreInt64(&tasks[i].streamTok, 0)
+		outMu.Lock()
 		updateTaskLine(tasks, i, len(tasks), 0)
+		outMu.Unlock()
 		mu.Unlock()
 
 		// Each task gets its own deadline so a slow task doesn't starve siblings.
 		taskCtx, taskCancel := context.WithTimeout(ctx, taskTimeout)
 		defer taskCancel()
 
-		taskPrompt := taskCodePrompt(userRequest, planText, tasks[i].Title, priorCode)
+		taskPrompt := taskCodePrompt(userRequest, planText, tasks[i].Title, root, writtenFiles)
 		msgs := []interface{}{
 			ollama.Message{Role: "system", Content: systemPrompt + taskStageSuffix},
 			ollama.Message{Role: "user", Content: taskPrompt},
 		}
 
 		var buf strings.Builder
-		pt, ct, err := client.StreamChat(taskCtx, codeModel, msgs, nil, func(c string) {
+		pt, ct, err := client.StreamChat(taskCtx, codeModel, msgs, codeOpts, func(c string) {
 			buf.WriteString(c)
 			atomic.AddInt64(&tasks[i].streamTok, 1)
 		})
@@ -668,27 +717,121 @@ func runTaskBased(
 				allCode.WriteString(partial)
 				allCode.WriteString("\n\n")
 				if root != "" {
-					tasks[i].FileCount = len(extractAndApplyChanges(partial, root))
+					written := extractAndApplyChanges(partial, root)
+					tasks[i].FileCount = len(written)
+					allWrittenFiles = append(allWrittenFiles, written...)
 				}
 			}
 			tasks[i].Status = "failed"
+			outMu.Lock()
 			updateTaskLine(tasks, i, len(tasks), 0)
+			outMu.Unlock()
 			return
 		}
 
 		code := buf.String()
 		tasks[i].Output = code
-		tasks[i].Status = "done"
 		allCode.WriteString(code)
 		allCode.WriteString("\n\n")
 		totalPT += pt
 		totalCT += ct
 
 		// Write files to disk immediately so user sees progress.
+		var written []string
 		if root != "" {
-			tasks[i].FileCount = len(extractAndApplyChanges(code, root))
+			written = extractAndApplyChanges(code, root)
+			tasks[i].FileCount = len(written)
+			allWrittenFiles = append(allWrittenFiles, written...)
 		}
+
+		// Iterative fix loop: build check + content validation, up to 3 retries.
+		// Mirrors the monolithic path: retry with error context, stuck detection
+		// (same error twice = stop), always try to fix rather than fail.
+		if root != "" && len(written) > 0 {
+			const maxTaskRetries = 3
+			var lastBuildErr string
+			lastCode := code
+
+			for attempt := 0; attempt < maxTaskRetries; attempt++ {
+				// Check build.
+				buildResult := autofix.Check(root, written)
+				buildPassed := buildResult == nil || buildResult.Passed
+
+				// Check content quality.
+				valWarnings, stubRatio := validateContent(written)
+				qualityOK := stubRatio <= 0.3
+
+				if buildPassed && qualityOK {
+					break // all good
+				}
+
+				// Build the retry prompt with all issues.
+				var retryReason strings.Builder
+				if !buildPassed {
+					buildErrStr := buildResult.Output
+					// Stuck detection: same build error twice means model can't fix it.
+					if buildErrStr == lastBuildErr {
+						errPreview := buildErrStr
+						if len(errPreview) > 200 {
+							errPreview = errPreview[:200] + "…"
+						}
+						fmt.Printf("%s  [task %d: stuck on same error — moving on]%s\n", pColorDim, tasks[i].ID, pColorReset)
+						fmt.Printf("%s  %s%s\n", pColorDim, errPreview, pColorReset)
+						break
+					}
+					lastBuildErr = buildErrStr
+					retryReason.WriteString(fmt.Sprintf("Build failed:\n```\n%s\n```\n\n", buildErrStr))
+				}
+				if !qualityOK && len(valWarnings) > 0 {
+					retryReason.WriteString("Code quality issues found:\n")
+					for _, w := range valWarnings {
+						retryReason.WriteString("- " + w + "\n")
+					}
+					retryReason.WriteString("\nReplace ALL placeholders and stubs with real implementations.\n")
+				}
+
+				fmt.Printf("%s  [task %d: fixing issues — attempt %d/%d]%s\n",
+					pColorDim, tasks[i].ID, attempt+1, maxTaskRetries, pColorReset)
+
+				retryMsgs := []interface{}{
+					msgs[0], msgs[1], // system + original user prompt
+					ollama.Message{Role: "assistant", Content: lastCode},
+					ollama.Message{Role: "user", Content: retryReason.String() +
+						"Fix ONLY the broken parts. Use ```edit:filepath blocks with <<<SEARCH/===/>>>SEARCH markers for existing files. " +
+						"Only use ```lang:filepath for brand new files."},
+				}
+
+				var retryBuf strings.Builder
+				rpt, rct, rerr := client.StreamChat(taskCtx, codeModel, retryMsgs, codeOpts, func(c string) {
+					retryBuf.WriteString(c)
+					atomic.AddInt64(&tasks[i].streamTok, 1)
+				})
+				if rerr != nil || strings.TrimSpace(retryBuf.String()) == "" {
+					break // stream failed, keep what we have
+				}
+
+				retryCode := retryBuf.String()
+				retryWritten := extractAndApplyChanges(retryCode, root)
+				allWrittenFiles = append(allWrittenFiles, retryWritten...)
+				tasks[i].FileCount += len(retryWritten)
+				allCode.WriteString(retryCode)
+				allCode.WriteString("\n\n")
+				totalPT += rpt
+				totalCT += rct
+				tasks[i].Tokens += rpt + rct
+				lastCode = retryCode
+
+				// Update written files list for next iteration's check.
+				if len(retryWritten) > 0 {
+					written = append(written, retryWritten...)
+				}
+			}
+		}
+
+		tasks[i].Status = "done"
+		outMu.Lock()
 		updateTaskLine(tasks, i, len(tasks), 0)
+		outMu.Unlock()
 	}
 
 	// Phase 1: Run first two tasks sequentially.
@@ -699,10 +842,19 @@ func runTaskBased(
 	if len(tasks) < seqCount {
 		seqCount = len(tasks)
 	}
+
 	for i := 0; i < seqCount; i++ {
-		runOneTask(i, allCode.String())
+		mu.Lock()
+		snapshot := make([]string, len(allWrittenFiles))
+		copy(snapshot, allWrittenFiles)
+		mu.Unlock()
+		runOneTask(i, snapshot)
+
+		// Install dependencies after the first task (setup/config task).
+		if i == 0 && root != "" {
+			installDeps(root)
+		}
 	}
-	foundationCode := allCode.String()
 
 	if len(tasks) > seqCount {
 		// Phase 2: Run remaining tasks in parallel batches.
@@ -716,26 +868,24 @@ func runTaskBased(
 			}
 			batch := remaining[batchStart:batchEnd]
 
-			// Snapshot prior code for this batch (all prior batches + foundation).
+			// Snapshot written files for this batch.
 			mu.Lock()
-			priorSnapshot := allCode.String()
+			snapshot := make([]string, len(allWrittenFiles))
+			copy(snapshot, allWrittenFiles)
 			mu.Unlock()
 
 			var wg sync.WaitGroup
 			for j := range batch {
 				taskIdx := seqCount + batchStart + j // index into original tasks slice
 				wg.Add(1)
-				go func(idx int, prior string) {
+				go func(idx int, files []string) {
 					defer wg.Done()
-					runOneTask(idx, prior)
-				}(taskIdx, priorSnapshot)
+					runOneTask(idx, files)
+				}(taskIdx, snapshot)
 			}
 			wg.Wait()
 		}
 	}
-
-	// Use foundation code if nothing else succeeded.
-	_ = foundationCode
 
 	res.PromptTok += totalPT
 	res.ComplTok += totalCT
@@ -768,10 +918,106 @@ CRITICAL RULES to avoid breaking parallel tasks:
 3. Use CONSISTENT constructor signatures: if prior tasks use dependency injection (passing db/repo as args), do the same.
 4. If you need a type from another file, import it — do NOT copy-paste or redefine it inline.
 
+ABSOLUTE RULES — violation means the code is REJECTED:
+1. Every function body MUST have real logic — never return nil/undefined as a stub.
+2. Every import MUST match exact exports shown in "Already implemented files" below.
+3. If referencing a type from a prior file, use the EXACT name and field names shown.
+4. NEVER write "// TODO", "// FIXME", "throw new Error('not implemented')", or any placeholder.
+5. If you cannot fully implement something, OMIT it entirely rather than stubbing it.
+
 CRITICAL: Begin IMMEDIATELY with code blocks. No preamble.
 `
 
-func taskCodePrompt(request, plan, taskTitle, priorCode string) string {
+// readPriorContext reads actual file content from disk for files written by prior tasks.
+// This gives downstream tasks exact type signatures, interfaces, and exports to import from.
+// Prioritizes model/type files first. Caps total output at maxChars.
+func readPriorContext(root string, writtenFiles []string, maxChars int) string {
+	if root == "" || len(writtenFiles) == 0 {
+		return ""
+	}
+
+	// Sort: prioritize files with model/type/interface in path.
+	type fileEntry struct {
+		path     string
+		priority int
+	}
+	entries := make([]fileEntry, 0, len(writtenFiles))
+	for _, f := range writtenFiles {
+		lower := strings.ToLower(f)
+		p := 0
+		for _, kw := range []string{"model", "type", "interface", "schema", "entity"} {
+			if strings.Contains(lower, kw) {
+				p = 1
+				break
+			}
+		}
+		entries = append(entries, fileEntry{path: f, priority: p})
+	}
+	// Stable sort: priority files first.
+	for i := 1; i < len(entries); i++ {
+		for j := i; j > 0 && entries[j].priority > entries[j-1].priority; j-- {
+			entries[j], entries[j-1] = entries[j-1], entries[j]
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString("\n\n## Already implemented files (import from these, don't recreate):\n")
+	totalChars := 0
+	const maxLinesPerFile = 60
+
+	for _, e := range entries {
+		if totalChars >= maxChars {
+			break
+		}
+		absPath := e.path
+		if !filepath.IsAbs(absPath) {
+			absPath = filepath.Join(root, absPath)
+		}
+
+		// Skip binary/generated/vendor paths.
+		lower := strings.ToLower(absPath)
+		if strings.Contains(lower, "node_modules") || strings.Contains(lower, ".git/") {
+			continue
+		}
+
+		data, err := os.ReadFile(absPath)
+		if err != nil {
+			continue
+		}
+		content := string(data)
+
+		// Skip likely binary files.
+		if len(content) > 0 && strings.ContainsRune(content[:min(len(content), 512)], 0) {
+			continue
+		}
+
+		// Take first N lines.
+		lines := strings.SplitN(content, "\n", maxLinesPerFile+1)
+		if len(lines) > maxLinesPerFile {
+			lines = lines[:maxLinesPerFile]
+		}
+		snippet := strings.Join(lines, "\n")
+
+		// Determine relative path for display.
+		relPath := e.path
+		if filepath.IsAbs(relPath) {
+			if rel, err := filepath.Rel(root, relPath); err == nil {
+				relPath = rel
+			}
+		}
+
+		block := fmt.Sprintf("\n### %s\n```\n%s\n```\n", relPath, snippet)
+		if totalChars+len(block) > maxChars {
+			break
+		}
+		sb.WriteString(block)
+		totalChars += len(block)
+	}
+
+	return sb.String()
+}
+
+func taskCodePrompt(request, plan, taskTitle, root string, writtenFiles []string) string {
 	var sb strings.Builder
 	sb.WriteString("## Original Request\n")
 	sb.WriteString(request)
@@ -781,25 +1027,9 @@ func taskCodePrompt(request, plan, taskTitle, priorCode string) string {
 	sb.WriteString(taskTitle)
 	sb.WriteString("**\n\nOutput only the files needed for this specific task.")
 
-	if priorCode != "" {
-		// Give context of what's already been implemented (file list only, not full content).
-		fileRe := regexp.MustCompile("(?m)^```[a-zA-Z0-9_+-]*[:/ ]([^\\s`]+)")
-		var priorFiles []string
-		seen := map[string]bool{}
-		for _, m := range fileRe.FindAllStringSubmatch(priorCode, -1) {
-			if len(m) >= 2 && !seen[m[1]] {
-				priorFiles = append(priorFiles, m[1])
-				seen[m[1]] = true
-			}
-		}
-		if len(priorFiles) > 0 {
-			sb.WriteString("\n\n## Already implemented files (import from these, don't recreate):\n")
-			for _, f := range priorFiles {
-				sb.WriteString("- ")
-				sb.WriteString(f)
-				sb.WriteString("\n")
-			}
-		}
+	priorCtx := readPriorContext(root, writtenFiles, 12000)
+	if priorCtx != "" {
+		sb.WriteString(priorCtx)
 	}
 	return sb.String()
 }
@@ -819,15 +1049,19 @@ func assemble(plan, code, tests string) string {
 }
 
 // SaveOutput writes the full pipeline result to .mantis/last-pipeline.md for reference.
-func SaveOutput(root, combined string) {
+// Returns an error if the write fails; callers should surface this to the user.
+func SaveOutput(root, combined string) error {
 	dir := filepath.Join(root, ".mantis")
-	_ = os.MkdirAll(dir, 0o755)
-	_ = os.WriteFile(filepath.Join(dir, "last-pipeline.md"), []byte(combined), 0o644)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "last-pipeline.md"), []byte(combined), 0o644)
 }
 
 // CompactSummary returns a short CLI-friendly summary of the pipeline result.
 // It extracts the plan overview + file list, omitting verbose sections like
 // Architecture, Task Breakdown, Risks, and Assumptions.
+// When task-based execution was used, it includes per-task status.
 func CompactSummary(res *Result) string {
 	var sb strings.Builder
 
@@ -857,18 +1091,46 @@ func CompactSummary(res *Result) string {
 		}
 	}
 
-	// Count code files written.
-	codeFiles := countCodeFences(res.CodeText)
-	testFiles := countCodeFences(res.TestText)
-	if codeFiles > 0 || testFiles > 0 {
-		sb.WriteString("\n---\n\n")
-		if codeFiles > 0 {
-			sb.WriteString(fmt.Sprintf("**%d implementation file(s)** written\n", codeFiles))
+	// Task-based execution: show per-task breakdown.
+	if len(res.Tasks) > 0 {
+		sb.WriteString("\n---\n\n### Tasks\n\n")
+		done, failed, totalFiles := 0, 0, 0
+		for _, t := range res.Tasks {
+			switch t.Status {
+			case "done":
+				done++
+				sb.WriteString(fmt.Sprintf("- ✓ %s", t.Title))
+			case "failed":
+				failed++
+				sb.WriteString(fmt.Sprintf("- ✗ %s", t.Title))
+			default:
+				sb.WriteString(fmt.Sprintf("- ○ %s", t.Title))
+			}
+			if t.FileCount > 0 {
+				sb.WriteString(fmt.Sprintf(" (%d files)", t.FileCount))
+				totalFiles += t.FileCount
+			}
+			sb.WriteString("\n")
 		}
-		if testFiles > 0 {
-			sb.WriteString(fmt.Sprintf("**%d test file(s)** written\n", testFiles))
+		sb.WriteString(fmt.Sprintf("\n**%d/%d tasks completed** · **%d file(s)** written\n", done, len(res.Tasks), totalFiles))
+		if failed > 0 {
+			sb.WriteString(fmt.Sprintf("⚠ %d task(s) failed\n", failed))
 		}
 		sb.WriteString(fmt.Sprintf("\n> Full output saved to `.mantis/last-pipeline.md`\n"))
+	} else {
+		// Monolithic path: count code fences.
+		codeFiles := countCodeFences(res.CodeText)
+		testFiles := countCodeFences(res.TestText)
+		if codeFiles > 0 || testFiles > 0 {
+			sb.WriteString("\n---\n\n")
+			if codeFiles > 0 {
+				sb.WriteString(fmt.Sprintf("**%d implementation file(s)** written\n", codeFiles))
+			}
+			if testFiles > 0 {
+				sb.WriteString(fmt.Sprintf("**%d test file(s)** written\n", testFiles))
+			}
+			sb.WriteString(fmt.Sprintf("\n> Full output saved to `.mantis/last-pipeline.md`\n"))
+		}
 	}
 
 	return sb.String()
@@ -1043,6 +1305,106 @@ func writeCodeFiles(text, root string) []string {
 	}
 	return paths
 }
+
+// validateContent scans written files for placeholder/stub code.
+// Returns warnings and a stubRatio (files with issues / total files).
+func validateContent(files []string) (warnings []string, stubRatio float64) {
+	if len(files) == 0 {
+		return nil, 0
+	}
+
+	placeholderPatterns := []string{
+		"// TODO", "# TODO", "// FIXME", "# FIXME",
+		"// placeholder", "// implement me", "# implement me",
+		"throw new Error(\"not implemented\")", "throw new Error('not implemented')",
+		"NotImplementedError", "pass  # stub", "pass # stub",
+	}
+	stubPatterns := []string{
+		"return nil", "return undefined", "return {}", "return []",
+		"return null", "return None",
+	}
+
+	issueCount := 0
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		content := strings.ToLower(string(data))
+		hasIssue := false
+		for _, p := range placeholderPatterns {
+			if strings.Contains(content, strings.ToLower(p)) {
+				warnings = append(warnings, fmt.Sprintf("%s: contains '%s'", filepath.Base(f), p))
+				hasIssue = true
+				break
+			}
+		}
+		if !hasIssue {
+			// Check for stub-only functions (very short functions that just return).
+			for _, p := range stubPatterns {
+				if strings.Count(content, strings.ToLower(p)) > 2 {
+					warnings = append(warnings, fmt.Sprintf("%s: multiple stub returns ('%s')", filepath.Base(f), p))
+					hasIssue = true
+					break
+				}
+			}
+		}
+		if hasIssue {
+			issueCount++
+		}
+	}
+	stubRatio = float64(issueCount) / float64(len(files))
+	return
+}
+
+// installDeps runs dependency installation after the setup task completes.
+// Best effort — logs but doesn't fail the pipeline on install error.
+func installDeps(root string) {
+	type depCmd struct {
+		check   string // file that must exist
+		noDir   string // directory that must NOT exist (skip if present)
+		cmd     string
+		args    []string
+		timeout time.Duration
+	}
+
+	cmds := []depCmd{
+		{"package.json", "node_modules", "npm", []string{"install", "--prefer-offline"}, 60 * time.Second},
+		{"go.mod", "", "go", []string{"mod", "tidy"}, 30 * time.Second},
+		{"requirements.txt", "", "pip", []string{"install", "-r", "requirements.txt"}, 60 * time.Second},
+		{"pyproject.toml", "", "pip", []string{"install", "-e", "."}, 60 * time.Second},
+	}
+
+	for _, dc := range cmds {
+		checkPath := filepath.Join(root, dc.check)
+		if _, err := os.Stat(checkPath); err != nil {
+			continue
+		}
+		if dc.noDir != "" {
+			if _, err := os.Stat(filepath.Join(root, dc.noDir)); err == nil {
+				continue // already installed
+			}
+		}
+		fmt.Printf("%s  ◆ installing dependencies...%s\n", pColorDim, pColorReset)
+
+		ctx, cancel := context.WithTimeout(context.Background(), dc.timeout)
+		cmd := execCommand(ctx, dc.cmd, dc.args...)
+		cmd.Dir = root
+		out, err := cmd.CombinedOutput()
+		cancel()
+		if err != nil {
+			preview := string(out)
+			if len(preview) > 200 {
+				preview = preview[:200] + "…"
+			}
+			fmt.Printf("%s  ⚠ install warning: %s%s\n", pColorDim, preview, pColorReset)
+		}
+		return // only run the first matching installer
+	}
+}
+
+// execCommand wraps exec.CommandContext so tests can stub it.
+var execCommand = exec.CommandContext
 
 // ── Stage system-prompt suffixes ──────────────────────────────────────────────
 // Appended to the base system prompt so each stage inherits full project

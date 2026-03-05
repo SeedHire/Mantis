@@ -179,6 +179,8 @@ func (c *Client) StreamChat(
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
+	// Default 64 KB buffer is too small for large model responses; raise to 10 MB.
+	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
