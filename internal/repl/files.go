@@ -8,7 +8,7 @@ import (
 "strings"
 )
 
-// diffLines produces a compact unified diff between old and new content.
+// diffLines produces a compact diff between old and new content using LCS.
 // Returns empty string if the content is identical.
 // Shows at most 8 diff lines; truncates the rest with a count.
 func diffLines(old, newContent string) string {
@@ -18,50 +18,89 @@ func diffLines(old, newContent string) string {
 	oldLines := strings.Split(old, "\n")
 	newLines := strings.Split(newContent, "\n")
 
-	// Simple line diff: collect added/removed lines (no context).
-	oldSet := make(map[string]bool, len(oldLines))
-	for _, l := range oldLines {
-		oldSet[l] = true
-	}
-	newSet := make(map[string]bool, len(newLines))
-	for _, l := range newLines {
-		newSet[l] = true
-	}
+	removed, added := lcsEditScript(oldLines, newLines)
 
 	const maxShow = 8
-	var parts []string
-	added, removed := 0, 0
+	total := len(removed) + len(added)
+	if total == 0 {
+		return ""
+	}
 
-	// Removed lines (in old but not in new).
-	for _, l := range oldLines {
-		if !newSet[l] && l != "" {
-			removed++
-			if len(parts) < maxShow {
-				parts = append(parts, colorRed+"-  "+l+colorReset)
-			}
+	var parts []string
+	for _, l := range removed {
+		if len(parts) >= maxShow {
+			break
+		}
+		if l != "" {
+			parts = append(parts, colorRed+"-  "+l+colorReset)
 		}
 	}
-	// Added lines (in new but not in old).
-	for _, l := range newLines {
-		if !oldSet[l] && l != "" {
-			added++
-			if len(parts) < maxShow {
-				parts = append(parts, colorGreen+"+  "+l+colorReset)
-			}
+	for _, l := range added {
+		if len(parts) >= maxShow {
+			break
+		}
+		if l != "" {
+			parts = append(parts, colorGreen+"+  "+l+colorReset)
 		}
 	}
 
 	if len(parts) == 0 {
 		return ""
 	}
-
-	total := added + removed
-	shown := len(parts)
 	result := strings.Join(parts, "\n")
+	shown := len(parts)
 	if shown < total {
 		result += fmt.Sprintf("\n%s   … %d more line(s)%s", colorDim, total-shown, colorReset)
 	}
 	return result
+}
+
+// lcsEditScript returns the lines removed from a and lines added in b, computed
+// via the Longest Common Subsequence algorithm. Correctly handles duplicate lines.
+// Caps input at 200 lines per side to bound O(n·m) time for large files.
+func lcsEditScript(a, b []string) (removed, added []string) {
+	const maxLines = 200
+	if len(a) > maxLines {
+		a = a[len(a)-maxLines:]
+	}
+	if len(b) > maxLines {
+		b = b[len(b)-maxLines:]
+	}
+
+	m, n := len(a), len(b)
+	// Build LCS length table.
+	dp := make([][]int, m+1)
+	for i := range dp {
+		dp[i] = make([]int, n+1)
+	}
+	for i := 1; i <= m; i++ {
+		for j := 1; j <= n; j++ {
+			if a[i-1] == b[j-1] {
+				dp[i][j] = dp[i-1][j-1] + 1
+			} else if dp[i-1][j] >= dp[i][j-1] {
+				dp[i][j] = dp[i-1][j]
+			} else {
+				dp[i][j] = dp[i][j-1]
+			}
+		}
+	}
+
+	// Backtrack to build the edit script.
+	i, j := m, n
+	for i > 0 || j > 0 {
+		switch {
+		case i > 0 && j > 0 && a[i-1] == b[j-1]:
+			i--
+			j--
+		case j > 0 && (i == 0 || dp[i][j-1] >= dp[i-1][j]):
+			added = append([]string{b[j-1]}, added...)
+			j--
+		default:
+			removed = append([]string{a[i-1]}, removed...)
+			i--
+		}
+	}
+	return
 }
 
 // WrittenFile records a file that was written from an AI response.
@@ -72,70 +111,149 @@ Diff    string // non-empty for modified files: compact +/- diff summary
 }
 
 // extractAndWriteFiles scans the AI response for fenced code blocks tagged
-// with a file path (format: ```lang:path/to/file or ```lang filepath),
-// writes each one to disk relative to root, and returns the list of files written.
+// with a file path. Handles two formats:
+//   - ```lang:path/to/file — whole-file write (new files or full replacements)
+//   - ```edit:path/to/file — SEARCH/REPLACE patch for existing files
+//
+// Edit blocks are processed first; whole-file blocks skip files already patched.
 func extractAndWriteFiles(response, root string) []WrittenFile {
-var written []WrittenFile
+	var written []WrittenFile
+	seen := map[string]bool{}
 
-// No dot requirement — we validate with looksLikeFilePath below so that
-// extensionless files like Makefile and Dockerfile are captured too.
-re := regexp.MustCompile("(?m)^```[a-zA-Z0-9_+-]*[:/ ]([^\\s`]+)\\n([\\s\\S]*?)\\n```")
-matches := re.FindAllStringSubmatchIndex(response, -1)
+	// Capture group 1 = block type (lang or "edit"), group 2 = filepath, group 3 = body.
+	re := regexp.MustCompile("(?m)^```([a-zA-Z0-9_+-]*)[:/ ]([^\\s`]+)\\n([\\s\\S]*?)\\n```")
 
-seen := map[string]bool{}
-for _, loc := range matches {
-filePath := strings.TrimSpace(response[loc[2]:loc[3]])
-content := response[loc[4]:loc[5]]
+	for _, m := range re.FindAllStringSubmatch(response, -1) {
+		blockType := strings.ToLower(m[1]) // "go", "ts", "edit", etc.
+		filePath := strings.TrimSpace(m[2])
+		body := m[3]
 
-if filePath == "" || seen[filePath] {
-continue
-}
-if !looksLikeFilePath(filePath) {
-continue
-}
-// Reject filenames that bleed into content (e.g., "README.mdbash npm install").
-if strings.ContainsAny(filePath, " \t") || len(filePath) > 200 {
-continue
-}
-seen[filePath] = true
+		if filePath == "" {
+			continue
+		}
+		if !looksLikeFilePath(filePath) {
+			continue
+		}
+		if strings.ContainsAny(filePath, " \t") || len(filePath) > 200 {
+			continue
+		}
+		if filepath.IsAbs(filePath) {
+			continue
+		}
+		clean := filepath.Clean(filePath)
+		if strings.HasPrefix(clean, "..") {
+			continue
+		}
+		if seen[clean] {
+			continue
+		}
+		seen[clean] = true
 
-// Safety: reject absolute paths and path traversal.
-if filepath.IsAbs(filePath) {
-continue
-}
-clean := filepath.Clean(filePath)
-if strings.HasPrefix(clean, "..") {
-continue
-}
+		if blockType == "edit" {
+			// Apply SEARCH/REPLACE patches — does not overwrite; only patches existing files.
+			wfs := applySearchReplacePatches(clean, body, root)
+			written = append(written, wfs...)
+		} else {
+			// Whole-file write.
+			dest := filepath.Join(root, clean)
+			_, statErr := os.Stat(dest)
+			isNew := os.IsNotExist(statErr)
 
-dest := filepath.Join(root, clean)
-
-_, statErr := os.Stat(dest)
-isNew := os.IsNotExist(statErr)
-
-// Capture old content for diff display before overwriting.
-var oldContent string
-if !isNew {
-	if b, err := os.ReadFile(dest); err == nil {
-		oldContent = string(b)
+			var oldContent string
+			if !isNew {
+				if b, err := os.ReadFile(dest); err == nil {
+					oldContent = string(b)
+				}
+			}
+			if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+				continue
+			}
+			if err := os.WriteFile(dest, []byte(body+"\n"), 0o644); err != nil {
+				continue
+			}
+			diff := ""
+			if !isNew {
+				diff = diffLines(oldContent, body+"\n")
+			}
+			written = append(written, WrittenFile{Path: clean, Created: isNew, Diff: diff})
+		}
 	}
+
+	return written
 }
 
-if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-continue
-}
-if err := os.WriteFile(dest, []byte(content+"\n"), 0o644); err != nil {
-continue
-}
+// applySearchReplacePatches reads the file at root/filePath, applies every
+// <<<SEARCH/===/>>>SEARCH section in body, writes the result, and returns the
+// WrittenFile record. Skips individual sections that are not found or ambiguous.
+func applySearchReplacePatches(filePath, body, root string) []WrittenFile {
+	dest := filepath.Join(root, filePath)
+	data, err := os.ReadFile(dest)
+	if err != nil {
+		fmt.Printf("%s  ⚠ edit: %s not found (skipped)%s\n", colorDim, filePath, colorReset)
+		return nil
+	}
 
-diff := ""
-if !isNew {
-	diff = diffLines(oldContent, content+"\n")
-}
-written = append(written, WrittenFile{Path: clean, Created: isNew, Diff: diff})
-}
+	const searchOpen = "<<<SEARCH"
+	const separator = "==="
+	const searchClose = ">>>SEARCH"
 
-return written
+	oldContent := string(data)
+	content := oldContent
+	applied := 0
+	remaining := body
+
+	for {
+		openIdx := strings.Index(remaining, searchOpen)
+		if openIdx < 0 {
+			break
+		}
+		remaining = remaining[openIdx+len(searchOpen):]
+		if len(remaining) > 0 && remaining[0] == '\n' {
+			remaining = remaining[1:]
+		}
+
+		sepIdx := strings.Index(remaining, "\n"+separator+"\n")
+		if sepIdx < 0 {
+			break
+		}
+		oldText := remaining[:sepIdx]
+		remaining = remaining[sepIdx+len("\n"+separator+"\n"):]
+
+		var newText string
+		closeIdx := strings.Index(remaining, "\n"+searchClose)
+		if closeIdx < 0 {
+			closeIdx = strings.Index(remaining, searchClose)
+			if closeIdx < 0 {
+				break
+			}
+			newText = strings.TrimRight(remaining[:closeIdx], "\n")
+			remaining = remaining[closeIdx+len(searchClose):]
+		} else {
+			newText = remaining[:closeIdx]
+			remaining = remaining[closeIdx+1+len(searchClose):]
+		}
+
+		count := strings.Count(content, oldText)
+		if count == 0 {
+			fmt.Printf("%s  ⚠ edit %s: SEARCH text not found (skipped)%s\n", colorDim, filePath, colorReset)
+			continue
+		}
+		if count > 1 {
+			fmt.Printf("%s  ⚠ edit %s: SEARCH text ambiguous (%d matches, skipped)%s\n", colorDim, filePath, count, colorReset)
+			continue
+		}
+		content = strings.Replace(content, oldText, newText, 1)
+		applied++
+	}
+
+	if applied == 0 {
+		return nil
+	}
+	if err := os.WriteFile(dest, []byte(content), 0o644); err != nil {
+		fmt.Printf("%s  ⚠ edit %s: write error: %v%s\n", colorDim, filePath, err, colorReset)
+		return nil
+	}
+	return []WrittenFile{{Path: filePath, Created: false, Diff: diffLines(oldContent, content)}}
 }
 
 // looksLikeFilePath returns true if s looks like a file path:

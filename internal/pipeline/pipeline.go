@@ -14,6 +14,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -34,6 +35,30 @@ const (
 	pColorGold  = "\033[38;5;220m"
 	pColorDim   = "\033[38;5;244m"
 )
+
+// doneVerbs is a pool of fun completion words, shown at the end of a pipeline run.
+var doneVerbs = []string{
+	"Forged", "Crafted", "Assembled", "Brewed", "Conjured",
+	"Sculpted", "Engineered", "Woven", "Distilled", "Architected",
+	"Synthesized", "Manifested", "Composed", "Rendered", "Minted",
+	"Smelted", "Tempered", "Polished", "Hammered", "Galvanized",
+	"Concocted", "Machined", "Devised", "Fashioned", "Chiseled",
+	"Spun up", "Whipped up", "Cooked up", "Stitched", "Welded",
+}
+
+// printDoneLine prints a fun completion line with elapsed time.
+func printDoneLine(elapsed time.Duration) {
+	verb := doneVerbs[rand.Intn(len(doneVerbs))]
+	var timeStr string
+	if elapsed >= time.Minute {
+		m := int(elapsed.Minutes())
+		s := int(elapsed.Seconds()) % 60
+		timeStr = fmt.Sprintf("%dm %ds", m, s)
+	} else {
+		timeStr = fmt.Sprintf("%.1fs", elapsed.Seconds())
+	}
+	fmt.Printf("\n%s  ✻ %s in %s%s\n", pColorDim, verb, timeStr, pColorReset)
+}
 
 // progressTicker prints a live token counter + elapsed time on the current line while a stage runs.
 // Call the returned stop function when the stage completes; it returns elapsed time.
@@ -125,6 +150,7 @@ func Run(
 	opts Options,
 ) (*Result, error) {
 
+	pipelineStart := time.Now()
 	planModel := router.ModelFor(router.TierReason)
 	codeModel := router.ModelFor(router.TierCode)
 	res := &Result{}
@@ -159,6 +185,7 @@ func Run(
 	// Plan Mode: stop after PLAN stage for user review.
 	if opts.PlanOnly {
 		res.Combined = res.PlanText
+		printDoneLine(time.Since(pipelineStart))
 		return res, nil
 	}
 
@@ -309,6 +336,7 @@ func Run(
 	}
 
 	res.Combined = assemble(res.PlanText, res.CodeText, res.TestText)
+	printDoneLine(time.Since(pipelineStart))
 	return res, nil
 }
 
@@ -321,6 +349,7 @@ func ContinuePlan(
 	systemPrompt string,
 	opts Options,
 ) (*Result, error) {
+	pipelineStart := time.Now()
 	res := &Result{PlanText: planText}
 	codeModel := router.ModelFor(router.TierCode)
 
@@ -440,6 +469,7 @@ func ContinuePlan(
 	}
 
 	res.Combined = assemble(res.PlanText, res.CodeText, res.TestText)
+	printDoneLine(time.Since(pipelineStart))
 	return res, nil
 }
 
@@ -474,18 +504,18 @@ func parseTasks(planText string) []Task {
 	return tasks
 }
 
-// taskIcon returns the display icon and color for a task status.
-func taskIcon(status string, spinFrame int) (string, string) {
+// taskIcon returns the display icon, icon color, and title color for a task status.
+func taskIcon(status string, spinFrame int) (string, string, string) {
 	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 	switch status {
 	case "running":
-		return frames[spinFrame%len(frames)], pColorGold
+		return frames[spinFrame%len(frames)], pColorGold, "\033[37m" // white title
 	case "done":
-		return "✓", "\033[38;5;70m"
+		return "✓", "\033[38;5;70m", pColorDim // green check, gray title
 	case "failed":
-		return "✗", "\033[38;5;196m"
+		return "✗", "\033[38;5;196m", "\033[38;5;196m" // red
 	default:
-		return "○", pColorDim
+		return "○", pColorDim, pColorDim // gray
 	}
 }
 
@@ -527,18 +557,18 @@ func taskSuffix(t *Task) string {
 // printTaskList renders the current task status to the terminal.
 func printTaskList(tasks []Task) {
 	for i := range tasks {
-		icon, color := taskIcon(tasks[i].Status, 0)
-		fmt.Printf("  %s%s %s%s%s\n", color, icon, tasks[i].Title, pColorReset, taskSuffix(&tasks[i]))
+		icon, iconColor, titleColor := taskIcon(tasks[i].Status, 0)
+		fmt.Printf("  %s%s %s%s%s%s\n", iconColor, icon, titleColor, tasks[i].Title, pColorReset, taskSuffix(&tasks[i]))
 	}
 }
 
 // updateTaskLine reprints a single task line in-place using ANSI cursor movement.
 func updateTaskLine(tasks []Task, idx, totalTasks, spinFrame int) {
 	t := &tasks[idx]
-	icon, color := taskIcon(t.Status, spinFrame)
+	icon, iconColor, titleColor := taskIcon(t.Status, spinFrame)
 	linesUp := totalTasks - t.ID + 1
-	fmt.Printf("\033[%dA\r\033[K  %s%s %s%s%s\033[%dB\r",
-		linesUp, color, icon, t.Title, pColorReset, taskSuffix(t), linesUp)
+	fmt.Printf("\033[%dA\r\033[K  %s%s %s%s%s%s\033[%dB\r",
+		linesUp, iconColor, icon, titleColor, t.Title, pColorReset, taskSuffix(t), linesUp)
 }
 
 // taskSpinner starts a background goroutine that animates spinner icons
@@ -661,15 +691,24 @@ func runTaskBased(
 		updateTaskLine(tasks, i, len(tasks), 0)
 	}
 
-	// Phase 1: Run first task sequentially (setup/config — others depend on it).
-	runOneTask(0, "")
+	// Phase 1: Run first two tasks sequentially.
+	// Task 0: project setup (package.json, config, tsconfig)
+	// Task 1: data models / shared types — all parallel tasks depend on these.
+	// Running them sequentially ensures stable type definitions before parallel work starts.
+	seqCount := 2
+	if len(tasks) < seqCount {
+		seqCount = len(tasks)
+	}
+	for i := 0; i < seqCount; i++ {
+		runOneTask(i, allCode.String())
+	}
 	foundationCode := allCode.String()
 
-	if len(tasks) > 1 {
+	if len(tasks) > seqCount {
 		// Phase 2: Run remaining tasks in parallel batches.
 		// Batch size limited to avoid overwhelming the API.
 		const maxParallel = 3
-		remaining := tasks[1:]
+		remaining := tasks[seqCount:]
 		for batchStart := 0; batchStart < len(remaining); batchStart += maxParallel {
 			batchEnd := batchStart + maxParallel
 			if batchEnd > len(remaining) {
@@ -684,7 +723,7 @@ func runTaskBased(
 
 			var wg sync.WaitGroup
 			for j := range batch {
-				taskIdx := 1 + batchStart + j // index into original tasks slice
+				taskIdx := seqCount + batchStart + j // index into original tasks slice
 				wg.Add(1)
 				go func(idx int, prior string) {
 					defer wg.Done()
@@ -721,7 +760,13 @@ You are implementing ONE specific task from a larger plan.
 - Never output the full content of an existing file — only the changed sections.
 - Include config/manifest files ONLY if this is the setup/config task.
 - Handle all error cases. No stubs. No TODOs.
-- If prior tasks already created files you need to import from, assume they exist.
+- If prior tasks already created files you need to import from, assume they exist and IMPORT from them.
+
+CRITICAL RULES to avoid breaking parallel tasks:
+1. NEVER redefine interfaces, types, or enums that belong to a prior task's files — only IMPORT them.
+2. NEVER recreate a file that the "Already implemented files" list shows — only EDIT it if you must.
+3. Use CONSISTENT constructor signatures: if prior tasks use dependency injection (passing db/repo as args), do the same.
+4. If you need a type from another file, import it — do NOT copy-paste or redefine it inline.
 
 CRITICAL: Begin IMMEDIATELY with code blocks. No preamble.
 `
@@ -792,11 +837,24 @@ func CompactSummary(res *Result) string {
 		sb.WriteString("\n")
 	}
 
-	// List files from the plan's "### Files" section.
+	// List files from the plan's "### Files" section (capped at 20 for readability).
 	if files := extractSection(res.PlanText, "Files"); files != "" {
+		lines := strings.Split(strings.TrimSpace(files), "\n")
+		const maxFileLines = 20
 		sb.WriteString("\n### Files\n\n")
-		sb.WriteString(files)
-		sb.WriteString("\n")
+		shown := 0
+		for _, l := range lines {
+			if strings.TrimSpace(l) == "" {
+				continue
+			}
+			if shown >= maxFileLines {
+				sb.WriteString(fmt.Sprintf("  … and %d more (see .mantis/last-pipeline.md)\n", len(lines)-maxFileLines))
+				break
+			}
+			sb.WriteString(l)
+			sb.WriteString("\n")
+			shown++
+		}
 	}
 
 	// Count code files written.
@@ -1004,15 +1062,23 @@ Use these exact headers:
 ### Architecture
 ### Task Breakdown
 
-IMPORTANT: The "### Task Breakdown" section MUST use a numbered list of discrete, implementable tasks.
-Each task should be a single sentence describing ONE unit of work. Example:
-1. Set up project config files (package.json, tsconfig.json, .env.example)
-2. Create database schema and models
-3. Implement user authentication (register, login, JWT)
-4. Build expense CRUD API endpoints
-5. Implement debt simplification algorithm
-6. Create frontend components and pages
-7. Add error handling and validation
+IMPORTANT: The "### Task Breakdown" section MUST use a numbered list of 6–10 discrete, implementable tasks.
+Keep task count LOW — group related files into one task (e.g. "all models", "all repositories", "all services").
+NEVER create separate tasks for each individual file — that causes parallel conflicts.
+
+The first two tasks MUST be:
+1. Project setup (config, package.json, tsconfig, env, docker)
+2. Data models and types (all shared interfaces, enums, type definitions — nothing else imports from this)
+
+Remaining tasks are grouped by layer, and each must explicitly import from task 2's types:
+3. Database migrations and schema
+4. All repositories (data access layer — imports types from task 2)
+5. All services (business logic — imports repos from task 4, types from task 2)
+6. API controllers and routes (imports services from task 5)
+7. Middleware, validation, error handling
+8. Tests and documentation
+
+Maximum 10 tasks. If you need more, merge them.
 
 ### Risks & Edge Cases
 ### Assumptions

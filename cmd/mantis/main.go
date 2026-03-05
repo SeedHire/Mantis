@@ -21,6 +21,7 @@ import (
 	"github.com/seedhire/mantis/internal/graph"
 	"github.com/seedhire/mantis/internal/intel"
 	"github.com/seedhire/mantis/internal/linter"
+	"github.com/seedhire/mantis/internal/lsp"
 	"github.com/seedhire/mantis/internal/mcp"
 	"github.com/seedhire/mantis/internal/parser"
 	"github.com/seedhire/mantis/internal/repl"
@@ -1331,6 +1332,40 @@ Configure in your AI tool:
 	},
 }
 
+// ── LSP server ──────────────────────────────────────────────────────────────
+
+var lspCmd = &cobra.Command{
+	Use:   "lsp",
+	Short: "Start LSP server over stdio (for VSCode, Neovim, etc.)",
+	Long: `Starts a Language Server Protocol (LSP) server over stdio.
+
+Augments standard language servers (gopls, tsserver) with Mantis
+graph intelligence — hover enrichment, dead-code diagnostics,
+hotspot indicators, and code lens for reference counts.
+
+Requires 'mantis init' to have been run first.
+
+Configure in VSCode settings:
+  "mantis.binaryPath": "mantis"
+
+Or use as a generic LSP server:
+  mantis lsp`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		root, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		db, err := openDB(root)
+		if err != nil {
+			return fmt.Errorf("graph not initialized — run 'mantis init' first: %w", err)
+		}
+		defer db.Close()
+
+		srv := lsp.NewServer(db, root, version)
+		return srv.Run()
+	},
+}
+
 // ── main ──────────────────────────────────────────────────────────────────────
 
 func init() {
@@ -1367,7 +1402,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&replPlan, "plan", false, "Plan mode: review plan before code execution")
 	rootCmd.Flags().BoolVar(&replContinue, "continue", false, "Resume most recent session")
 
-	rootCmd.AddCommand(initCmd, contextCmd, watchCmd, findCmd, impactCmd, deadCmd, circularCmd, graphCmd, lintCmd, tuiCmd, handoffCmd, hotspotsCmd, riskyCmd, couplingCmd, intentCmd, todosCmd, specGapsCmd, workspaceCmd, traceCmd, mcpCmd)
+	rootCmd.AddCommand(initCmd, contextCmd, watchCmd, findCmd, impactCmd, deadCmd, circularCmd, graphCmd, lintCmd, tuiCmd, handoffCmd, hotspotsCmd, riskyCmd, couplingCmd, intentCmd, todosCmd, specGapsCmd, workspaceCmd, traceCmd, mcpCmd, lspCmd)
 
 	workspaceCmd.AddCommand(wsInitCmd, wsFindCmd, wsImpactCmd, wsStatsCmd)
 	traceCmd.AddCommand(traceIngestCmd, traceHotpathsCmd, traceColdCmd, traceWeightCmd)

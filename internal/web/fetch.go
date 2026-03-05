@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -26,11 +27,12 @@ type cacheEntry struct {
 }
 
 const (
-	cacheTTL     = 5 * time.Minute
-	cacheMaxSize = 20
-	maxBodySize  = 512 * 1024 // 512KB
-	maxTextLen   = 16000      // ~4K tokens
-	jinaBase     = "https://r.jina.ai/"
+	cacheTTL       = 5 * time.Minute
+	cacheMaxSize   = 20
+	maxBodySize    = 512 * 1024 // 512KB
+	maxTextLen     = 16000      // ~4K tokens
+	jinaBase       = "https://r.jina.ai/"
+	jinaSearchBase = "https://s.jina.ai/"
 )
 
 // NewFetcher creates a new Fetcher with a shared HTTP client.
@@ -186,6 +188,49 @@ func stripHTML(s string) string {
 		"&quot;", "\"", "&#39;", "'", "&nbsp;", " ",
 	)
 	return strings.TrimSpace(r.Replace(text))
+}
+
+// Search performs a web search using Jina's search endpoint and returns clean markdown results.
+// Results are cached for 5 minutes. No API key required for basic use.
+func (f *Fetcher) Search(ctx context.Context, query string) (string, error) {
+	cacheKey := "search:" + query
+	if content, ok := f.cacheGet(cacheKey); ok {
+		return content, nil
+	}
+
+	searchURL := jinaSearchBase + url.QueryEscape(query)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, searchURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "text/plain")
+	req.Header.Set("User-Agent", "Mantis/1.0")
+
+	resp, err := f.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("search: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("search returned %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
+	if err != nil {
+		return "", fmt.Errorf("search read: %w", err)
+	}
+
+	text := strings.TrimSpace(string(body))
+	if text == "" {
+		return "", fmt.Errorf("search returned empty content")
+	}
+	if len(text) > maxTextLen {
+		text = text[:maxTextLen] + "\n[truncated]"
+	}
+
+	f.cachePut(cacheKey, text)
+	return text, nil
 }
 
 // ExtractURLs finds URLs in text (for auto-fetch from error messages).

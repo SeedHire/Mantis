@@ -257,3 +257,112 @@ func TestDiffLines_NewFileFromEmpty(t *testing.T) {
 		t.Errorf("expected additions from empty, got: %q", got)
 	}
 }
+
+// ── extractAndWriteFiles: edit block support ──────────────────────────────────
+
+func TestExtractAndWriteFiles_EditBlock(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create an existing file.
+	orig := "package main\n\nfunc Hello() string {\n\treturn \"hello\"\n}\n"
+	if err := os.WriteFile(filepath.Join(dir, "hello.go"), []byte(orig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	response := "```edit:hello.go\n<<<SEARCH\nreturn \"hello\"\n===\nreturn \"world\"\n>>>SEARCH\n```"
+	written := extractAndWriteFiles(response, dir)
+
+	if len(written) != 1 {
+		t.Fatalf("expected 1 written file, got %d", len(written))
+	}
+	if written[0].Path != "hello.go" {
+		t.Errorf("path = %q, want hello.go", written[0].Path)
+	}
+	if written[0].Created {
+		t.Error("Created should be false for edit block")
+	}
+
+	got, _ := os.ReadFile(filepath.Join(dir, "hello.go"))
+	if !strings.Contains(string(got), "\"world\"") {
+		t.Errorf("expected patched content, got: %s", string(got))
+	}
+	if strings.Contains(string(got), "\"hello\"") {
+		t.Error("old content should be replaced")
+	}
+}
+
+func TestExtractAndWriteFiles_EditBlockNotFound(t *testing.T) {
+	dir := t.TempDir()
+
+	orig := "package main\n"
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(orig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// SEARCH text that doesn't exist in the file.
+	response := "```edit:main.go\n<<<SEARCH\nnonexistent text\n===\nnew text\n>>>SEARCH\n```"
+	written := extractAndWriteFiles(response, dir)
+
+	// Should produce no written files (skipped due to not-found).
+	if len(written) != 0 {
+		t.Errorf("expected 0 written files for not-found SEARCH, got %d", len(written))
+	}
+
+	// File should be unchanged.
+	got, _ := os.ReadFile(filepath.Join(dir, "main.go"))
+	if string(got) != orig {
+		t.Errorf("file should be unchanged, got: %s", string(got))
+	}
+}
+
+func TestExtractAndWriteFiles_EditBlockAndWholeFile(t *testing.T) {
+	dir := t.TempDir()
+
+	// Existing file for edit block.
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a\n\nconst X = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Response: edit block for a.go, whole-file block for new b.go.
+	response := "```edit:a.go\n<<<SEARCH\nconst X = 1\n===\nconst X = 42\n>>>SEARCH\n```\n\n```go:b.go\npackage b\n```"
+	written := extractAndWriteFiles(response, dir)
+
+	if len(written) != 2 {
+		t.Fatalf("expected 2 written files, got %d: %v", len(written), written)
+	}
+
+	// a.go patched.
+	aContent, _ := os.ReadFile(filepath.Join(dir, "a.go"))
+	if !strings.Contains(string(aContent), "const X = 42") {
+		t.Errorf("a.go not patched: %s", string(aContent))
+	}
+
+	// b.go created.
+	bContent, _ := os.ReadFile(filepath.Join(dir, "b.go"))
+	if !strings.Contains(string(bContent), "package b") {
+		t.Errorf("b.go not created: %s", string(bContent))
+	}
+}
+
+func TestExtractAndWriteFiles_EditBlockSkipsWholeFileOverwrite(t *testing.T) {
+	dir := t.TempDir()
+
+	orig := "package main\n\nconst V = 1\n"
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(orig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Edit block + a whole-file block for the SAME file — edit wins, whole-file skipped.
+	response := "```edit:main.go\n<<<SEARCH\nconst V = 1\n===\nconst V = 99\n>>>SEARCH\n```\n\n```go:main.go\npackage main\n\nconst V = 0\n```"
+	written := extractAndWriteFiles(response, dir)
+
+	// Should be 1 written file (not 2 — whole-file is deduped).
+	if len(written) != 1 {
+		t.Fatalf("expected 1 written file, got %d", len(written))
+	}
+
+	got, _ := os.ReadFile(filepath.Join(dir, "main.go"))
+	if !strings.Contains(string(got), "const V = 99") {
+		t.Errorf("edit block should win, got: %s", string(got))
+	}
+}

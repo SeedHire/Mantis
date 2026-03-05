@@ -26,7 +26,7 @@ const (
 	colorCopper      = lipgloss.Color("#C87941")
 	colorCopperLight = lipgloss.Color("#E8A96A")
 	colorCopperDark  = lipgloss.Color("#7A3E10")
-	colorGold        = lipgloss.Color("#F0C040")
+	colorGold        = lipgloss.Color("#FFAF00")
 	colorBG          = lipgloss.Color("#0C0E14")
 	colorSurface     = lipgloss.Color("#12151E")
 	colorSurface2    = lipgloss.Color("#1A1E2A")

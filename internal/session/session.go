@@ -183,9 +183,10 @@ func (s *Session) Save(mantisDir, topic, summary string, msgs []interface{}) err
 			rawMsgs = append(rawMsgs, b)
 		}
 	}
-	// Cap stored history to avoid bloating disk — keep last 20 messages.
-	if len(rawMsgs) > 20 {
-		rawMsgs = append(rawMsgs[:1], rawMsgs[len(rawMsgs)-19:]...)
+	// Cap stored history — keep system prompt (index 0) + last 99 messages.
+	// 100 messages covers ~50 back-and-forth turns, sufficient for most sessions.
+	if len(rawMsgs) > 100 {
+		rawMsgs = append(rawMsgs[:1], rawMsgs[len(rawMsgs)-99:]...)
 	}
 
 	saved := SavedSession{

@@ -294,6 +294,7 @@ func Run(cfg Config) error {
 		readline.PcItem("/search"),
 		readline.PcItem("/test"),
 		readline.PcItem("/commit"),
+		readline.PcItem("/pr"),
 		readline.PcItem("/quit"),
 	)
 
@@ -328,12 +329,6 @@ func Run(cfg Config) error {
 		activeCancelFn = cancel
 		activeCancelMu.Unlock()
 	}
-	clearActiveCancel := func() {
-		activeCancelMu.Lock()
-		activeCancelFn = nil
-		activeCancelMu.Unlock()
-	}
-
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
@@ -372,6 +367,9 @@ func Run(cfg Config) error {
 
 	turn := 0
 	planMode := cfg.PlanMode
+	// autoReadFiles tracks files already injected into context this session.
+	// Prevents re-reading the same file on every turn once it's in the history.
+	autoReadFiles := map[string]bool{}
 	for {
 		printSep()
 		line, err := rl.Readline()
@@ -423,6 +421,13 @@ func Run(cfg Config) error {
 		model := router.ModelFor(intent.Tier)
 		turn++
 		turnStart := time.Now()
+
+		// Per-turn context — cancelled by Ctrl+C (setActiveCancel) or at turn end.
+		// All sub-operations (agent, pipeline, stream, verify) derive from this,
+		// so a single Ctrl+C reliably cancels whatever is currently running.
+		turnCtx, turnCancel := context.WithCancel(context.Background())
+		setActiveCancel(turnCancel)
+
 		showRouting(intent, model, turn, pipeline.ShouldRun(intent, input))
 		printSep()
 		// Update prompt to show active tier badge while model generates.
@@ -485,7 +490,7 @@ func Run(cfg Config) error {
 		// Semantic memory retrieval — hybrid BM25+cosine via RRF.
 		var memChunksFound int
 		if embStore != nil {
-			embCtx, embCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			embCtx, embCancel := context.WithTimeout(turnCtx, 5*time.Second)
 			if chunks, err := embStore.Search(embCtx, input, 5); err == nil && len(chunks) > 0 {
 				// Keep top chunk and any within 0.015 RRF delta of it.
 				topScore := chunks[0].Score
@@ -532,7 +537,7 @@ func Run(cfg Config) error {
 			if dispatcher != nil && dispatcher.IsAvailable() {
 				graphQuerier = dispatcher.Querier()
 			}
-			if ctxMsg := contextMessageFor(input, root, brainContext, truthWriter, graphQuerier); ctxMsg != nil {
+			if ctxMsg := contextMessageFor(input, root, brainContext, truthWriter, graphQuerier, autoReadFiles); ctxMsg != nil {
 				// Merge context injection with enriched userContent (build output, project files).
 				if msg, ok := ctxMsg.(ollama.Message); ok {
 					msg.Content = strings.Replace(msg.Content, "\n\nNow answer: "+input, "\n\nNow answer: "+userContent, 1)
@@ -564,15 +569,13 @@ func Run(cfg Config) error {
 					if impact, err := intel.Impact(querier, target, 5); err == nil &&
 						agent.ShouldRunMultiAgent(impact) {
 						toolkit := agent.NewToolkit(root, querier, embStore)
-						agentCtx, agentCancel := context.WithTimeout(context.Background(), 15*time.Minute)
-						setActiveCancel(agentCancel)
+						agentCtx, agentCancel := context.WithTimeout(turnCtx, 15*time.Minute)
 						combined, agentErr := agent.Run(
 							agentCtx, input, impact, toolkit, client,
 							buildSystemPrompt(brainContext, tierSkills, router.TierCode),
 							mantisDir,
 						)
 						agentCancel()
-						clearActiveCancel()
 						if agentErr == nil {
 							fmt.Printf("%s◈ Mantis%s %s[multi-agent · %d files · %d packages]%s\n",
 								colorCopper+colorBold, colorReset, colorDim,
@@ -592,6 +595,7 @@ func Run(cfg Config) error {
 								UserMsg:      input,
 								AssistantMsg: combined,
 							})
+							turnCancel()
 							continue
 						}
 						fmt.Printf("%s  [multi-agent failed: %v — falling back]%s\n\n", colorRed, agentErr, colorReset)
@@ -609,6 +613,7 @@ func Run(cfg Config) error {
 			testRoot, _ := os.Getwd()
 		runTestLoopCommand(testRoot, client, packages)
 			sess.Add(model, intent.Tier, 0, 0, hasImage)
+			turnCancel()
 			continue
 		}
 
@@ -629,7 +634,7 @@ func Run(cfg Config) error {
 		if needsAgent {
 			fmt.Printf("%s  ◆ fix agent [%s] — investigating with tools%s\n", colorDim, model, colorReset)
 			stopSpin := startSpinner(string(intent.TaskType))
-			agentCtx, agentCancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			agentCtx, agentCancel := context.WithTimeout(turnCtx, 10*time.Minute)
 			agentResp, agentPT, agentCT, agentOK := runFixAgent(agentCtx, client, model, messages, root)
 			agentCancel()
 			elapsed := stopSpin()
@@ -683,6 +688,7 @@ func Run(cfg Config) error {
 				if warn := usageTracker.Add(turnTok, false, hasImage); warn != "" {
 					fmt.Printf("%s%s%s\n\n", colorRed, warn, colorReset)
 				}
+				turnCancel()
 				continue
 			}
 			// Fix agent didn't work — fall through to normal paths.
@@ -694,8 +700,7 @@ func Run(cfg Config) error {
 		//   plan (reason model) → code + tests (code model, parallel)
 		if pipeline.ShouldRun(intent, input) {
 			pipelineOpts := pipeline.Options{AvailableModels: availableModels, Root: root, PlanOnly: planMode}
-			pipelineCtx, pipelineCancel := context.WithTimeout(context.Background(), 20*time.Minute)
-			setActiveCancel(pipelineCancel)
+			pipelineCtx, pipelineCancel := context.WithTimeout(turnCtx, 20*time.Minute)
 			sysPrompt := buildSystemPrompt(brainContext, tierSkills, router.TierCode)
 			pRes, pErr := pipeline.Run(
 				pipelineCtx, client, input,
@@ -703,7 +708,6 @@ func Run(cfg Config) error {
 				pipelineOpts,
 			)
 			pipelineCancel()
-			clearActiveCancel()
 
 			if pErr != nil {
 				// If the pipeline captured partial code output (e.g. timeout after
@@ -746,21 +750,21 @@ func Run(cfg Config) error {
 				if rlErr != nil || (strings.ToLower(strings.TrimSpace(approval)) != "y" && strings.TrimSpace(approval) != "") {
 					fmt.Printf("%s● plan discarded%s\n\n", colorDim, colorReset)
 					sess.Add(model, intent.Tier, pRes.PromptTok, pRes.ComplTok, hasImage)
+					turnCancel()
 					continue
 				}
 				// User approved — continue with CODE+TESTS stages.
 				fmt.Printf("%s● plan approved — starting implementation%s\n", colorGold, colorReset)
-				contCtx, contCancel := context.WithTimeout(context.Background(), 20*time.Minute)
-				setActiveCancel(contCancel)
+				contCtx, contCancel := context.WithTimeout(turnCtx, 20*time.Minute)
 				pRes, pErr = pipeline.ContinuePlan(
 					contCtx, client, input, pRes.PlanText,
 					sysPrompt,
 					pipeline.Options{AvailableModels: availableModels, Root: root},
 				)
 				contCancel()
-				clearActiveCancel()
 				if pErr != nil {
 					fmt.Printf("%s  [implementation failed: %v]%s\n\n", colorRed, pErr, colorReset)
+					turnCancel()
 					continue
 				}
 			}
@@ -784,8 +788,7 @@ func Run(cfg Config) error {
 				}
 				messages = append(messages, ollama.Message{Role: "assistant", Content: pRes.Combined})
 				// Verify build and auto-fix if needed (uses background ctx so not bounded by streamCtx).
-				bgCtx := context.Background()
-				verifyAndFix(bgCtx, client, model, intent.Tier, root, wf, &messages)
+				verifyAndFix(turnCtx, client, model, intent.Tier, root, wf, &messages)
 				sess.Add(model, intent.Tier, pRes.PromptTok, pRes.ComplTok, hasImage)
 				var pipeWrittenPaths []string
 				for _, f := range wf {
@@ -822,6 +825,7 @@ func Run(cfg Config) error {
 				if pRes.PromptTok > 8000 {
 					sess.WarnWaste("large prompt — use /file for specific files, not full directories")
 				}
+				turnCancel()
 				continue
 			}
 		}
@@ -831,12 +835,9 @@ func Run(cfg Config) error {
 		// Multi-pass reasoning for complex queries (Reason/Heavy tiers).
 		// Pass 1: silent analysis. Pass 2: solution informed by analysis.
 		if intent.Tier == router.TierReason || intent.Tier == router.TierHeavy {
-			// BUG-06: pass a per-turn context so Ctrl+C can cancel the analysis pass.
-			turnCtx, turnCancel := context.WithTimeout(context.Background(), 3*time.Minute)
-			setActiveCancel(turnCancel)
-			messages = multiPassReasoning(turnCtx, client, model, intent.Tier, messages)
-			turnCancel()
-			clearActiveCancel()
+			passCtx, passCancel := context.WithTimeout(turnCtx, 3*time.Minute)
+			messages = multiPassReasoning(passCtx, client, model, intent.Tier, messages)
+			passCancel()
 		}
 
 		// Show memory retrieval indicator if relevant chunks were found.
@@ -849,8 +850,7 @@ func Run(cfg Config) error {
 		stopSpin := startSpinner(string(intent.TaskType))
 		sp := newStreamPrinter(stopSpin)
 
-		streamCtx, streamCancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		setActiveCancel(streamCancel)
+		streamCtx, streamCancel := context.WithTimeout(turnCtx, 5*time.Minute)
 		var rb strings.Builder
 		var promptTok, completionTok int
 		var streamErr error
@@ -861,7 +861,6 @@ func Run(cfg Config) error {
 			promptTok, completionTok, streamErr = streamWithFallback(streamCtx, client, model, intent.Tier, messages, &rb, sp.onChunk)
 		}
 		streamCancel()
-		clearActiveCancel()
 		spinElapsed := sp.stop()
 		// If spinner was never stopped (TierMax or no live chunks), stop it now.
 		if !sp.started {
@@ -873,6 +872,7 @@ func Run(cfg Config) error {
 			messages = messages[:len(messages)-1]
 			// context.Canceled = user pressed Ctrl+C — cancel message already shown.
 			if errors.Is(streamErr, context.Canceled) {
+				turnCancel()
 				continue
 			}
 			fmt.Printf("\n%s⚠ %v%s\n\n", colorRed, streamErr, colorReset)
@@ -887,6 +887,7 @@ func Run(cfg Config) error {
 				InputSnippet: input,
 				Error:        streamErr.Error(),
 			})
+			turnCancel()
 			continue
 		}
 
@@ -920,7 +921,7 @@ func Run(cfg Config) error {
 		messages = append(messages, ollama.Message{Role: "assistant", Content: rb.String()})
 
 		// Verify build and auto-fix errors up to 2 times.
-		wf = verifyAndFix(context.Background(), client, model, intent.Tier, root, wf, &messages)
+		wf = verifyAndFix(turnCtx, client, model, intent.Tier, root, wf, &messages)
 		sess.Add(model, intent.Tier, promptTok, completionTok, hasImage)
 
 		// Log turn to telemetry.
@@ -988,7 +989,7 @@ func Run(cfg Config) error {
 
 				retryMsgs := append(append([]interface{}{}, messages...), ollama.Message{Role: "user", Content: correctionMsg})
 				var rb2 strings.Builder
-				retryCtx, retryCancel := context.WithTimeout(context.Background(), 3*time.Minute)
+				retryCtx, retryCancel := context.WithTimeout(turnCtx, 3*time.Minute)
 				pt2, ct2, err2 := streamWithFallback(retryCtx, client, model, intent.Tier, retryMsgs, &rb2)
 				retryCancel()
 
@@ -1030,7 +1031,7 @@ func Run(cfg Config) error {
 			// BUG-04: copy slice before append to avoid aliasing the backing array.
 			retryMsgs := append(append([]interface{}{}, messages...), ollama.Message{Role: "user", Content: correctionMsg})
 			var rb3 strings.Builder
-			retryCtx3, retryCancel3 := context.WithTimeout(context.Background(), 3*time.Minute)
+			retryCtx3, retryCancel3 := context.WithTimeout(turnCtx, 3*time.Minute)
 			pt3, ct3, err3 := streamWithFallback(retryCtx3, client, model, intent.Tier, retryMsgs, &rb3)
 			retryCancel3()
 			if err3 == nil && strings.TrimSpace(rb3.String()) != "" {
@@ -1050,6 +1051,7 @@ func Run(cfg Config) error {
 		if promptTok > 8000 {
 			sess.WarnWaste("large prompt — use /file for specific files, not full directories")
 		}
+		turnCancel()
 	}
 
 	tlog.Flush()
@@ -1293,11 +1295,9 @@ func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
 			fmt.Printf("%susage: /search <query>%s\n\n", colorDim, colorReset)
 		} else {
 			query := strings.Join(parts[1:], " ")
-			if !web.HasSearchKey() {
-				fmt.Printf("%s● web search requires MANTIS_TAVILY_KEY%s\n", colorGold, colorReset)
-				fmt.Printf("%s  get a free key at https://tavily.com%s\n\n", colorDim, colorReset)
-			} else {
-				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			if web.HasSearchKey() {
+				// Structured Tavily results (title + snippet + URL).
 				results, err := web.Search(ctx, query)
 				cancel()
 				if err != nil {
@@ -1323,6 +1323,21 @@ func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
 						Role: "user", Content: "<search_results query=\"" + query + "\">\n" + sb.String() + "</search_results>",
 					})
 				}
+			} else {
+				// Keyless fallback via Jina search — returns markdown results, no API key required.
+				fmt.Printf("%s  searching \"%s\" (via Jina — set MANTIS_TAVILY_KEY for richer results)…%s\n", colorDim, query, colorReset)
+				content, err := webFetcher.Search(ctx, query)
+				cancel()
+				if err != nil {
+					fmt.Printf("%s✗ search failed: %v%s\n\n", colorRed, err, colorReset)
+				} else {
+					fmt.Println(content)
+					fmt.Println()
+					*messages = append(*messages, ollama.Message{
+						Role: "user", Content: "<search_results query=\"" + query + "\">\n" + content + "\n</search_results>",
+					})
+					fmt.Printf("%s● search results injected into context%s\n\n", colorGold, colorReset)
+				}
 			}
 		}
 	case "/test":
@@ -1334,6 +1349,8 @@ func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
 		runTestLoopCommand(testRoot, client, packages)
 	case "/commit":
 		handleCommitCommand(client, cfg)
+	case "/pr":
+		handlePRCommand(client)
 	default:
 		fmt.Printf("%sunknown command — /help%s\n\n", colorDim, colorReset)
 	}
@@ -1571,6 +1588,156 @@ func handleCommitCommand(client *ollama.Client, cfg Config) {
 	fmt.Printf("\n%s✓ committed: %s%s\n\n", colorGreen, message, colorReset)
 }
 
+// handlePRCommand generates a PR title + description from commits since main,
+// then pushes the branch and creates a GitHub PR via the `gh` CLI.
+func handlePRCommand(client *ollama.Client) {
+	root, _ := os.Getwd()
+	toolkit := agent.NewToolkit(root, nil, nil)
+
+	// Require gh CLI.
+	if _, code := toolkit.RunBash("gh --version", 5); code != 0 {
+		fmt.Printf("%s✗ gh CLI not found — install from https://cli.github.com%s\n\n", colorRed, colorReset)
+		return
+	}
+
+	// Get current branch.
+	branch, code := toolkit.RunBash("git rev-parse --abbrev-ref HEAD", 5)
+	branch = strings.TrimSpace(branch)
+	if code != 0 || branch == "" || branch == "HEAD" {
+		fmt.Printf("%s✗ not on a named branch%s\n\n", colorRed, colorReset)
+		return
+	}
+	if branch == "main" || branch == "master" {
+		fmt.Printf("%s✗ on %s — create a feature branch first%s\n\n", colorRed, branch, colorReset)
+		return
+	}
+
+	// Commits ahead of main/master.
+	commitLog, _ := toolkit.RunBash("git log main..HEAD --oneline", 10)
+	if strings.TrimSpace(commitLog) == "" {
+		commitLog, _ = toolkit.RunBash("git log master..HEAD --oneline", 10)
+	}
+	if strings.TrimSpace(commitLog) == "" {
+		fmt.Printf("%s● no commits ahead of main/master — nothing to PR%s\n\n", colorDim, colorReset)
+		return
+	}
+
+	// Diff stat.
+	diffStat, _ := toolkit.RunBash("git diff main...HEAD --stat", 10)
+	if diffStat == "" {
+		diffStat, _ = toolkit.RunBash("git diff master...HEAD --stat", 10)
+	}
+
+	// Generate PR title + body via model.
+	fmt.Printf("%s  generating PR description…%s\n", colorDim, colorReset)
+	model := router.ModelFor(router.TierFast)
+	prompt := fmt.Sprintf(
+		"Generate a GitHub pull request title and description.\n\n"+
+			"Branch: %s\n\nCommits:\n%s\n\nFiles changed:\n%s\n\n"+
+			"Output exactly:\nTITLE: <title (max 72 chars)>\n\nBODY:\n<markdown with ## Summary and ## Test plan sections>",
+		branch, commitLog, diffStat,
+	)
+	msgs := []interface{}{
+		ollama.Message{Role: "system", Content: "You are a pull request description generator. Be concise. Output only the requested format."},
+		ollama.Message{Role: "user", Content: prompt},
+	}
+
+	var buf strings.Builder
+	_, _, err := client.StreamChat(context.Background(), model, msgs, nil, func(c string) { buf.WriteString(c) })
+	if err != nil {
+		fmt.Printf("%s✗ failed to generate PR description: %v%s\n\n", colorRed, err, colorReset)
+		return
+	}
+
+	raw := strings.TrimSpace(buf.String())
+	title, body := parsePROutput(raw)
+	if title == "" {
+		title = branch
+	}
+
+	// Preview.
+	fmt.Printf("\n%s╭─ PR Preview ─────────────────────╮%s\n", colorGold, colorReset)
+	fmt.Printf("%s  branch: %s%s\n", colorDim, branch, colorReset)
+	fmt.Printf("%s  title:  %s%s\n", colorDim, title, colorReset)
+	if body != "" {
+		lines := strings.Split(body, "\n")
+		shown := lines
+		if len(shown) > 6 {
+			shown = lines[:6]
+		}
+		for _, l := range shown {
+			fmt.Printf("  %s%s%s\n", colorDim, l, colorReset)
+		}
+		if len(lines) > 6 {
+			fmt.Printf("  %s[… %d more lines]%s\n", colorDim, len(lines)-6, colorReset)
+		}
+	}
+	fmt.Printf("%s╰──────────────────────────────────╯%s\n", colorGold, colorReset)
+
+	fmt.Printf("\n  Push & create PR? [y/n/e(dit title)]: ")
+	var answer string
+	fmt.Scanln(&answer)
+	answer = strings.ToLower(strings.TrimSpace(answer))
+
+	if answer == "e" || answer == "edit" {
+		fmt.Printf("  Enter PR title: ")
+		reader := bufio.NewReader(os.Stdin)
+		line, _ := reader.ReadString('\n')
+		title = strings.TrimSpace(line)
+		if title == "" {
+			fmt.Printf("%s● cancelled%s\n\n", colorDim, colorReset)
+			return
+		}
+		answer = "y"
+	}
+	if answer != "y" && answer != "yes" {
+		fmt.Printf("%s● cancelled%s\n\n", colorDim, colorReset)
+		return
+	}
+
+	// Push branch.
+	fmt.Printf("%s  pushing %s…%s\n", colorDim, branch, colorReset)
+	out, code := toolkit.RunBash(fmt.Sprintf("git push -u origin %s", branch), 30)
+	if code != 0 {
+		fmt.Printf("%s✗ git push failed: %s%s\n\n", colorRed, out, colorReset)
+		return
+	}
+
+	// Create PR.
+	prOut, code := toolkit.RunBash(fmt.Sprintf("gh pr create --title %q --body %q", title, body), 30)
+	if code != 0 {
+		fmt.Printf("%s✗ gh pr create failed: %s%s\n\n", colorRed, prOut, colorReset)
+		return
+	}
+
+	fmt.Printf("\n%s✓ PR created: %s%s\n\n", colorGreen, strings.TrimSpace(prOut), colorReset)
+}
+
+// parsePROutput extracts TITLE and BODY from model output.
+func parsePROutput(raw string) (title, body string) {
+	if idx := strings.Index(raw, "TITLE:"); idx >= 0 {
+		rest := strings.TrimSpace(raw[idx+len("TITLE:"):])
+		if nl := strings.Index(rest, "\n"); nl >= 0 {
+			title = strings.TrimSpace(rest[:nl])
+			rest = rest[nl+1:]
+		} else {
+			title = strings.TrimSpace(rest)
+			return title, ""
+		}
+		if idx2 := strings.Index(rest, "BODY:"); idx2 >= 0 {
+			body = strings.TrimSpace(rest[idx2+len("BODY:"):])
+		}
+	} else {
+		// Fallback: first non-empty line = title.
+		lines := strings.SplitN(strings.TrimSpace(raw), "\n", 2)
+		title = strings.TrimSpace(lines[0])
+		if len(lines) > 1 {
+			body = strings.TrimSpace(lines[1])
+		}
+	}
+	return
+}
+
 // buildSystemPrompt returns the base system prompt (tier-independent).
 // Brain context and tier-specific guidance are appended separately.
 func buildSystemPrompt(brainCtx, skillsCtx string, tier router.Tier) string {
@@ -1693,7 +1860,8 @@ Then give your final answer after </thinking>. Example:
 // contextMessageFor returns a context injection message for this turn, or nil.
 // Injects README for project questions, ContextSnippet for code questions,
 // and graph context when file paths or symbols are detected.
-func contextMessageFor(input, root string, brainContext string, tw *truth.Writer, querier *graph.Querier) interface{} {
+// readCache tracks which files have already been injected this session.
+func contextMessageFor(input, root string, brainContext string, tw *truth.Writer, querier *graph.Querier, readCache map[string]bool) interface{} {
 	lower := strings.ToLower(input)
 	isProjectQ := strings.Contains(lower, "project") || strings.Contains(lower, "what is") ||
 		strings.Contains(lower, "what does") || strings.Contains(lower, "what are") ||
@@ -1724,6 +1892,32 @@ func contextMessageFor(input, root string, brainContext string, tw *truth.Writer
 
 	// Graph context: auto-inject related file signatures when files/symbols are detected.
 	mentionedFiles := extractMentionedFiles(input, querier)
+
+	// Dynamic file reading: inject full content of mentioned files not yet seen this session.
+	// Cap at 3 new files per turn, 150 lines each, so context stays manageable.
+	if len(mentionedFiles) > 0 && readCache != nil {
+		const maxNewFiles = 3
+		newCount := 0
+		for _, rel := range mentionedFiles {
+			if newCount >= maxNewFiles {
+				break
+			}
+			clean := filepath.Clean(rel)
+			if readCache[clean] {
+				continue
+			}
+			abs := filepath.Join(root, clean)
+			content := readFileHead(abs, 150)
+			if content == "" {
+				continue
+			}
+			parts = append(parts, fmt.Sprintf("File: %s\n```\n%s\n```", clean, content))
+			readCache[clean] = true
+			newCount++
+			fmt.Printf("%s  ● reading: %s%s\n", colorDim, clean, colorReset)
+		}
+	}
+
 	if len(mentionedFiles) > 0 && querier != nil {
 		if graphCtx, related := graphContextFor(mentionedFiles, root, querier); graphCtx != "" {
 			parts = append(parts, graphCtx)
@@ -2747,9 +2941,10 @@ func printHelp() {
 		{"/file <path>", "inject a file into context"},
 		{"/vision <path>", "analyze an image or screenshot"},
 		{"/fetch <url>", "fetch a web page into context (Jina Reader)"},
-		{"/search <query>", "web search (Tavily) — top 5 results"},
+		{"/search <query>", "web search — Jina (keyless) or Tavily (MANTIS_TAVILY_KEY)"},
 		{"/test [pkg]", "run tests → fix failures → repeat until green"},
 		{"/commit", "generate commit message, preview, commit"},
+		{"/pr", "push branch + generate PR title/body + create GitHub PR"},
 		{"/plan", "toggle plan mode (review before code)"},
 		{"/context", "show context window token breakdown"},
 		{"/reset", "clear conversation (brain memory kept)"},
@@ -2843,12 +3038,13 @@ func verifyAndFix(
 	written []WrittenFile,
 	messages *[]interface{},
 ) []WrittenFile {
-	const maxRetries = 2
+	const maxRetries = 4
 
 	if len(written) == 0 || !autofix.ShouldRun(root, pathsOf(written)) {
 		return written
 	}
 
+	var lastBuildErr string
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		fmt.Printf("%s  🔨 verifying build…%s\n", colorDim, colorReset)
 		result := autofix.Check(root, pathsOf(written))
@@ -2856,6 +3052,13 @@ func verifyAndFix(
 			fmt.Printf("%s  ✓ build passing%s\n\n", colorGold, colorReset)
 			return written
 		}
+
+		// Stuck detection: same error twice in a row → give up early.
+		if result.Output == lastBuildErr {
+			fmt.Printf("%s  ✗ same build error twice — auto-fix stuck, stopping%s\n\n", colorRed, colorReset)
+			break
+		}
+		lastBuildErr = result.Output
 
 		fmt.Printf("%s  ✗ build errors (attempt %d/%d) — auto-fixing…%s\n",
 			colorRed, attempt, maxRetries, colorReset)
@@ -2866,7 +3069,7 @@ func verifyAndFix(
 		retryMsgs := append(append([]interface{}{}, *messages...), ollama.Message{Role: "user", Content: fixMsg})
 
 		var rb strings.Builder
-		fixCtx, fixCancel := context.WithTimeout(ctx, 3*time.Minute)
+		fixCtx, fixCancel := context.WithTimeout(ctx, 5*time.Minute)
 		_, _, err := streamWithFallback(fixCtx, client, model, tier, retryMsgs, &rb)
 		fixCancel()
 		if err != nil || strings.TrimSpace(rb.String()) == "" {
