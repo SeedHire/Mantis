@@ -54,8 +54,8 @@ var taskSkillPriority = map[string][]string{
 
 // Brain holds the path to the project brain directory.
 type Brain struct {
-	root    string
-	dir     string
+	root string
+	dir  string
 }
 
 // New returns a Brain rooted at the given project directory.
@@ -209,11 +209,11 @@ func (b *Brain) ReadBrain() string {
 
 // GroundTruthEntry is a file entry in GROUND_TRUTH.json.
 type GroundTruthEntry struct {
-	Hash            string     `json:"hash"`
-	LastModified    string     `json:"last_modified"`
-	Functions       []FuncSig  `json:"functions"`
-	Imports         []string   `json:"imports"`
-	ExportedSymbols []string   `json:"exported_symbols"`
+	Hash            string    `json:"hash"`
+	LastModified    string    `json:"last_modified"`
+	Functions       []FuncSig `json:"functions"`
+	Imports         []string  `json:"imports"`
+	ExportedSymbols []string  `json:"exported_symbols"`
 }
 
 // FuncSig is a function signature extracted by tree-sitter.

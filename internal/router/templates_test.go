@@ -4,7 +4,7 @@ import "testing"
 
 func TestTaskTemplate(t *testing.T) {
 	tests := []struct {
-		taskType string
+		taskType  string
 		wantEmpty bool
 	}{
 		{"explain", false},

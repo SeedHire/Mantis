@@ -83,13 +83,13 @@ func TestInferTypeEdgeCases(t *testing.T) {
 		msg      string
 		wantType string
 	}{
-		{"Test user login flow", "test"},          // contains "test"
-		{"Write tests for payment", "test"},        // contains "test"
-		{"chore: update dependencies", "chore"},    // no keyword match → default
-		{"bump version to 1.2.3", "chore"},         // no keyword match → default
-		{"perf: speed up query", "chore"},          // no "perf" case → default
-		{"style: fix indentation", "chore"},        // HasPrefix("fix") false; no keyword → default
-		{"", "chore"},                              // empty → fallback
+		{"Test user login flow", "test"},        // contains "test"
+		{"Write tests for payment", "test"},     // contains "test"
+		{"chore: update dependencies", "chore"}, // no keyword match → default
+		{"bump version to 1.2.3", "chore"},      // no keyword match → default
+		{"perf: speed up query", "chore"},       // no "perf" case → default
+		{"style: fix indentation", "chore"},     // HasPrefix("fix") false; no keyword → default
+		{"", "chore"},                           // empty → fallback
 	}
 	for _, tt := range tests {
 		got := inferType(tt.msg)

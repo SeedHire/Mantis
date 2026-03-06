@@ -102,7 +102,7 @@ func (m RouterModel) View() string {
 	case m.loading:
 		body = StyleMuted.Render("  Loading router configuration…")
 	case m.err != nil:
-		body = StyleError.Render("  ✗  "+m.err.Error())
+		body = StyleError.Render("  ✗  " + m.err.Error())
 	default:
 		body = m.viewport.View()
 	}
@@ -136,7 +136,7 @@ func renderRouter(summary map[string]string, width int) string {
 
 	// Active model mapping
 	sb.WriteString(StyleHighlight.Render("  Model Tier Mapping") + "\n")
-	sb.WriteString(StyleDivider.Render("  " + strings.Repeat("─", sepLen)) + "\n\n")
+	sb.WriteString(StyleDivider.Render("  "+strings.Repeat("─", sepLen)) + "\n\n")
 
 	assigned := 0
 	for _, ti := range tierInfo {
@@ -166,7 +166,7 @@ func renderRouter(summary map[string]string, width int) string {
 	}
 
 	// Summary card
-	sb.WriteString(StyleDivider.Render("  " + strings.Repeat("─", sepLen)) + "\n\n")
+	sb.WriteString(StyleDivider.Render("  "+strings.Repeat("─", sepLen)) + "\n\n")
 
 	cards := lipgloss.JoinHorizontal(
 		lipgloss.Top,
@@ -178,7 +178,7 @@ func renderRouter(summary map[string]string, width int) string {
 
 	// How it works
 	sb.WriteString(StyleLabel.Render("  How Classification Works") + "\n")
-	sb.WriteString(StyleDivider.Render("  " + strings.Repeat("─", sepLen)) + "\n")
+	sb.WriteString(StyleDivider.Render("  "+strings.Repeat("─", sepLen)) + "\n")
 	sb.WriteString(StyleMuted.Render("  1. User message analyzed against keyword sets per tier\n"))
 	sb.WriteString(StyleMuted.Render("  2. Highest-priority matching tier selected\n"))
 	sb.WriteString(StyleMuted.Render("  3. Default: Code tier at 60% confidence (low confidence shown)\n"))
@@ -189,7 +189,7 @@ func renderRouter(summary map[string]string, width int) string {
 	// Example classification
 	sb.WriteString("\n")
 	sb.WriteString(StyleLabel.Render("  Example Classifications") + "\n")
-	sb.WriteString(StyleDivider.Render("  " + strings.Repeat("─", sepLen)) + "\n")
+	sb.WriteString(StyleDivider.Render("  "+strings.Repeat("─", sepLen)) + "\n")
 
 	examples := []struct {
 		query string

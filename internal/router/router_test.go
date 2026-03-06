@@ -223,8 +223,8 @@ func TestShortMessageDampener(t *testing.T) {
 // TestQuestionFormDampener verifies trailing '?' boosts TierReason over TierHeavy.
 func TestQuestionFormDampener(t *testing.T) {
 	cases := []struct {
-		query    string
-		wantNot  []Tier // these tiers should NOT win
+		query   string
+		wantNot []Tier // these tiers should NOT win
 	}{
 		{
 			"how does the auth flow work?",

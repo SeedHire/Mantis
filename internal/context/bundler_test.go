@@ -86,58 +86,58 @@ func TestScoreFile(t *testing.T) {
 		maxScore   int // maximum expected
 	}{
 		{
-			name:      "depth0 entry point small recent",
-			path:      "internal/auth/auth.go",
-			depth:     0,
-			content:   strings.Repeat("x", 500), // small file
-			modified:  now,
-			minScore:  12, // 10 (depth) + 1 (small) + 1 (recent, truncated from 1.999)
-			maxScore:  13,
+			name:     "depth0 entry point small recent",
+			path:     "internal/auth/auth.go",
+			depth:    0,
+			content:  strings.Repeat("x", 500), // small file
+			modified: now,
+			minScore: 12, // 10 (depth) + 1 (small) + 1 (recent, truncated from 1.999)
+			maxScore: 13,
 		},
 		{
-			name:      "depth1 gets 8 base",
-			path:      "internal/util/util.go",
-			depth:     1,
-			content:   strings.Repeat("x", 5000),
-			modified:  now,
-			minScore:  9, // 8 + 1 (recent)
-			maxScore:  10,
+			name:     "depth1 gets 8 base",
+			path:     "internal/util/util.go",
+			depth:    1,
+			content:  strings.Repeat("x", 5000),
+			modified: now,
+			minScore: 9, // 8 + 1 (recent)
+			maxScore: 10,
 		},
 		{
-			name:      "depth2 gets 5 base",
-			path:      "internal/helper/helper.go",
-			depth:     2,
-			content:   strings.Repeat("x", 5000),
-			modified:  now,
-			minScore:  6, // 5 + 1 (recent)
-			maxScore:  7,
+			name:     "depth2 gets 5 base",
+			path:     "internal/helper/helper.go",
+			depth:    2,
+			content:  strings.Repeat("x", 5000),
+			modified: now,
+			minScore: 6, // 5 + 1 (recent)
+			maxScore: 7,
 		},
 		{
-			name:      "default depth gets 3 base",
-			path:      "internal/other/other.go",
-			depth:     5,
-			content:   strings.Repeat("x", 5000),
-			modified:  now,
-			minScore:  4, // 3 + 1 (recent)
-			maxScore:  5,
+			name:     "default depth gets 3 base",
+			path:     "internal/other/other.go",
+			depth:    5,
+			content:  strings.Repeat("x", 5000),
+			modified: now,
+			minScore: 4, // 3 + 1 (recent)
+			maxScore: 5,
 		},
 		{
-			name:      "large file penalty",
-			path:      "internal/big/big.go",
-			depth:     0,
-			content:   strings.Repeat("x", 60000), // >50KB → -3
-			modified:  now,
-			minScore:  8, // 10 - 3 + 1 (recent)
-			maxScore:  9,
+			name:     "large file penalty",
+			path:     "internal/big/big.go",
+			depth:    0,
+			content:  strings.Repeat("x", 60000), // >50KB → -3
+			modified: now,
+			minScore: 8, // 10 - 3 + 1 (recent)
+			maxScore: 9,
 		},
 		{
-			name:      "config file demotion",
-			path:      "go.sum",
-			depth:     0,
-			content:   "hash data",
-			modified:  now,
-			minScore:  6, // 10 + 1 (small) + 1 (recent) - 5 (demotion) = 7
-			maxScore:  8,
+			name:     "config file demotion",
+			path:     "go.sum",
+			depth:    0,
+			content:  "hash data",
+			modified: now,
+			minScore: 6, // 10 + 1 (small) + 1 (recent) - 5 (demotion) = 7
+			maxScore: 8,
 		},
 		{
 			name:      "co-located test boost",
@@ -160,32 +160,32 @@ func TestScoreFile(t *testing.T) {
 			maxScore:  10,
 		},
 		{
-			name:      "churn bonus passthrough",
-			path:      "internal/auth/auth.go",
-			depth:     0,
-			content:   strings.Repeat("x", 500),
-			modified:  now,
+			name:       "churn bonus passthrough",
+			path:       "internal/auth/auth.go",
+			depth:      0,
+			content:    strings.Repeat("x", 500),
+			modified:   now,
 			churnBonus: 4,
-			minScore:  16, // 10 + 1 (small) + 1 (recent) + 4 (churn)
-			maxScore:  17,
+			minScore:   16, // 10 + 1 (small) + 1 (recent) + 4 (churn)
+			maxScore:   17,
 		},
 		{
-			name:      "old file gets 0 recency",
-			path:      "internal/legacy/legacy.go",
-			depth:     1,
-			content:   strings.Repeat("x", 5000),
-			modified:  old,
-			minScore:  8,
-			maxScore:  9,
+			name:     "old file gets 0 recency",
+			path:     "internal/legacy/legacy.go",
+			depth:    1,
+			content:  strings.Repeat("x", 5000),
+			modified: old,
+			minScore: 8,
+			maxScore: 9,
 		},
 		{
-			name:      "types file boost",
-			path:      "internal/model/types.go",
-			depth:     1,
-			content:   strings.Repeat("x", 5000),
-			modified:  now,
-			minScore:  11, // 8 + 1 (recent) + 2 (types boost)
-			maxScore:  12,
+			name:     "types file boost",
+			path:     "internal/model/types.go",
+			depth:    1,
+			content:  strings.Repeat("x", 5000),
+			modified: now,
+			minScore: 11, // 8 + 1 (recent) + 2 (types boost)
+			maxScore: 12,
 		},
 	}
 

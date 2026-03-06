@@ -136,7 +136,7 @@ func renderHotspots(hotspots, risky []intel.FileChurn, coupling []intel.CoupledF
 
 	// ── Hotspots ──
 	sb.WriteString(StyleHighlight.Render("  🔥 Churn Hotspots") + StyleMuted.Render("  (most changes in 90 days)") + "\n")
-	sb.WriteString(StyleDivider.Render("  " + strings.Repeat("─", sepLen)) + "\n")
+	sb.WriteString(StyleDivider.Render("  "+strings.Repeat("─", sepLen)) + "\n")
 
 	if len(hotspots) == 0 {
 		sb.WriteString(StyleMuted.Render("  No file changes found.\n"))
@@ -153,7 +153,7 @@ func renderHotspots(hotspots, risky []intel.FileChurn, coupling []intel.CoupledF
 	// ── Risky ──
 	sb.WriteString("\n")
 	sb.WriteString(StyleError.Render("  ⚠ Risk Zones") + StyleMuted.Render("  (high changes × many authors)") + "\n")
-	sb.WriteString(StyleDivider.Render("  " + strings.Repeat("─", sepLen)) + "\n")
+	sb.WriteString(StyleDivider.Render("  "+strings.Repeat("─", sepLen)) + "\n")
 
 	if len(risky) == 0 {
 		sb.WriteString(StyleMuted.Render("  No risky files detected.\n"))
@@ -170,7 +170,7 @@ func renderHotspots(hotspots, risky []intel.FileChurn, coupling []intel.CoupledF
 	// ── Coupling ──
 	sb.WriteString("\n")
 	sb.WriteString(StyleWarning.Render("  🔗 Co-Change Coupling") + StyleMuted.Render("  (files that always change together)") + "\n")
-	sb.WriteString(StyleDivider.Render("  " + strings.Repeat("─", sepLen)) + "\n")
+	sb.WriteString(StyleDivider.Render("  "+strings.Repeat("─", sepLen)) + "\n")
 
 	shown := coupling
 	if len(shown) > 15 {

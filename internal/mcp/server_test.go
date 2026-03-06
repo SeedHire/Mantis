@@ -229,9 +229,9 @@ func TestEmptyLines(t *testing.T) {
 
 func TestIntArg(t *testing.T) {
 	args := map[string]interface{}{
-		"int_val":   float64(42),
-		"str_val":   "hello",
-		"nil_val":   nil,
+		"int_val": float64(42),
+		"str_val": "hello",
+		"nil_val": nil,
 	}
 
 	if got := intArg(args, "int_val", 0); got != 42 {

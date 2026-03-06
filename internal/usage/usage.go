@@ -54,7 +54,6 @@ func (t *Tracker) Summary() string {
 		formatTokens(t.today.Tokens), t.today.HeavyCalls, t.today.VisionCalls)
 }
 
-
 func (t *Tracker) loadToday() *DayUsage {
 	today := time.Now().Format("2006-01-02")
 	data, err := os.ReadFile(t.path)

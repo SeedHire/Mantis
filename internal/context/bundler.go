@@ -109,7 +109,10 @@ func (b *Bundler) Bundle(symbolName string, maxDepth, tokenBudget int) (*Bundle,
 		if nErr != nil || n == nil {
 			continue
 		}
-		content, _ := os.ReadFile(n.FilePath)
+		content, err := os.ReadFile(n.FilePath)
+		if err != nil {
+			continue // file deleted or unreadable — skip rather than sending empty content
+		}
 		priority := scoreFile(n.FilePath, depth, string(content), n.LastModified, entryBase, churnBonus[n.FilePath])
 		bf := BundleFile{
 			Path:    n.FilePath,
@@ -129,7 +132,10 @@ func (b *Bundler) Bundle(symbolName string, maxDepth, tokenBudget int) (*Bundle,
 		if _, already := depthMap[imp.ID]; already {
 			continue
 		}
-		content, _ := os.ReadFile(imp.FilePath)
+		content, err := os.ReadFile(imp.FilePath)
+		if err != nil {
+			continue // file deleted or unreadable — skip
+		}
 		bf := BundleFile{
 			Path:    imp.FilePath,
 			Depth:   maxDepth + 1,

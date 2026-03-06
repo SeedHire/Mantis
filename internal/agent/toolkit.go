@@ -2,11 +2,11 @@
 // multi-agent orchestrator (fan-out → parallel workers → synthesizer).
 //
 // Design follows SWE-agent's Agent-Computer Interface paper:
-//   1. read_file    — partial file view, stays within token budget
-//   2. write_file   — create or overwrite a file
-//   3. run_bash     — shell with allowlist, structured output, output cap
-//   4. search_codebase — semantic search over graph + embeddings
-//   5. finish       — explicit done signal, prevents runaway loops
+//  1. read_file    — partial file view, stays within token budget
+//  2. write_file   — create or overwrite a file
+//  3. run_bash     — shell with allowlist, structured output, output cap
+//  4. search_codebase — semantic search over graph + embeddings
+//  5. finish       — explicit done signal, prevents runaway loops
 package agent
 
 import (
@@ -29,8 +29,8 @@ import (
 )
 
 const (
-	maxBashOutput = 8000 // characters (~2000 tokens)
-	defaultTimeout = 30  // seconds
+	maxBashOutput  = 8000 // characters (~2000 tokens)
+	defaultTimeout = 30   // seconds
 )
 
 // ErrFinished is returned by Dispatch when the agent calls the "finish" tool.
@@ -40,8 +40,8 @@ var ErrFinished = errors.New("agent finished")
 // FinishedError wraps ErrFinished with the agent's summary message.
 type FinishedError struct{ Summary string }
 
-func (e *FinishedError) Error() string  { return "agent finished: " + e.Summary }
-func (e *FinishedError) Unwrap() error  { return ErrFinished }
+func (e *FinishedError) Error() string   { return "agent finished: " + e.Summary }
+func (e *FinishedError) Unwrap() error   { return ErrFinished }
 func (e *FinishedError) Is(t error) bool { return t == ErrFinished }
 
 // allowedPrefixes is the bash command allowlist (prefix matching).
@@ -83,7 +83,7 @@ type AgentToolkit struct {
 	projectRoot string
 	querier     *graph.Querier
 	embStore    *embeddings.Store
-	fileMu      sync.Mutex // guards WriteFile against parallel worker races
+	fileMu      sync.Mutex   // guards WriteFile against parallel worker races
 	ApproveFunc ApprovalFunc // if set, git write ops require approval
 }
 
@@ -367,7 +367,7 @@ func (t *AgentToolkit) GitDiff() string {
 
 func (t *AgentToolkit) approve(desc string) bool {
 	if t.ApproveFunc == nil {
-		return true // no gate configured
+		return false // deny by default — caller must set ApproveFunc to enable git writes
 	}
 	return t.ApproveFunc(desc)
 }

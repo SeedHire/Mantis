@@ -1,34 +1,35 @@
 // Package router classifies user intent and selects the right specialised model.
 //
 // Tiers (7):
-//   TierTrivial  — one-liners, definitions, syntax lookups          (~1–4B model)
-//   TierFast     — short code questions, small completions          (~8–14B model)
-//   TierCode     — coding specialist: implement, debug, refactor    (qwen3-coder / deepseek-v3.2)
-//   TierReason   — analysis, architecture, deep explanation         (kimi-thinking / cogito)
-//   TierHeavy    — multi-file, large context, complex design        (devstral-2 / deepseek-v3)
-//   TierMax      — ensemble: 3 specialists in parallel + synthesis  (Opus-level output)
-//   TierVision   — any image / screenshot input                     (qwen3-vl / gemini)
+//
+//	TierTrivial  — one-liners, definitions, syntax lookups          (~1–4B model)
+//	TierFast     — short code questions, small completions          (~8–14B model)
+//	TierCode     — coding specialist: implement, debug, refactor    (qwen3-coder / deepseek-v3.2)
+//	TierReason   — analysis, architecture, deep explanation         (kimi-thinking / cogito)
+//	TierHeavy    — multi-file, large context, complex design        (devstral-2 / deepseek-v3)
+//	TierMax      — ensemble: 3 specialists in parallel + synthesis  (Opus-level output)
+//	TierVision   — any image / screenshot input                     (qwen3-vl / gemini)
 package router
 
 import (
-"context"
-"strings"
-"sync"
+	"context"
+	"strings"
+	"sync"
 
-"github.com/seedhire/mantis/internal/ollama"
+	"github.com/seedhire/mantis/internal/ollama"
 )
 
 // Tier represents the selected model specialisation.
 type Tier int
 
 const (
-TierTrivial Tier = iota
-TierFast
-TierCode
-TierReason
-TierHeavy
-TierMax
-TierVision
+	TierTrivial Tier = iota
+	TierFast
+	TierCode
+	TierReason
+	TierHeavy
+	TierMax
+	TierVision
 )
 
 func (t Tier) String() string {
@@ -41,89 +42,90 @@ func (t Tier) String() string {
 
 // Intent holds the routing decision for a user message.
 type Intent struct {
-Tier        Tier
-TaskType    string // the detected sub-type
-NeedsGraph  bool
-NeedsVision bool
-Confidence  float64
+	Tier        Tier
+	TaskType    string // the detected sub-type
+	NeedsGraph  bool
+	NeedsVision bool
+	Confidence  float64
 }
 
 // ── Model preference lists ────────────────────────────────────────────────────
 // Each tier lists models in priority order (cloud first, local fallback).
 var preferredModels = map[Tier][]string{
-TierTrivial: {
-"gemma3:4b", "ministral-3:3b", "gemma3:1b", "rnj-1:8b",
-// local
-"qwen2.5-coder:1.5b", "qwen2.5-coder:0.5b", "llama3.2:1b", "phi3:mini", "gemma2:2b",
-},
-TierFast: {
-"gemma3:12b", "ministral-3:8b", "gpt-oss:20b", "nemotron-3-nano:30b",
-// local
-"qwen2.5-coder:7b", "llama3.2:3b", "phi3:3.8b", "gemma2:9b",
-},
-TierCode: {
-// Coding-specialist models — best for implement/debug/refactor
-// Prioritise models with strong tool-calling and agentic capabilities.
-"qwen3-coder-next", "qwen3-coder:480b", "deepseek-v3.2", "glm-5",
-"devstral-2:123b", "devstral-small-2:24b", "devstral", "ministral-3:14b",
-"deepseek-coder-v2:16b", "deepseek-v3", "gpt-oss:120b",
-// local
-"qwen2.5-coder:32b", "qwen2.5-coder:14b", "deepseek-coder:6.7b",
-"codellama:13b",
-},
-TierReason: {
-// Reasoning/analysis models — best for architecture, explanation, tradeoffs
-"kimi-k2-thinking", "deepseek-r1", "deepseek-r1:70b", "cogito-2.1:671b", "deepseek-v3.2",
-"glm-5", "minimax-m2.1", "qwen3-next:80b",
-// local
-"deepseek-r1:14b", "deepseek-r1:8b", "llama3.1:70b", "mixtral:8x7b", "llama3.3:70b",
-},
-TierHeavy: {
-// Largest general + coding models for hard multi-file tasks
-"devstral-2:123b", "deepseek-v3", "deepseek-r1:70b", "qwen3-coder:480b", "deepseek-v3.1:671b",
-"kimi-k2.5", "mistral-large-3:675b", "minimax-m2.5",
-"gemma3:27b", "glm-4.7", "qwen3.5:397b",
-// local
-"deepseek-r1:32b", "qwen2.5-coder:72b", "llama3.3:70b",
-},
-// TierMax uses ensemblePools — see EnsembleModels()
-TierMax: {
-"qwen3-coder:480b", "deepseek-v3.2", "devstral-2:123b", "deepseek-r1", "kimi-k2-thinking",
-"deepseek-v3", "cogito-2.1:671b", "mistral-large-3:675b",
-"qwen3-coder-next", "glm-5", "devstral-small-2:24b",
-},
-TierVision: {
-"qwen3-vl:235b-instruct", "qwen3-vl:235b", "gemini-3-flash-preview",
-// local
-"llama3.2-vision:11b", "llava:13b", "llava:7b", "moondream:1.8b",
-},
+	TierTrivial: {
+		"gemma3:4b", "ministral-3:3b", "gemma3:1b", "rnj-1:8b",
+		// local
+		"qwen2.5-coder:1.5b", "qwen2.5-coder:0.5b", "llama3.2:1b", "phi3:mini", "gemma2:2b",
+	},
+	TierFast: {
+		"gemma3:12b", "ministral-3:8b", "gpt-oss:20b", "nemotron-3-nano:30b",
+		// local
+		"qwen2.5-coder:7b", "llama3.2:3b", "phi3:3.8b", "gemma2:9b",
+	},
+	TierCode: {
+		// Coding-specialist models — best for implement/debug/refactor
+		// Prioritise models with strong tool-calling and agentic capabilities.
+		"qwen3-coder-next", "qwen3-coder:480b", "deepseek-v3.2", "glm-5",
+		"devstral-2:123b", "devstral-small-2:24b", "devstral", "ministral-3:14b",
+		"deepseek-coder-v2:16b", "deepseek-v3", "gpt-oss:120b",
+		// local
+		"qwen2.5-coder:32b", "qwen2.5-coder:14b", "deepseek-coder:6.7b",
+		"codellama:13b",
+	},
+	TierReason: {
+		// Reasoning/analysis models — best for architecture, explanation, tradeoffs
+		"kimi-k2-thinking", "deepseek-r1", "deepseek-r1:70b", "cogito-2.1:671b", "deepseek-v3.2",
+		"glm-5", "minimax-m2.1", "qwen3-next:80b",
+		// local
+		"deepseek-r1:14b", "deepseek-r1:8b", "llama3.1:70b", "mixtral:8x7b", "llama3.3:70b",
+	},
+	TierHeavy: {
+		// Largest general + coding models for hard multi-file tasks
+		"devstral-2:123b", "deepseek-v3", "deepseek-r1:70b", "qwen3-coder:480b", "deepseek-v3.1:671b",
+		"kimi-k2.5", "mistral-large-3:675b", "minimax-m2.5",
+		"gemma3:27b", "glm-4.7", "qwen3.5:397b",
+		// local
+		"deepseek-r1:32b", "qwen2.5-coder:72b", "llama3.3:70b",
+	},
+	// TierMax uses ensemblePools — see EnsembleModels()
+	TierMax: {
+		"qwen3-coder:480b", "deepseek-v3.2", "devstral-2:123b", "deepseek-r1", "kimi-k2-thinking",
+		"deepseek-v3", "cogito-2.1:671b", "mistral-large-3:675b",
+		"qwen3-coder-next", "glm-5", "devstral-small-2:24b",
+	},
+	TierVision: {
+		"qwen3-vl:235b-instruct", "qwen3-vl:235b", "gemini-3-flash-preview",
+		// local
+		"llama3.2-vision:11b", "llava:13b", "llava:7b", "moondream:1.8b",
+	},
 }
 
 // ensemblePools: one model per pool is selected for parallel ensemble execution.
 // Pool 1 = coding specialist, Pool 2 = reasoning, Pool 3 = large general.
 var ensemblePools = [][]string{
-{"qwen3-coder-next", "qwen3-coder:480b", "devstral-2:123b", "devstral-small-2:24b", "devstral", "qwen2.5-coder:32b"},
-{"kimi-k2-thinking", "deepseek-r1", "deepseek-r1:70b", "cogito-2.1:671b", "deepseek-v3.2", "llama3.3:70b"},
-{"mistral-large-3:675b", "minimax-m2.5", "kimi-k2.5", "glm-5", "deepseek-v3", "gemma3:27b"},
+	{"qwen3-coder-next", "qwen3-coder:480b", "devstral-2:123b", "devstral-small-2:24b", "devstral", "qwen2.5-coder:32b"},
+	{"kimi-k2-thinking", "deepseek-r1", "deepseek-r1:70b", "cogito-2.1:671b", "deepseek-v3.2", "llama3.3:70b"},
+	{"mistral-large-3:675b", "minimax-m2.5", "kimi-k2.5", "glm-5", "deepseek-v3", "gemma3:27b"},
 }
 
 var defaultModels = map[Tier]string{
-TierTrivial: "gemma3:4b",
-TierFast:    "gemma3:12b",
-TierCode:    "qwen3-coder-next",
-TierReason:  "kimi-k2-thinking",
-TierHeavy:   "devstral-2:123b",
-TierMax:     "devstral-2:123b", // single-model fallback when ensemble unavailable
-TierVision:  "qwen3-vl:235b-instruct",
+	TierTrivial: "gemma3:4b",
+	TierFast:    "gemma3:12b",
+	TierCode:    "qwen3-coder-next",
+	TierReason:  "kimi-k2-thinking",
+	TierHeavy:   "devstral-2:123b",
+	TierMax:     "devstral-2:123b", // single-model fallback when ensemble unavailable
+	TierVision:  "qwen3-vl:235b-instruct",
 }
 
 // ── Size-based fallback thresholds ────────────────────────────────────────────
 const (
-gb           = int64(1_000_000_000)
-trivialMax   = 5 * gb
-fastMax      = 15 * gb
-codeMax      = 40 * gb
-reasonMax    = 100 * gb
+	gb         = int64(1_000_000_000)
+	trivialMax = 5 * gb
+	fastMax    = 15 * gb
+	codeMax    = 40 * gb
+	reasonMax  = 100 * gb
+
 // heavy / max = anything larger
 )
 
@@ -150,68 +152,68 @@ func ResolveAll(available []ollama.ModelInfo) {
 // EnsembleModels returns one model per speciality pool (coding/reasoning/general).
 // Falls back to top-3 from TierMax prefs when pools can't be filled.
 func EnsembleModels(available []ollama.ModelInfo) []string {
-set := buildSet(available)
-var picked []string
-for _, pool := range ensemblePools {
-if m := pickFromPrefs(pool, set, available); m != "" {
-picked = append(picked, m)
-}
-}
-if len(picked) < 2 {
-picked = nil
-for _, c := range preferredModels[TierMax] {
-if m := resolveOne(c, set, available); m != "" {
-picked = append(picked, m)
-if len(picked) == 3 {
-break
-}
-}
-}
-}
-return picked
+	set := buildSet(available)
+	var picked []string
+	for _, pool := range ensemblePools {
+		if m := pickFromPrefs(pool, set, available); m != "" {
+			picked = append(picked, m)
+		}
+	}
+	if len(picked) < 2 {
+		picked = nil
+		for _, c := range preferredModels[TierMax] {
+			if m := resolveOne(c, set, available); m != "" {
+				picked = append(picked, m)
+				if len(picked) == 3 {
+					break
+				}
+			}
+		}
+	}
+	return picked
 }
 
 func buildSet(available []ollama.ModelInfo) map[string]ollama.ModelInfo {
-set := make(map[string]ollama.ModelInfo, len(available)*2)
-for _, m := range available {
-set[m.Name] = m
-if idx := strings.Index(m.Name, ":"); idx != -1 {
-bare := m.Name[:idx]
-if _, exists := set[bare]; !exists {
-set[bare] = m
-}
-}
-}
-return set
+	set := make(map[string]ollama.ModelInfo, len(available)*2)
+	for _, m := range available {
+		set[m.Name] = m
+		if idx := strings.Index(m.Name, ":"); idx != -1 {
+			bare := m.Name[:idx]
+			if _, exists := set[bare]; !exists {
+				set[bare] = m
+			}
+		}
+	}
+	return set
 }
 
 func pickFromPrefs(prefs []string, set map[string]ollama.ModelInfo, available []ollama.ModelInfo) string {
-for _, c := range prefs {
-if m := resolveOne(c, set, available); m != "" {
-return m
-}
-}
-return ""
+	for _, c := range prefs {
+		if m := resolveOne(c, set, available); m != "" {
+			return m
+		}
+	}
+	return ""
 }
 
 func resolveOne(candidate string, set map[string]ollama.ModelInfo, available []ollama.ModelInfo) string {
-if _, ok := set[candidate]; ok {
-return candidate
-}
-bare := candidate
-if idx := strings.Index(candidate, ":"); idx != -1 {
-bare = candidate[:idx]
-}
-if info, ok := set[bare]; ok {
-return info.Name
-}
-// prefix match (e.g. "devstral" matches "devstral-small-2:24b")
-for _, m := range available {
-if strings.HasPrefix(m.Name, bare) {
-return m.Name
-}
-}
-return ""
+	if _, ok := set[candidate]; ok {
+		return candidate
+	}
+	bare := candidate
+	if idx := strings.Index(candidate, ":"); idx != -1 {
+		bare = candidate[:idx]
+	}
+	if info, ok := set[bare]; ok {
+		return info.Name
+	}
+	// prefix match (e.g. "devstral" matches "devstral-small-2:24b")
+	for _, m := range available {
+		if strings.HasPrefix(m.Name, bare) {
+			return m.Name
+		}
+	}
+	return ""
 }
 
 func pickBySize(available []ollama.ModelInfo, tier Tier) string {
@@ -256,21 +258,35 @@ func pickBySize(available []ollama.ModelInfo, tier Tier) string {
 	}
 	switch tier {
 	case TierTrivial:
-		if m := pickQuantized(buckets[0]); m != "" { return m }
-		if m := pick(buckets[0], false); m != "" { return m }
+		if m := pickQuantized(buckets[0]); m != "" {
+			return m
+		}
+		if m := pick(buckets[0], false); m != "" {
+			return m
+		}
 		return pick(buckets[1], false)
 	case TierFast:
-		if m := pickQuantized(buckets[1]); m != "" { return m }
-		if m := pick(buckets[1], true); m != "" { return m }
+		if m := pickQuantized(buckets[1]); m != "" {
+			return m
+		}
+		if m := pick(buckets[1], true); m != "" {
+			return m
+		}
 		return pick(buckets[0], true)
 	case TierCode:
-		if m := pick(buckets[2], true); m != "" { return m }
+		if m := pick(buckets[2], true); m != "" {
+			return m
+		}
 		return pick(buckets[1], true)
 	case TierReason:
-		if m := pick(buckets[3], true); m != "" { return m }
+		if m := pick(buckets[3], true); m != "" {
+			return m
+		}
 		return pick(buckets[2], true)
 	case TierHeavy, TierMax:
-		if m := pick(buckets[4], true); m != "" { return m }
+		if m := pick(buckets[4], true); m != "" {
+			return m
+		}
 		return pick(buckets[3], true)
 	case TierVision:
 		for _, m := range available {
@@ -467,118 +483,118 @@ func classify(ctx context.Context, message string, hasImage bool, store EmbedSto
 }
 
 var maxKeywords = []string{
-"find all bug", "find bugs", "audit", "code review", "review all",
-"compare approach", "compare approaches", "compare all", "which is better",
-"comprehensive", "thorough", "deep dive", "full analysis",
-"all issues", "all problem", "security", "vulnerability",
-"production ready", "production-ready", "before deploy", "before release",
-"tradeoff", "evaluate all", "to scale", "use case",
+	"find all bug", "find bugs", "audit", "code review", "review all",
+	"compare approach", "compare approaches", "compare all", "which is better",
+	"comprehensive", "thorough", "deep dive", "full analysis",
+	"all issues", "all problem", "security", "vulnerability",
+	"production ready", "production-ready", "before deploy", "before release",
+	"tradeoff", "evaluate all", "to scale", "use case",
 }
 
 var reasonKeywords = []string{
-"why does", "explain how", "how does", "how do i decide",
-"architecture", "design pattern", "trade-off", "tradeoff", "when to use",
-"difference between", "what is the best way", "what approach", "best approach",
-"reasoning", "analyse", "analyze", "pros and cons", "pros", "cons",
-"should i use", "when should i use", "how should i",
-// Moved from heavyKeywords — "explain the whole X" is a reasoning question.
-"explain the whole", "explain the entire",
+	"why does", "explain how", "how does", "how do i decide",
+	"architecture", "design pattern", "trade-off", "tradeoff", "when to use",
+	"difference between", "what is the best way", "what approach", "best approach",
+	"reasoning", "analyse", "analyze", "pros and cons", "pros", "cons",
+	"should i use", "when should i use", "how should i",
+	// Moved from heavyKeywords — "explain the whole X" is a reasoning question.
+	"explain the whole", "explain the entire",
 }
 
 var heavyKeywords = []string{
-"refactor entire", "refactor all", "refactor all files", "refactor all the", "refactor the whole", "rewrite",
-"migrate", "explain all", "codebase",
-"multi-file", "across all", "every file", "full project", "from scratch",
-"plan the", "strategy for",
-// Specific multi-file project builds (not generic "build a X").
-"create a full", "create an app", "build a full", "build a backend",
-"build a rest api", "build a graphql", "build a microservice",
-"build a complete", "build the entire", "the entire", "implement the entire",
-"clone", "scaffold", "full stack", "full-stack", "entire app",
-"rest api", "graphql api", "a microservice", "backend for",
-"setup project", "initialize project",
-"implement the whole", "build the whole", "refactor the whole",
-"the whole service", "the whole system", "the whole module", "the whole package",
-"whole notification", "whole user", "whole payment", "whole auth",
+	"refactor entire", "refactor all", "refactor all files", "refactor all the", "refactor the whole", "rewrite",
+	"migrate", "explain all", "codebase",
+	"multi-file", "across all", "every file", "full project", "from scratch",
+	"plan the", "strategy for",
+	// Specific multi-file project builds (not generic "build a X").
+	"create a full", "create an app", "build a full", "build a backend",
+	"build a rest api", "build a graphql", "build a microservice",
+	"build a complete", "build the entire", "the entire", "implement the entire",
+	"clone", "scaffold", "full stack", "full-stack", "entire app",
+	"rest api", "graphql api", "a microservice", "backend for",
+	"setup project", "initialize project",
+	"implement the whole", "build the whole", "refactor the whole",
+	"the whole service", "the whole system", "the whole module", "the whole package",
+	"whole notification", "whole user", "whole payment", "whole auth",
 }
 
 var codeKeywords = []string{
-"implement", "write", "create", "add", "build",
-"fix", "bug", "error", "broken", "crash", "exception",
-"refactor", "improve", "optimise", "optimize", "clean up",
-"test", "spec", "mock", "function", "method", "class",
-"api", "endpoint", "query", "type", "interface",
+	"implement", "write", "create", "add", "build",
+	"fix", "bug", "error", "broken", "crash", "exception",
+	"refactor", "improve", "optimise", "optimize", "clean up",
+	"test", "spec", "mock", "function", "method", "class",
+	"api", "endpoint", "query", "type", "interface",
 }
 
 var fastKeywords = []string{
-"what does", "what is this", "explain this line", "what type",
-"how to use", "how to", "how do i", "how do you", "example of", "show me", "snippet",
+	"what does", "what is this", "explain this line", "what type",
+	"how to use", "how to", "how do i", "how do you", "example of", "show me", "snippet",
 }
 
 var trivialKeywords = []string{
-"what is", "what's", "define", "meaning of", "syntax for",
-"typo", "spelling", "rename", "one line", "single line",
-"autocomplete", "complete this",
-"how to declare", "how to define", "how to name",
+	"what is", "what's", "define", "meaning of", "syntax for",
+	"typo", "spelling", "rename", "one line", "single line",
+	"autocomplete", "complete this",
+	"how to declare", "how to define", "how to name",
 }
 
 // terminalErrorSignatures — raw error output pasted from the shell.
 // normalizeTerminalInput() rewrites these as "fix this X error:" first,
 // then Classify() routes them to fast/fix regardless of phrasing.
 var terminalErrorSignatures = []string{
-"command not found",
-"npm err!",
-"npm warn",
-"error ts",        // TypeScript compiler
-"error[e",         // Rust compiler
-"syntaxerror:",
-"typeerror:",
-"referenceerror:",
-"cannot find module",
-"module not found",
-"enoent:",
-"eaddrinuse",
-"traceback (most recent call last)",
-"exit status 1",
-"panic:",
-"fix this shell error",
-"fix this npm error",
-"fix this runtime error",
-"fix this typescript error",
-"fix this python traceback",
+	"command not found",
+	"npm err!",
+	"npm warn",
+	"error ts", // TypeScript compiler
+	"error[e",  // Rust compiler
+	"syntaxerror:",
+	"typeerror:",
+	"referenceerror:",
+	"cannot find module",
+	"module not found",
+	"enoent:",
+	"eaddrinuse",
+	"traceback (most recent call last)",
+	"exit status 1",
+	"panic:",
+	"fix this shell error",
+	"fix this npm error",
+	"fix this runtime error",
+	"fix this typescript error",
+	"fix this python traceback",
 }
 
 var graphKeywords = []string{
-"break", "affect", "impact", "depend", "import", "uses", "calls",
-"fix", "bug", "error", "why does", "where is", "find", "dead code",
-"circular", "refactor", "change", "modify", "delete", "remove",
-"what calls", "who imports",
+	"break", "affect", "impact", "depend", "import", "uses", "calls",
+	"fix", "bug", "error", "why does", "where is", "find", "dead code",
+	"circular", "refactor", "change", "modify", "delete", "remove",
+	"what calls", "who imports",
 }
 
 func needsGraph(lower string) bool {
-for _, kw := range graphKeywords {
-if strings.Contains(lower, kw) {
-return true
-}
-}
-return false
+	for _, kw := range graphKeywords {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
 }
 
 func detectTaskType(lower string) string {
-switch {
-case strings.Contains(lower, "explain") || strings.Contains(lower, "how does") || strings.Contains(lower, "what does"):
-return "explain"
-case strings.Contains(lower, "fix") || strings.Contains(lower, "bug") || strings.Contains(lower, "error") || strings.Contains(lower, "broken"):
-return "fix"
-case strings.Contains(lower, "refactor") || strings.Contains(lower, "improve") || strings.Contains(lower, "clean"):
-return "refactor"
-case strings.Contains(lower, "impact") || strings.Contains(lower, "affect") || strings.Contains(lower, "break"):
-return "impact-query"
-case strings.Contains(lower, "test") || strings.Contains(lower, "spec"):
-return "test"
-case strings.Contains(lower, "write") || strings.Contains(lower, "create") || strings.Contains(lower, "add") || strings.Contains(lower, "implement"):
-return "implement"
-default:
-return "general"
-}
+	switch {
+	case strings.Contains(lower, "explain") || strings.Contains(lower, "how does") || strings.Contains(lower, "what does"):
+		return "explain"
+	case strings.Contains(lower, "fix") || strings.Contains(lower, "bug") || strings.Contains(lower, "error") || strings.Contains(lower, "broken"):
+		return "fix"
+	case strings.Contains(lower, "refactor") || strings.Contains(lower, "improve") || strings.Contains(lower, "clean"):
+		return "refactor"
+	case strings.Contains(lower, "impact") || strings.Contains(lower, "affect") || strings.Contains(lower, "break"):
+		return "impact-query"
+	case strings.Contains(lower, "test") || strings.Contains(lower, "spec"):
+		return "test"
+	case strings.Contains(lower, "write") || strings.Contains(lower, "create") || strings.Contains(lower, "add") || strings.Contains(lower, "implement"):
+		return "implement"
+	default:
+		return "general"
+	}
 }

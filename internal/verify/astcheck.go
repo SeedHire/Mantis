@@ -291,7 +291,10 @@ func regexExtractCalls(code string) []string {
 
 // CheckWithAST performs the same check as Check but uses tree-sitter AST parsing
 // for more accurate symbol extraction. Falls back to regex for unsupported languages.
-func CheckWithAST(response string, tw interface{ SymbolExists(string) bool; FileCount() int }) Result {
+func CheckWithAST(response string, tw interface {
+	SymbolExists(string) bool
+	FileCount() int
+}) Result {
 	if tw == nil || tw.FileCount() == 0 {
 		return Result{Clean: true}
 	}

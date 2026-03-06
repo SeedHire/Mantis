@@ -10,19 +10,19 @@ import (
 
 // CommitIntent represents the parsed intent from a git commit message.
 type CommitIntent struct {
-	Hash      string
-	Author    string
-	Type      string // feat, fix, refactor, docs, chore, test, etc.
-	Scope     string // optional scope from conventional commit
-	Summary   string
-	IssueRefs []string // #42, GH-123, etc.
+	Hash         string
+	Author       string
+	Type         string // feat, fix, refactor, docs, chore, test, etc.
+	Scope        string // optional scope from conventional commit
+	Summary      string
+	IssueRefs    []string // #42, GH-123, etc.
 	FilesChanged []string
 }
 
 // IntentSummary aggregates intent data for a file or symbol.
 type IntentSummary struct {
-	Path        string
-	Intents     []CommitIntent
+	Path          string
+	Intents       []CommitIntent
 	FeatureCount  int
 	FixCount      int
 	RefactorCount int

@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	scratchFile  = "AGENT_SCRATCH.json"
+	scratchFile   = "AGENT_SCRATCH.json"
 	workerMaxIter = 5 // hard cap on tool-call iterations per worker
 )
 
@@ -166,6 +166,7 @@ func orchestrate(
 	result := map[string]string{}
 	if err := json.Unmarshal([]byte(raw), &result); err != nil {
 		// Fall back: assign the full task to each package.
+		fmt.Printf("  [orchestrator] decomposition parse failed (%v) — replicating task to all packages\n", err)
 		for _, pkg := range packages {
 			result[pkg] = task
 		}

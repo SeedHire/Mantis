@@ -145,8 +145,8 @@ func TestStartSpinnerReturnsDuration(t *testing.T) {
 // rewritten as an explicit fix request so the router picks the right tier.
 func TestNormalizeTerminalInput(t *testing.T) {
 	tests := []struct {
-		name      string
-		input     string
+		name       string
+		input      string
 		wantPrefix string
 	}{
 		{

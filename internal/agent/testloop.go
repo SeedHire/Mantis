@@ -26,11 +26,11 @@ const (
 
 // TestLoopResult holds the outcome of an iterative test loop run.
 type TestLoopResult struct {
-	Passed      bool           // all tests passed
-	Iterations  int            // how many fix iterations were run
-	Failures    []TestFailure  // remaining failures (empty if Passed)
-	FixSummary  string         // model's summary of what was fixed
-	StuckReason string         // non-empty if loop exited due to stuck detection
+	Passed      bool          // all tests passed
+	Iterations  int           // how many fix iterations were run
+	Failures    []TestFailure // remaining failures (empty if Passed)
+	FixSummary  string        // model's summary of what was fixed
+	StuckReason string        // non-empty if loop exited due to stuck detection
 }
 
 // TestLoop runs an iterative test→fix→retest cycle.

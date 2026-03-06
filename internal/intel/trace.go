@@ -21,11 +21,11 @@ import (
 
 // TraceEntry represents a single parsed trace record mapped to code.
 type TraceEntry struct {
-	Function    string  `json:"function"`
-	File        string  `json:"file,omitempty"`
-	CallCount   int     `json:"calls"`
-	DurationMs  float64 `json:"duration_ms"`
-	Source      string  `json:"source,omitempty"` // "otlp", "pprof", "custom"
+	Function   string  `json:"function"`
+	File       string  `json:"file,omitempty"`
+	CallCount  int     `json:"calls"`
+	DurationMs float64 `json:"duration_ms"`
+	Source     string  `json:"source,omitempty"` // "otlp", "pprof", "custom"
 }
 
 // TraceStats holds aggregated runtime stats for a code node.
@@ -114,10 +114,10 @@ type otlpExport struct {
 }
 
 type otlpSpan struct {
-	Name         string `json:"name"`
+	Name        string `json:"name"`
 	StartTimeNs string `json:"startTimeUnixNano"`
-	EndTimeNs    string `json:"endTimeUnixNano"`
-	Attributes   []struct {
+	EndTimeNs   string `json:"endTimeUnixNano"`
+	Attributes  []struct {
 		Key   string          `json:"key"`
 		Value json.RawMessage `json:"value"`
 	} `json:"attributes"`
@@ -131,9 +131,9 @@ func parseOTLP(data []byte) ([]TraceEntry, error) {
 
 	// Aggregate by operation name.
 	type agg struct {
-		calls    int
-		totalNs  int64
-		file     string
+		calls   int
+		totalNs int64
+		file    string
 	}
 	byOp := make(map[string]*agg)
 
@@ -161,7 +161,9 @@ func parseOTLP(data []byte) ([]TraceEntry, error) {
 				// Extract code.filepath or code.function from attributes.
 				for _, attr := range span.Attributes {
 					if attr.Key == "code.filepath" {
-						var sv struct{ StringValue string `json:"stringValue"` }
+						var sv struct {
+							StringValue string `json:"stringValue"`
+						}
 						if json.Unmarshal(attr.Value, &sv) == nil && sv.StringValue != "" {
 							a.file = sv.StringValue
 						}

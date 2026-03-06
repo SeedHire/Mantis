@@ -14,12 +14,12 @@ import (
 // ── Messages ──────────────────────────────────────────────────────────────────
 
 type brainResultMsg struct {
-	brainContent      string
-	decisions         string
-	rejected          string
-	conventions       string
-	hasBrain          bool
-	err               error
+	brainContent string
+	decisions    string
+	rejected     string
+	conventions  string
+	hasBrain     bool
+	err          error
 }
 
 // ── Model ─────────────────────────────────────────────────────────────────────
@@ -60,7 +60,7 @@ func (m BrainModel) load() tea.Cmd {
 			return brainResultMsg{hasBrain: false}
 		}
 		return brainResultMsg{
-			hasBrain:    true,
+			hasBrain:     true,
 			brainContent: b.ReadBrain(),
 			decisions:    b.ReadFile("DECISIONS.log"),
 			rejected:     b.ReadFile("REJECTED.md"),
@@ -123,7 +123,7 @@ func (m BrainModel) View() string {
 	case m.loading:
 		body = StyleMuted.Render("  Loading project brain…")
 	case m.err != nil:
-		body = StyleError.Render("  ✗  "+m.err.Error())
+		body = StyleError.Render("  ✗  " + m.err.Error())
 	case m.noBrain:
 		body = noBrainView()
 	default:
@@ -176,7 +176,7 @@ func renderBrain(data brainResultMsg, width int) string {
 
 	// ── BRAIN.md ──
 	sb.WriteString(StyleHighlight.Render("  🧠 BRAIN.md") + StyleMuted.Render("  (project memory)") + "\n")
-	sb.WriteString(StyleDivider.Render("  " + strings.Repeat("─", sepLen)) + "\n")
+	sb.WriteString(StyleDivider.Render("  "+strings.Repeat("─", sepLen)) + "\n")
 	if data.brainContent == "" {
 		sb.WriteString(StyleMuted.Render("  (empty)\n"))
 	} else {
@@ -188,7 +188,7 @@ func renderBrain(data brainResultMsg, width int) string {
 	// ── CONVENTIONS.md ──
 	sb.WriteString("\n")
 	sb.WriteString(StyleHighlight.Render("  📐 CONVENTIONS.md") + StyleMuted.Render(fmt.Sprintf("  (%d lines)", convLines)) + "\n")
-	sb.WriteString(StyleDivider.Render("  " + strings.Repeat("─", sepLen)) + "\n")
+	sb.WriteString(StyleDivider.Render("  "+strings.Repeat("─", sepLen)) + "\n")
 	if data.conventions == "" {
 		sb.WriteString(StyleMuted.Render("  (empty)\n"))
 	} else {
@@ -200,7 +200,7 @@ func renderBrain(data brainResultMsg, width int) string {
 	// ── DECISIONS.log ──
 	sb.WriteString("\n")
 	sb.WriteString(StyleHighlight.Render("  📋 DECISIONS.log") + StyleMuted.Render("  (recent)") + "\n")
-	sb.WriteString(StyleDivider.Render("  " + strings.Repeat("─", sepLen)) + "\n")
+	sb.WriteString(StyleDivider.Render("  "+strings.Repeat("─", sepLen)) + "\n")
 	if data.decisions == "" {
 		sb.WriteString(StyleMuted.Render("  No decisions logged yet. Use /decision in REPL.\n"))
 	} else {
@@ -220,7 +220,7 @@ func renderBrain(data brainResultMsg, width int) string {
 	// ── REJECTED.md ──
 	sb.WriteString("\n")
 	sb.WriteString(StyleError.Render("  🚫 REJECTED.md") + StyleMuted.Render("  (never suggest again)") + "\n")
-	sb.WriteString(StyleDivider.Render("  " + strings.Repeat("─", sepLen)) + "\n")
+	sb.WriteString(StyleDivider.Render("  "+strings.Repeat("─", sepLen)) + "\n")
 	if data.rejected == "" {
 		sb.WriteString(StyleMuted.Render("  No rejected approaches. Use /reject in REPL.\n"))
 	} else {

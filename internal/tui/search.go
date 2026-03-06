@@ -26,8 +26,10 @@ type searchItem struct {
 	node *graph.Node
 }
 
-func (i searchItem) Title() string       { return i.node.Name }
-func (i searchItem) Description() string { return fmt.Sprintf("%s:%d", i.node.FilePath, i.node.LineStart) }
+func (i searchItem) Title() string { return i.node.Name }
+func (i searchItem) Description() string {
+	return fmt.Sprintf("%s:%d", i.node.FilePath, i.node.LineStart)
+}
 func (i searchItem) FilterValue() string { return i.node.Name + " " + i.node.FilePath }
 
 // ── Model ─────────────────────────────────────────────────────────────────────

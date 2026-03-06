@@ -21,9 +21,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/chzyer/readline"
-	"golang.org/x/term"
 	"github.com/charmbracelet/glamour"
+	"github.com/chzyer/readline"
 	"github.com/seedhire/mantis/internal/agent"
 	"github.com/seedhire/mantis/internal/autofix"
 	"github.com/seedhire/mantis/internal/brain"
@@ -39,8 +38,9 @@ import (
 	"github.com/seedhire/mantis/internal/telemetry"
 	"github.com/seedhire/mantis/internal/truth"
 	"github.com/seedhire/mantis/internal/usage"
-	"github.com/seedhire/mantis/internal/web"
 	"github.com/seedhire/mantis/internal/verify"
+	"github.com/seedhire/mantis/internal/web"
+	"golang.org/x/term"
 )
 
 const (
@@ -189,6 +189,8 @@ func Run(cfg Config) error {
 			_ = embStore.IndexBrainFiles(ctx, mantisDir)
 			router.IndexRouterExamples(adapter)
 		}()
+	} else {
+		fmt.Printf("%s● memory store unavailable: %v%s\n", colorGold, err, colorReset)
 	}
 
 	// NL dispatcher — codebase intelligence tools, called automatically.
@@ -615,7 +617,7 @@ func Run(cfg Config) error {
 			fmt.Printf("%s  ◆ test loop — running iterative test→fix cycle%s\n", colorDim, colorReset)
 			packages := extractTestPackage(input)
 			testRoot, _ := os.Getwd()
-		runTestLoopCommand(testRoot, client, packages)
+			runTestLoopCommand(testRoot, client, packages)
 			sess.Add(model, intent.Tier, 0, 0, hasImage)
 			turnCancel()
 			continue
@@ -1500,7 +1502,6 @@ func runTestLoopCommand(root string, client *ollama.Client, packages string) {
 	fmt.Println()
 }
 
-
 // handleCommitCommand generates a commit message from the current diff,
 // shows a preview, and commits on user approval.
 func handleCommitCommand(client *ollama.Client, cfg Config) {
@@ -2197,7 +2198,9 @@ func fixToolArgSummary(name string, args json.RawMessage) string {
 func dispatchFixTool(root, toolName string, argsRaw json.RawMessage) string {
 	switch toolName {
 	case "read_file":
-		var args struct{ Path string `json:"path"` }
+		var args struct {
+			Path string `json:"path"`
+		}
 		if err := json.Unmarshal(argsRaw, &args); err != nil {
 			return "error: bad arguments"
 		}
@@ -2248,7 +2251,9 @@ func dispatchFixTool(root, toolName string, argsRaw json.RawMessage) string {
 		return fmt.Sprintf("edited %s", args.Path)
 
 	case "run_command":
-		var args struct{ Command string `json:"command"` }
+		var args struct {
+			Command string `json:"command"`
+		}
 		if err := json.Unmarshal(argsRaw, &args); err != nil {
 			return "error: bad arguments"
 		}
@@ -2273,7 +2278,9 @@ func dispatchFixTool(root, toolName string, argsRaw json.RawMessage) string {
 		return output
 
 	case "list_files":
-		var args struct{ Path string `json:"path"` }
+		var args struct {
+			Path string `json:"path"`
+		}
 		_ = json.Unmarshal(argsRaw, &args)
 		dir := root
 		if args.Path != "" {
@@ -2863,6 +2870,7 @@ func startSpinner(taskType string) func() time.Duration {
 	}()
 	return func() time.Duration { close(done); return time.Since(start) }
 }
+
 // streamPrinter handles real-time token streaming to stdout.
 // On first chunk it stops the spinner and starts printing raw tokens.
 // After all chunks: sp.stop() erases the raw output and returns elapsed time,
@@ -2870,7 +2878,7 @@ func startSpinner(taskType string) func() time.Duration {
 type streamPrinter struct {
 	stopFn    func() time.Duration // spinner stop function
 	started   bool
-	lineCount int  // newlines seen so far (for cursor-up erase)
+	lineCount int // newlines seen so far (for cursor-up erase)
 	elapsed   time.Duration
 	width     int
 }
@@ -3127,8 +3135,8 @@ func normalizeTerminalInput(input string) string {
 
 	// Patterns that indicate terminal error output, not a question.
 	terminalErrorPatterns := []struct {
-		marker  string
-		label   string
+		marker string
+		label  string
 	}{
 		{"command not found", "shell error"},
 		{"make: ***", "make error"},
@@ -3309,7 +3317,6 @@ func streamEnsemble(ctx context.Context, client *ollama.Client,
 	}
 	return totalPt + spt, totalCt + sct, nil
 }
-
 
 // on 404 until one works. On 400 "prompt too long" it retries with trimmed context.
 // An optional onLive callback (variadic, take at most one) is called for each chunk

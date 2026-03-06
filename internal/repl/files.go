@@ -1,11 +1,11 @@
 package repl
 
 import (
-"fmt"
-"os"
-"path/filepath"
-"regexp"
-"strings"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
 )
 
 // diffLines produces a compact diff between old and new content using LCS.
@@ -105,9 +105,9 @@ func lcsEditScript(a, b []string) (removed, added []string) {
 
 // WrittenFile records a file that was written from an AI response.
 type WrittenFile struct {
-Path    string
-Created bool   // true = new file, false = overwritten
-Diff    string // non-empty for modified files: compact +/- diff summary
+	Path    string
+	Created bool   // true = new file, false = overwritten
+	Diff    string // non-empty for modified files: compact +/- diff summary
 }
 
 // extractAndWriteFiles scans the AI response for fenced code blocks tagged
@@ -262,54 +262,54 @@ func applySearchReplacePatches(filePath, body, root string) []WrittenFile {
 //   - starts with a dot (.env, .gitignore)
 //   - is a known extensionless filename (Makefile, Dockerfile, etc.)
 func looksLikeFilePath(s string) bool {
-if strings.Contains(s, ".") || strings.Contains(s, "/") || strings.HasPrefix(s, ".") {
-return true
-}
-return knownExtensionless[strings.ToLower(s)]
+	if strings.Contains(s, ".") || strings.Contains(s, "/") || strings.HasPrefix(s, ".") {
+		return true
+	}
+	return knownExtensionless[strings.ToLower(s)]
 }
 
 var knownExtensionless = map[string]bool{
-"makefile": true, "dockerfile": true, "procfile": true,
-"gemfile": true, "rakefile": true, "guardfile": true,
-"vagrantfile": true, "jenkinsfile": true, "brewfile": true,
-"cmakelists": true, "license": true, "readme": true,
+	"makefile": true, "dockerfile": true, "procfile": true,
+	"gemfile": true, "rakefile": true, "guardfile": true,
+	"vagrantfile": true, "jenkinsfile": true, "brewfile": true,
+	"cmakelists": true, "license": true, "readme": true,
 }
 
 // printWrittenFiles prints a compact summary of files Mantis wrote to disk.
 // Modified files include an inline +/- diff of up to 8 changed lines.
 func printWrittenFiles(files []WrittenFile) {
-if len(files) == 0 {
-return
-}
-for _, f := range files {
-icon := "✚"
-if !f.Created {
-icon = "✎"
-}
-fmt.Printf("%s%s %s%s\n", colorGreen, icon, f.Path, colorReset)
-if f.Diff != "" {
-// Indent each diff line for visual grouping under the file path.
-for _, line := range strings.Split(f.Diff, "\n") {
-	fmt.Printf("   %s\n", line)
-}
-}
-}
-fmt.Println()
+	if len(files) == 0 {
+		return
+	}
+	for _, f := range files {
+		icon := "✚"
+		if !f.Created {
+			icon = "✎"
+		}
+		fmt.Printf("%s%s %s%s\n", colorGreen, icon, f.Path, colorReset)
+		if f.Diff != "" {
+			// Indent each diff line for visual grouping under the file path.
+			for _, line := range strings.Split(f.Diff, "\n") {
+				fmt.Printf("   %s\n", line)
+			}
+		}
+	}
+	fmt.Println()
 }
 
 // stripFileBlocks removes fenced code blocks that are tagged with a file path
 // (i.e., blocks that extractAndWriteFiles will write to disk) from a response,
 // replacing them with a compact single-line notice so the terminal stays clean.
 func stripFileBlocks(response string) string {
-re := regexp.MustCompile("(?m)^```[a-zA-Z0-9_+-]*[:/ ]([^\\s`]+)\\n[\\s\\S]*?\\n```")
-return re.ReplaceAllStringFunc(response, func(match string) string {
-pathRe := regexp.MustCompile("^```[a-zA-Z0-9_+-]*[:/ ]([^\\s`]+)")
-sub := pathRe.FindStringSubmatch(match)
-if len(sub) < 2 || !looksLikeFilePath(sub[1]) || strings.ContainsAny(sub[1], " \t") {
-return match
-}
-return fmt.Sprintf("> ✎ `%s`", sub[1])
-})
+	re := regexp.MustCompile("(?m)^```[a-zA-Z0-9_+-]*[:/ ]([^\\s`]+)\\n[\\s\\S]*?\\n```")
+	return re.ReplaceAllStringFunc(response, func(match string) string {
+		pathRe := regexp.MustCompile("^```[a-zA-Z0-9_+-]*[:/ ]([^\\s`]+)")
+		sub := pathRe.FindStringSubmatch(match)
+		if len(sub) < 2 || !looksLikeFilePath(sub[1]) || strings.ContainsAny(sub[1], " \t") {
+			return match
+		}
+		return fmt.Sprintf("> ✎ `%s`", sub[1])
+	})
 }
 
 // stripInternalBlocks removes any [Internal analysis] ... sections the model

@@ -11,8 +11,8 @@ func TestEstimateTokens(t *testing.T) {
 		want int
 	}{
 		{"", 0},
-		{"hello", 1},  // 5 / 3.5 = 1
-		{strings.Repeat("a", 35), 10}, // 35 / 3.5 = 10
+		{"hello", 1},                   // 5 / 3.5 = 1
+		{strings.Repeat("a", 35), 10},  // 35 / 3.5 = 10
 		{strings.Repeat("x", 100), 28}, // 100 / 3.5 ≈ 28
 	}
 	for _, tt := range tests {
@@ -25,9 +25,9 @@ func TestEstimateTokens(t *testing.T) {
 
 func TestTrimToTokenBudgetPriority(t *testing.T) {
 	sections := []Section{
-		{Content: strings.Repeat("a", 35), Priority: 1, Label: "low"},    // 10 tokens
-		{Content: strings.Repeat("b", 35), Priority: 10, Label: "high"},  // 10 tokens
-		{Content: strings.Repeat("c", 35), Priority: 5, Label: "mid"},    // 10 tokens
+		{Content: strings.Repeat("a", 35), Priority: 1, Label: "low"},   // 10 tokens
+		{Content: strings.Repeat("b", 35), Priority: 10, Label: "high"}, // 10 tokens
+		{Content: strings.Repeat("c", 35), Priority: 5, Label: "mid"},   // 10 tokens
 	}
 
 	result := TrimToTokenBudget(sections, 20)

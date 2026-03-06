@@ -9,13 +9,13 @@ import (
 
 // LintRule defines a single lint rule from the config file.
 type LintRule struct {
-	Name            string      `yaml:"name"`
-	Description     string      `yaml:"description"`
-	From            string      `yaml:"from"`
-	DisallowImport  interface{} `yaml:"disallow_import"`
-	Severity        string      `yaml:"severity"`
-	Type            string      `yaml:"type"`
-	Threshold       int         `yaml:"threshold"`
+	Name           string      `yaml:"name"`
+	Description    string      `yaml:"description"`
+	From           string      `yaml:"from"`
+	DisallowImport interface{} `yaml:"disallow_import"`
+	Severity       string      `yaml:"severity"`
+	Type           string      `yaml:"type"`
+	Threshold      int         `yaml:"threshold"`
 }
 
 // Config holds all lint rules.

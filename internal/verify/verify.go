@@ -14,9 +14,9 @@ import (
 
 // Result holds the outcome of a verification pass.
 type Result struct {
-	Clean            bool     // true if no unknown symbols found
-	UnknownSymbols   []string // symbols referenced but not in GROUND_TRUTH
-	Warning          string   // human-readable warning for the REPL
+	Clean          bool     // true if no unknown symbols found
+	UnknownSymbols []string // symbols referenced but not in GROUND_TRUTH
+	Warning        string   // human-readable warning for the REPL
 }
 
 // codeBlockRe extracts content inside fenced code blocks.
@@ -202,8 +202,8 @@ func ParseConventions(content string) []Convention {
 
 // Naming pattern regexes for common conventions.
 var (
-	snakeCaseRe = regexp.MustCompile(`^[a-z][a-z0-9]*(_[a-z0-9]+)*$`)
-	camelCaseRe = regexp.MustCompile(`^[a-z][a-zA-Z0-9]*$`)
+	snakeCaseRe  = regexp.MustCompile(`^[a-z][a-z0-9]*(_[a-z0-9]+)*$`)
+	camelCaseRe  = regexp.MustCompile(`^[a-z][a-zA-Z0-9]*$`)
 	pascalCaseRe = regexp.MustCompile(`^[A-Z][a-zA-Z0-9]*$`)
 	// Matches variable/function declarations in common languages.
 	varDeclRe = regexp.MustCompile(`(?:let|const|var|func|def|function)\s+([a-zA-Z_][a-zA-Z0-9_]*)`)

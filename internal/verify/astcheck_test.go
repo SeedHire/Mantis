@@ -137,7 +137,7 @@ func (m *mockTruthWriter) FileCount() int                { return 1 }
 
 func TestCheckWithAST_DetectsUnknown(t *testing.T) {
 	tw := &mockTruthWriter{symbols: map[string]bool{
-		"Println":  true,
+		"Println":   true,
 		"NewServer": true,
 	}}
 	response := "```go\npackage main\n\nfunc main() {\n\tfmt.Println(\"ok\")\n\tFakeFunction()\n\tNewServer()\n}\n```"

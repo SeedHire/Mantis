@@ -55,10 +55,10 @@ var rootCmd = &cobra.Command{
 	},
 }
 
-var replTier   string
+var replTier string
 var replBudget int
-var replImage  string
-var replPlan   bool
+var replImage string
+var replPlan bool
 var replContinue bool
 
 // ── init ──────────────────────────────────────────────────────────────────────

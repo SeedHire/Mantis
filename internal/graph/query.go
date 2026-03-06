@@ -165,7 +165,7 @@ func (q *Querier) FindAllNodes(nodeType NodeType) ([]*Node, error) {
 // FindDeadSymbols returns exported symbols with no inbound edges.
 func (q *Querier) FindDeadSymbols() ([]*Node, error) {
 	rows, err := q.db.conn.Query(`
-		SELECT ` + nodeSelectCols + ` FROM nodes
+		SELECT `+nodeSelectCols+` FROM nodes
 		WHERE exported = 1
 		  AND type != ?
 		  AND id NOT IN (SELECT to_id FROM edges)`,

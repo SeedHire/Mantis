@@ -24,10 +24,10 @@ type FileChurn struct {
 
 // CoupledFile represents two files that frequently change together.
 type CoupledFile struct {
-	FileA      string
-	FileB      string
-	CoChanges  int     // times changed in the same commit
-	Coupling   float64 // coChanges / min(commitsA, commitsB)
+	FileA     string
+	FileB     string
+	CoChanges int     // times changed in the same commit
+	Coupling  float64 // coChanges / min(commitsA, commitsB)
 }
 
 // TemporalStats holds aggregate temporal intelligence for the project.

@@ -30,10 +30,10 @@ func newStubServer(t *testing.T, reply string) (*httptest.Server, *Client) {
 			w.Write([]byte("\n"))
 			// Final chunk: done + token counts
 			chunk2, _ := json.Marshal(map[string]interface{}{
-				"message":          map[string]string{"role": "assistant", "content": ""},
-				"done":             true,
+				"message":           map[string]string{"role": "assistant", "content": ""},
+				"done":              true,
 				"prompt_eval_count": 10,
-				"eval_count":       20,
+				"eval_count":        20,
 			})
 			w.Write(chunk2)
 			w.Write([]byte("\n"))

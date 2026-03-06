@@ -25,9 +25,9 @@ type RepoEntry struct {
 
 // Workspace provides unified queries across multiple repo graphs.
 type Workspace struct {
-	Config  WorkspaceConfig
-	Root    string // directory containing mantis.workspace.yml
-	repos   map[string]*repoHandle
+	Config WorkspaceConfig
+	Root   string // directory containing mantis.workspace.yml
+	repos  map[string]*repoHandle
 }
 
 type repoHandle struct {
@@ -249,10 +249,10 @@ func (ws *Workspace) DetectCrossRepoEdges() ([]CrossRepoEdge, error) {
 
 // Stats returns per-repo statistics for the workspace.
 type WorkspaceStats struct {
-	Repo      string
-	Files     int
-	Symbols   int
-	Edges     int
+	Repo    string
+	Files   int
+	Symbols int
+	Edges   int
 }
 
 // GetStats returns statistics for each repo in the workspace.

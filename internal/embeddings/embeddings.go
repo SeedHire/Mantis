@@ -22,8 +22,8 @@ import (
 	"sync"
 	"time"
 
-	_ "modernc.org/sqlite"
 	"github.com/seedhire/mantis/internal/ollama"
+	_ "modernc.org/sqlite"
 )
 
 const (
@@ -36,8 +36,8 @@ const (
 // Chunk represents a stored text chunk with its embedding.
 type Chunk struct {
 	ID           string
-	Source       string  // "brain" | "decision" | "rejected" | "conventions" | "session"
-	SectionLabel string  // section header this chunk came from
+	Source       string // "brain" | "decision" | "rejected" | "conventions" | "session"
+	SectionLabel string // section header this chunk came from
 	Text         string
 	CreatedAt    time.Time
 	Score        float64 // RRF score populated during search
@@ -201,8 +201,8 @@ func (s *Store) Add(ctx context.Context, id, source, sectionLabel, text string) 
 
 	// Skip re-embedding if hash matches stored value.
 	var existing string
-	_ = s.db.QueryRow(`SELECT content_hash FROM chunks WHERE id = ?`, id).Scan(&existing)
-	if existing == hash {
+	scanErr := s.db.QueryRow(`SELECT content_hash FROM chunks WHERE id = ?`, id).Scan(&existing)
+	if scanErr == nil && existing == hash {
 		return nil
 	}
 
@@ -275,15 +275,21 @@ func (s *Store) SearchHybrid(ctx context.Context, query string, limit int) ([]Ch
 	}
 
 	// ── Cosine similarity (capped scan) ──────────────────────────────────────
-	// Limit to 500 rows to bound memory on large codebases. Rows are ordered
-	// by creation time (most recent first) so recent context is prioritised.
+	// Skip embedding call if BM25 already saturated the result set — saves
+	// one round-trip to the Ollama embed endpoint for exact-keyword queries.
+	// Otherwise scan up to 200 rows (adaptive: fewer when BM25 is rich).
 	queryVec, embedErr := s.Embed(ctx, query)
 	cosRank := map[string]int{}
+
+	cosScanLimit := 200
+	if len(bm25Rank) >= limit*2 {
+		cosScanLimit = 50 // BM25 already dominant; cheap supplemental pass
+	}
 
 	if embedErr == nil {
 		cosRows, cosErr := s.db.QueryContext(ctx,
 			`SELECT id, source, section_label, text, embedding, created_at FROM chunks
-			 ORDER BY created_at DESC LIMIT 500`)
+			 ORDER BY created_at DESC LIMIT ?`, cosScanLimit)
 		if cosErr == nil {
 			defer cosRows.Close()
 			type entry struct {
@@ -365,10 +371,10 @@ func (s *Store) SearchBySource(ctx context.Context, query, source string, limit 
 	return filtered, nil
 }
 
-// Count returns the total number of stored chunks.
+// Count returns the total number of stored chunks, or 0 on error.
 func (s *Store) Count() int {
 	var count int
-	s.db.QueryRow(`SELECT COUNT(*) FROM chunks`).Scan(&count)
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM chunks`).Scan(&count)
 	return count
 }
 

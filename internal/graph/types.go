@@ -4,12 +4,12 @@ package graph
 type NodeType string
 
 const (
-	NodeTypeFile       NodeType = "file"
-	NodeTypeFunction   NodeType = "function"
-	NodeTypeClass      NodeType = "class"
-	NodeTypeInterface  NodeType = "interface"
-	NodeTypeTypeAlias  NodeType = "type_alias"
-	NodeTypeMethod     NodeType = "method"
+	NodeTypeFile      NodeType = "file"
+	NodeTypeFunction  NodeType = "function"
+	NodeTypeClass     NodeType = "class"
+	NodeTypeInterface NodeType = "interface"
+	NodeTypeTypeAlias NodeType = "type_alias"
+	NodeTypeMethod    NodeType = "method"
 )
 
 // EdgeType represents the kind of relationship between two nodes.

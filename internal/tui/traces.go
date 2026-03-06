@@ -128,7 +128,7 @@ func (m TracesModel) View() string {
 	case m.loading:
 		body = StyleMuted.Render("  Loading trace data…")
 	case m.err != nil:
-		body = StyleError.Render("  ✗  "+m.err.Error())
+		body = StyleError.Render("  ✗  " + m.err.Error())
 	case m.noData:
 		body = noTraceDataView()
 	default:
@@ -173,7 +173,7 @@ func renderTraces(hot, cold []intel.TraceStats, totalCalls, unique, width int) s
 
 	// ── Hot paths ──
 	sb.WriteString(StyleError.Render("  🔥 Hottest Paths") + StyleMuted.Render("  (most runtime calls)") + "\n")
-	sb.WriteString(StyleDivider.Render("  " + strings.Repeat("─", sepLen)) + "\n")
+	sb.WriteString(StyleDivider.Render("  "+strings.Repeat("─", sepLen)) + "\n")
 
 	if len(hot) == 0 {
 		sb.WriteString(StyleMuted.Render("  No hot paths found.\n"))
@@ -195,7 +195,7 @@ func renderTraces(hot, cold []intel.TraceStats, totalCalls, unique, width int) s
 	// ── Cold paths ──
 	sb.WriteString("\n")
 	sb.WriteString(StyleSuccess.Render("  ❄ Cold Code") + StyleMuted.Render("  (structurally connected, rarely called)") + "\n")
-	sb.WriteString(StyleDivider.Render("  " + strings.Repeat("─", sepLen)) + "\n")
+	sb.WriteString(StyleDivider.Render("  "+strings.Repeat("─", sepLen)) + "\n")
 
 	if len(cold) == 0 {
 		sb.WriteString(StyleMuted.Render("  No cold paths found.\n"))

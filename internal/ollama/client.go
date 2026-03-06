@@ -84,9 +84,9 @@ type ChatChunk struct {
 		Content   string     `json:"content"`
 		ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 	} `json:"message"`
-	Done            bool       `json:"done"`
-	PromptEvalCount int        `json:"prompt_eval_count"`
-	EvalCount       int        `json:"eval_count"`
+	Done            bool `json:"done"`
+	PromptEvalCount int  `json:"prompt_eval_count"`
+	EvalCount       int  `json:"eval_count"`
 }
 
 // Client talks to Ollama Cloud or local Ollama.

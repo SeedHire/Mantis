@@ -71,9 +71,9 @@ type mcpInitResult struct {
 }
 
 type mcpToolSchema struct {
-	Type       string                    `json:"type"`
-	Properties map[string]mcpToolProp    `json:"properties,omitempty"`
-	Required   []string                  `json:"required,omitempty"`
+	Type       string                 `json:"type"`
+	Properties map[string]mcpToolProp `json:"properties,omitempty"`
+	Required   []string               `json:"required,omitempty"`
 }
 
 type mcpToolProp struct {

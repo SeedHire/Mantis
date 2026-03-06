@@ -98,8 +98,9 @@ func progressTicker(stage string) (incr func(), stop func() time.Duration) {
 		}
 	}()
 
+	var once sync.Once
 	stop = func() time.Duration {
-		close(done)
+		once.Do(func() { close(done) })
 		return time.Since(start)
 	}
 	return
@@ -640,7 +641,8 @@ func taskSpinner(tasks []Task, totalTasks int, mu *sync.Mutex, outMu *sync.Mutex
 			}
 		}
 	}()
-	return func() { close(done) }
+	var once sync.Once
+	return func() { once.Do(func() { close(done) }) }
 }
 
 // runTaskBased executes the code stage as individual task-by-task prompts
@@ -852,7 +854,7 @@ func runTaskBased(
 
 		// Install dependencies after the first task (setup/config task).
 		if i == 0 && root != "" {
-			installDeps(root)
+			installDeps(ctx, root)
 		}
 	}
 
@@ -1359,7 +1361,7 @@ func validateContent(files []string) (warnings []string, stubRatio float64) {
 
 // installDeps runs dependency installation after the setup task completes.
 // Best effort — logs but doesn't fail the pipeline on install error.
-func installDeps(root string) {
+func installDeps(ctx context.Context, root string) {
 	type depCmd struct {
 		check   string // file that must exist
 		noDir   string // directory that must NOT exist (skip if present)
@@ -1387,7 +1389,7 @@ func installDeps(root string) {
 		}
 		fmt.Printf("%s  ◆ installing dependencies...%s\n", pColorDim, pColorReset)
 
-		ctx, cancel := context.WithTimeout(context.Background(), dc.timeout)
+		ctx, cancel := context.WithTimeout(ctx, dc.timeout)
 		cmd := execCommand(ctx, dc.cmd, dc.args...)
 		cmd.Dir = root
 		out, err := cmd.CombinedOutput()

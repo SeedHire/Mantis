@@ -93,12 +93,12 @@ func (s *Session) imageCalls() int {
 
 // pricing constants in USD per 1k tokens (approximate, 2025).
 const (
-	gpt4oInputPer1k    = 0.0025
-	gpt4oOutputPer1k   = 0.010
-	sonnetInputPer1k   = 0.003
-	sonnetOutputPer1k  = 0.015
-	opusInputPer1k     = 0.015
-	opusOutputPer1k    = 0.075
+	gpt4oInputPer1k   = 0.0025
+	gpt4oOutputPer1k  = 0.010
+	sonnetInputPer1k  = 0.003
+	sonnetOutputPer1k = 0.015
+	opusInputPer1k    = 0.015
+	opusOutputPer1k   = 0.075
 )
 
 func estimateCost(promptTok, completionTok int, inputRate, outputRate float64) float64 {

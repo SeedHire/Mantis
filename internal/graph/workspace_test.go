@@ -68,7 +68,7 @@ func TestLoadWorkspaceValid(t *testing.T) {
 func TestContainsRepoRef(t *testing.T) {
 	tests := []struct {
 		toID, metadata, repoPath, repoAlias string
-		want                                 bool
+		want                                bool
 	}{
 		{"file:/tmp/api/main.go", "", "/tmp/api", "api", true},
 		{"file:src/main.go", "import api/handler", "", "api", true},

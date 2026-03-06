@@ -10,9 +10,9 @@ import (
 
 // EditBlock represents a single SEARCH/REPLACE edit within an ```edit:filepath block.
 type EditBlock struct {
-	FilePath  string
-	OldText   string
-	NewText   string
+	FilePath string
+	OldText  string
+	NewText  string
 }
 
 // parseEditBlocks extracts SEARCH/REPLACE pairs from ```edit:filepath fenced blocks.

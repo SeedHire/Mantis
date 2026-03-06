@@ -14,7 +14,7 @@ type GoParser struct {
 	Root string
 }
 
-func (p *GoParser) Language() string    { return "go" }
+func (p *GoParser) Language() string     { return "go" }
 func (p *GoParser) Extensions() []string { return []string{".go"} }
 
 func (p *GoParser) ParseFile(path string, content []byte) (*ParseResult, error) {

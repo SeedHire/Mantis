@@ -196,7 +196,7 @@ func renderWorkspace(repos []string, stats map[string]wsRepoStats, width int) st
 
 	// Per-repo breakdown
 	sb.WriteString(StyleHighlight.Render("  Repository Breakdown") + "\n")
-	sb.WriteString(StyleDivider.Render("  " + strings.Repeat("─", sepLen)) + "\n")
+	sb.WriteString(StyleDivider.Render("  "+strings.Repeat("─", sepLen)) + "\n")
 
 	for _, name := range repos {
 		s := stats[name]
@@ -216,7 +216,7 @@ func renderWorkspace(repos []string, stats map[string]wsRepoStats, width int) st
 	// Cross-repo graph info
 	sb.WriteString("\n")
 	sb.WriteString(StyleLabel.Render("  Cross-Repo Commands") + "\n")
-	sb.WriteString(StyleDivider.Render("  " + strings.Repeat("─", sepLen)) + "\n")
+	sb.WriteString(StyleDivider.Render("  "+strings.Repeat("─", sepLen)) + "\n")
 	sb.WriteString(StyleMuted.Render("  ") +
 		lipgloss.NewStyle().Foreground(colorGold).Render("mantis workspace find <symbol>") +
 		StyleMuted.Render("   — search across all repos") + "\n")

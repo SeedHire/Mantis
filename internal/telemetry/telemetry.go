@@ -255,7 +255,7 @@ type Stats struct {
 	ByTier     map[string]int
 	ByTask     map[string]int
 	ByModel    map[string]int
-	LowConf    int // turns with confidence < 0.7
+	LowConf    int                // turns with confidence < 0.7
 	AvgLatency map[string]float64 // tier → avg ms
 
 	// Tail latency (p95)

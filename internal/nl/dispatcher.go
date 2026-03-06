@@ -9,10 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/seedhire/mantis/internal/config"
 	appcontext "github.com/seedhire/mantis/internal/context"
 	"github.com/seedhire/mantis/internal/graph"
 	"github.com/seedhire/mantis/internal/intel"
-	"github.com/seedhire/mantis/internal/config"
 )
 
 // ToolResult is the text output of an internal codebase tool call,
