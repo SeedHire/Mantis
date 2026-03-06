@@ -1028,31 +1028,59 @@ func Run(cfg Config) error {
 			}
 		}
 
-		// Convention enforcement — re-prompt once on violations (mirrors hallucination loop).
-		if cr := verify.CheckConventions(rb.String(), conventions); !cr.Clean {
-			correctionMsg := fmt.Sprintf(
-				"Your response violates these project conventions:\n%s\n"+
-					"Please rewrite your answer following these rules exactly. "+
-					"Do not repeat the violations.",
-				cr.Warning)
-			fmt.Printf("%s  [conventions violated — re-prompting]%s\n", colorDim, colorReset)
-			// BUG-04: copy slice before append to avoid aliasing the backing array.
-			retryMsgs := append(append([]interface{}{}, messages...), ollama.Message{Role: "user", Content: correctionMsg})
-			var rb3 strings.Builder
-			retryCtx3, retryCancel3 := context.WithTimeout(turnCtx, 3*time.Minute)
-			pt3, ct3, err3 := streamWithFallback(retryCtx3, client, model, intent.Tier, retryMsgs, &rb3)
-			retryCancel3()
-			if err3 == nil && strings.TrimSpace(rb3.String()) != "" {
+		// Convention enforcement — re-prompt up to 2 times on violations.
+		// Each iteration shows the specific violated rules and the previous non-compliant response.
+		// Stuck detection: same violations twice in a row → give up and warn.
+		{
+			prevConvViolation := ""
+			for convIter := 0; convIter < 2; convIter++ {
+				cr := verify.CheckConventions(rb.String(), conventions)
+				if cr.Clean {
+					break
+				}
+				// Stuck: same violations repeated after a fix attempt → stop.
+				if cr.Warning == prevConvViolation && convIter > 0 {
+					fmt.Printf("%s  [conventions still violated after %d attempt(s) — showing original]%s\n",
+						colorRed, convIter, colorReset)
+					break
+				}
+				prevConvViolation = cr.Warning
+
+				correctionMsg := fmt.Sprintf(
+					"Your previous response violated project conventions. Fix ONLY the violations below — "+
+						"do not change anything else in your answer.\n\n"+
+						"## Violations\n%s\n\n"+
+						"## Rules\n"+
+						"- Apply the minimal edit to comply with each rule above.\n"+
+						"- Do not add explanations or apologies.\n"+
+						"- If fixing a code file, use ```edit:filepath blocks to show only the changed sections.",
+					cr.Warning)
+				fmt.Printf("%s  [conventions violated (%d/2) — re-prompting]%s\n", colorDim, convIter+1, colorReset)
+				// BUG-04: copy slice before append to avoid aliasing the backing array.
+				retryMsgs := append(append([]interface{}{}, messages...), ollama.Message{Role: "user", Content: correctionMsg})
+				var rb3 strings.Builder
+				retryCtx3, retryCancel3 := context.WithTimeout(turnCtx, 3*time.Minute)
+				pt3, ct3, err3 := streamWithFallback(retryCtx3, client, model, intent.Tier, retryMsgs, &rb3)
+				retryCancel3()
+				if err3 != nil || strings.TrimSpace(rb3.String()) == "" {
+					fmt.Printf("%s%s%s\n\n", colorRed, cr.Warning, colorReset)
+					break
+				}
+				// Update the last assistant message and the working buffer.
 				messages[len(messages)-1] = ollama.Message{Role: "assistant", Content: rb3.String()}
 				sess.Add(model, intent.Tier, pt3, ct3, false)
-				fmt.Printf("%s◈ Mantis%s %s(convention-corrected)%s\n",
-					colorCopper+colorBold, colorReset, colorDim, colorReset)
-				renderResponse(stripInternalBlocks(stripFileBlocks(rb3.String())))
-				if wf2 := extractAndWriteFiles(rb3.String(), root); len(wf2) > 0 {
-					printWrittenFiles(wf2)
+				rb.Reset()
+				rb.WriteString(rb3.String())
+				if convIter == 1 || verify.CheckConventions(rb3.String(), conventions).Clean {
+					// Final iteration or now clean — render corrected output.
+					fmt.Printf("%s◈ Mantis%s %s(convention-corrected)%s\n",
+						colorCopper+colorBold, colorReset, colorDim, colorReset)
+					renderResponse(stripInternalBlocks(stripFileBlocks(rb3.String())))
+					if wf2 := extractAndWriteFiles(rb3.String(), root); len(wf2) > 0 {
+						printWrittenFiles(wf2)
+					}
+					break
 				}
-			} else {
-				fmt.Printf("%s%s%s\n\n", colorRed, cr.Warning, colorReset)
 			}
 		}
 
@@ -1780,8 +1808,33 @@ func buildSystemPrompt(brainCtx, skillsCtx string, tier router.Tier) string {
 - If writing a function: include error handling for every error path — never silently swallow errors.
 - After writing files for a project, list exactly what the user must run to start it (install deps, run migrations, start server).
 
+## Code quality rules
+- Never shadow the err variable — assign to a new name or check immediately.
+- Never swallow errors silently: check err != nil and return/log it — never discard with _.
+- Exported functions must document their panics, non-obvious side-effects, and concurrency safety.
+- Prefer returning errors over panicking in library code. Use panic only for programmer errors (nil receiver, impossible state).
+- When adding a field to a struct, check all construction sites — missing fields cause silent zero-values.
+- When writing goroutines: always think about lifetime, cancellation (context), and leak prevention.
+- Go: prefer errors.As / errors.Is over string-matching on error messages.
+- TypeScript/JS: prefer const over let; never use var; always type function return values explicitly.
+- SQL: always use parameterized queries — never interpolate user input into query strings.
+
+## File editing rules (CRITICAL)
+When modifying an EXISTING file, ALWAYS use the edit block format — never output the whole file:
+
+  ` + "```" + `edit:path/to/existing/file.go
+  <<<SEARCH
+  exact text to find (must match exactly, including whitespace)
+  ===
+  replacement text
+  >>>SEARCH
+  ` + "```" + `
+
+Multiple changes to the same file: use multiple <<<SEARCH...>>>SEARCH sections in one edit block.
+Only use ` + "`lang:filepath`" + ` (whole-file format) for NEW files that don't exist yet.
+
 ## File generation
-When writing files, ALWAYS tag the opening fence with the filename using a colon:
+When writing NEW files, ALWAYS tag the opening fence with the filename using a colon:
 
   ` + "```" + `python:src/app.py
   # code here
@@ -1803,7 +1856,7 @@ When writing files, ALWAYS tag the opening fence with the filename using a colon
   ` + "```" + `
 
 Rules:
-- Use ` + "`lang:filename`" + ` for EVERY file — this is how Mantis writes them to disk.
+- Use ` + "`lang:filename`" + ` for EVERY new file — this is how Mantis writes them to disk.
 - Extensionless files (Makefile, Dockerfile, Procfile) use ` + "`makefile:Makefile`" + ` format.
 - Dot-files (.env, .gitignore) use ` + "`bash:.env`" + ` or ` + "`text:.gitignore`" + `.
 - NEVER use indented code blocks (4-space indent) for files — they won't be written to disk.

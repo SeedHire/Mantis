@@ -100,8 +100,8 @@ func TestScoreFile(t *testing.T) {
 			depth:    1,
 			content:  strings.Repeat("x", 5000),
 			modified: now,
-			minScore: 9, // 8 + 1 (recent)
-			maxScore: 10,
+			minScore: 11, // 8 + 1 (recent) + 2 (same-pkg Go boost)
+			maxScore: 12,
 		},
 		{
 			name:     "depth2 gets 5 base",
@@ -175,8 +175,8 @@ func TestScoreFile(t *testing.T) {
 			depth:    1,
 			content:  strings.Repeat("x", 5000),
 			modified: old,
-			minScore: 8,
-			maxScore: 9,
+			minScore: 10, // 8 + 0 (no recency) + 2 (same-pkg Go boost)
+			maxScore: 11,
 		},
 		{
 			name:     "types file boost",
@@ -184,8 +184,8 @@ func TestScoreFile(t *testing.T) {
 			depth:    1,
 			content:  strings.Repeat("x", 5000),
 			modified: now,
-			minScore: 11, // 8 + 1 (recent) + 2 (types boost)
-			maxScore: 12,
+			minScore: 13, // 8 + 1 (recent) + 2 (types boost) + 2 (same-pkg Go boost)
+			maxScore: 14,
 		},
 	}
 

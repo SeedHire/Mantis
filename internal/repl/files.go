@@ -115,23 +115,28 @@ type WrittenFile struct {
 //   - ```lang:path/to/file — whole-file write (new files or full replacements)
 //   - ```edit:path/to/file — SEARCH/REPLACE patch for existing files
 //
-// Edit blocks are processed first; whole-file blocks skip files already patched.
+// Edit blocks always take priority: two passes are made so that an edit block
+// wins even when the model emits a whole-file block for the same path first.
 func extractAndWriteFiles(response, root string) []WrittenFile {
 	var written []WrittenFile
-	seen := map[string]bool{}
+	editPatched := map[string]bool{} // files already patched by an edit block
 
 	// Capture group 1 = block type (lang or "edit"), group 2 = filepath, group 3 = body.
 	re := regexp.MustCompile("(?m)^```([a-zA-Z0-9_+-]*)[:/ ]([^\\s`]+)\\n([\\s\\S]*?)\\n```")
 
+	type block struct {
+		blockType string
+		clean     string
+		body      string
+	}
+
+	// Collect and validate all blocks first.
+	var blocks []block
 	for _, m := range re.FindAllStringSubmatch(response, -1) {
-		blockType := strings.ToLower(m[1]) // "go", "ts", "edit", etc.
+		blockType := strings.ToLower(m[1])
 		filePath := strings.TrimSpace(m[2])
 		body := m[3]
-
-		if filePath == "" {
-			continue
-		}
-		if !looksLikeFilePath(filePath) {
+		if filePath == "" || !looksLikeFilePath(filePath) {
 			continue
 		}
 		if strings.ContainsAny(filePath, " \t") || len(filePath) > 200 {
@@ -144,39 +149,61 @@ func extractAndWriteFiles(response, root string) []WrittenFile {
 		if strings.HasPrefix(clean, "..") {
 			continue
 		}
-		if seen[clean] {
+		blocks = append(blocks, block{blockType, clean, body})
+	}
+
+	// Pass 1: edit blocks — these always win over whole-file blocks.
+	for _, b := range blocks {
+		if b.blockType != "edit" {
 			continue
 		}
-		seen[clean] = true
-
-		if blockType == "edit" {
-			// Apply SEARCH/REPLACE patches — does not overwrite; only patches existing files.
-			wfs := applySearchReplacePatches(clean, body, root)
-			written = append(written, wfs...)
-		} else {
-			// Whole-file write.
-			dest := filepath.Join(root, clean)
-			_, statErr := os.Stat(dest)
-			isNew := os.IsNotExist(statErr)
-
-			var oldContent string
-			if !isNew {
-				if b, err := os.ReadFile(dest); err == nil {
-					oldContent = string(b)
-				}
-			}
-			if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-				continue
-			}
-			if err := os.WriteFile(dest, []byte(body+"\n"), 0o644); err != nil {
-				continue
-			}
-			diff := ""
-			if !isNew {
-				diff = diffLines(oldContent, body+"\n")
-			}
-			written = append(written, WrittenFile{Path: clean, Created: isNew, Diff: diff})
+		if editPatched[b.clean] {
+			continue
 		}
+		editPatched[b.clean] = true
+		wfs := applySearchReplacePatches(b.clean, b.body, root)
+		written = append(written, wfs...)
+	}
+
+	// Pass 2: whole-file blocks — skip any file already handled by an edit block.
+	seen := map[string]bool{}
+	for _, b := range blocks {
+		if b.blockType == "edit" {
+			continue
+		}
+		if editPatched[b.clean] || seen[b.clean] {
+			continue
+		}
+		seen[b.clean] = true
+
+		dest := filepath.Join(root, b.clean)
+		_, statErr := os.Stat(dest)
+		isNew := os.IsNotExist(statErr)
+
+		// Warn when model wrote a whole-file block for an existing file — edit blocks
+		// are preferred for modifications to avoid silent overwrites.
+		if !isNew {
+			fmt.Printf("%s  ⚠ whole-file block for existing %s (prefer edit: blocks for patches)%s\n",
+				colorDim, b.clean, colorReset)
+		}
+
+		var oldContent string
+		if !isNew {
+			if raw, err := os.ReadFile(dest); err == nil {
+				oldContent = string(raw)
+			}
+		}
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			continue
+		}
+		if err := os.WriteFile(dest, []byte(b.body+"\n"), 0o644); err != nil {
+			continue
+		}
+		diff := ""
+		if !isNew {
+			diff = diffLines(oldContent, b.body+"\n")
+		}
+		written = append(written, WrittenFile{Path: b.clean, Created: isNew, Diff: diff})
 	}
 
 	return written

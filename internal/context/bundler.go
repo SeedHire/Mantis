@@ -178,7 +178,8 @@ func (b *Bundler) Bundle(symbolName string, maxDepth, tokenBudget int) (*Bundle,
 //
 // Formula (inspired by Sourcegraph Cody weights):
 //
-//	score = depth_signal + size_signal + recency_signal + test_colocation + type_boost + churn_bonus
+//	score = depth_signal + size_signal + recency_signal + test_colocation
+//	      + same_pkg_boost + type_boost + vendor_penalty + churn_bonus
 func scoreFile(path string, depth int, content string, lastModifiedUnix int64, entryBase string, churnBonus int) int {
 	score := 0
 
@@ -215,13 +216,15 @@ func scoreFile(path string, depth int, content string, lastModifiedUnix int64, e
 		score += recency
 	}
 
-	// Test file handling: co-located test gets a boost; unrelated tests are demoted.
 	base := filepath.Base(path)
-	isTest := strings.Contains(base, "_test.") || strings.Contains(base, ".test.") ||
-		strings.Contains(base, ".spec.") || strings.HasSuffix(base, "_test.go")
+	lowerBase := strings.ToLower(base)
+	pathLower := strings.ToLower(path)
+
+	// Test file handling: co-located test gets a boost; unrelated tests are demoted.
+	isTest := strings.Contains(lowerBase, "_test.") || strings.Contains(lowerBase, ".test.") ||
+		strings.Contains(lowerBase, ".spec.") || strings.HasSuffix(lowerBase, "_test.go")
 	if isTest {
 		fileBase := baseWithoutExt(path)
-		// Strip _test suffix to get the base: auth_test → auth
 		fileBase = strings.TrimSuffix(fileBase, "_test")
 		if entryBase != "" && fileBase == entryBase {
 			score += 3 // co-located test: relevant
@@ -230,16 +233,27 @@ func scoreFile(path string, depth int, content string, lastModifiedUnix int64, e
 		}
 	}
 
-	// Config/generated file demotion.
-	lower := strings.ToLower(base)
-	if lower == "package-lock.json" || lower == "yarn.lock" || lower == "go.sum" ||
-		strings.HasSuffix(lower, ".min.js") || strings.HasSuffix(lower, ".generated.go") {
+	// Vendor / generated / lock file demotion — these add noise without signal.
+	if strings.Contains(pathLower, "/vendor/") || strings.Contains(pathLower, "/node_modules/") ||
+		strings.Contains(pathLower, "/.gen/") || strings.Contains(pathLower, "/generated/") ||
+		strings.Contains(pathLower, "/dist/") || strings.Contains(pathLower, "/build/") {
+		score -= 6
+	}
+	if lowerBase == "package-lock.json" || lowerBase == "yarn.lock" || lowerBase == "go.sum" ||
+		strings.HasSuffix(lowerBase, ".min.js") || strings.HasSuffix(lowerBase, ".generated.go") ||
+		strings.HasSuffix(lowerBase, ".pb.go") {
 		score -= 5
 	}
 
 	// Interface/type files boost (likely important for understanding).
-	if strings.Contains(lower, "types") || strings.Contains(lower, "interface") ||
-		strings.Contains(lower, "model") || strings.Contains(lower, "schema") {
+	if strings.Contains(lowerBase, "types") || strings.Contains(lowerBase, "interface") ||
+		strings.Contains(lowerBase, "model") || strings.Contains(lowerBase, "schema") {
+		score += 2
+	}
+
+	// Same-package boost for Go: depth-1 non-test .go files share a package declaration
+	// and are almost always needed for full type resolution.
+	if depth == 1 && strings.HasSuffix(lowerBase, ".go") && !isTest {
 		score += 2
 	}
 
