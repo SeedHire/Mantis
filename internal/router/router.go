@@ -374,7 +374,7 @@ func classify(ctx context.Context, message string, hasImage bool, store EmbedSto
 	}
 	for _, kw := range heavyKeywords {
 		if strings.Contains(lower, kw) {
-			scores[TierHeavy] += 1.0
+			scores[TierHeavy] += 1.3
 		}
 	}
 	for _, kw := range codeKeywords {
@@ -405,6 +405,13 @@ func classify(ctx context.Context, message string, hasImage bool, store EmbedSto
 	if wc := len(strings.Fields(message)); wc <= 4 {
 		scores[TierHeavy] *= 0.35
 		scores[TierMax] *= 0.35
+	}
+	// 3. "tradeoffs between X and Y" is a targeted comparison → reason, not a full review.
+	if strings.Contains(lower, "tradeoff") && strings.Contains(lower, "between") {
+		scores[TierReason] += 1.0
+		if scores[TierMax] > 0 {
+			scores[TierMax] -= 0.5
+		}
 	}
 
 	// Pick tier with highest score.
@@ -461,24 +468,25 @@ func classify(ctx context.Context, message string, hasImage bool, store EmbedSto
 
 var maxKeywords = []string{
 "find all bug", "find bugs", "audit", "code review", "review all",
-"compare approach", "compare approaches", "compare all", "which is better", "pros and cons",
+"compare approach", "compare approaches", "compare all", "which is better",
 "comprehensive", "thorough", "deep dive", "full analysis",
 "all issues", "all problem", "security", "vulnerability",
 "production ready", "production-ready", "before deploy", "before release",
+"tradeoff", "evaluate all", "to scale", "use case",
 }
 
 var reasonKeywords = []string{
 "why does", "explain how", "how does", "how do i decide",
-"architecture", "design pattern", "trade-off", "tradeoff", "tradeoffs", "when to use",
+"architecture", "design pattern", "trade-off", "tradeoff", "when to use",
 "difference between", "what is the best way", "what approach", "best approach",
-"reasoning", "analyse", "analyze", "pros", "cons",
+"reasoning", "analyse", "analyze", "pros and cons", "pros", "cons",
 "should i use", "when should i use", "how should i",
 // Moved from heavyKeywords — "explain the whole X" is a reasoning question.
 "explain the whole", "explain the entire",
 }
 
 var heavyKeywords = []string{
-"refactor entire", "refactor all", "refactor the whole", "rewrite",
+"refactor entire", "refactor all", "refactor all files", "refactor all the", "refactor the whole", "rewrite",
 "migrate", "explain all", "codebase",
 "multi-file", "across all", "every file", "full project", "from scratch",
 "plan the", "strategy for",
@@ -487,7 +495,7 @@ var heavyKeywords = []string{
 "build a rest api", "build a graphql", "build a microservice",
 "build a complete", "build the entire", "the entire", "implement the entire",
 "clone", "scaffold", "full stack", "full-stack", "entire app",
-"rest api", "graphql api", "microservice", "backend for",
+"rest api", "graphql api", "a microservice", "backend for",
 "setup project", "initialize project",
 "implement the whole", "build the whole", "refactor the whole",
 "the whole service", "the whole system", "the whole module", "the whole package",
@@ -511,6 +519,7 @@ var trivialKeywords = []string{
 "what is", "what's", "define", "meaning of", "syntax for",
 "typo", "spelling", "rename", "one line", "single line",
 "autocomplete", "complete this",
+"how to declare", "how to define", "how to name",
 }
 
 // terminalErrorSignatures — raw error output pasted from the shell.
