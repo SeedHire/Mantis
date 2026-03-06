@@ -61,6 +61,22 @@ func (t *Tracker) Summary() string {
 }
 
 func (t *Tracker) checkLimits() string {
+	if t.today.Tokens >= FreeDailyTokens {
+		return fmt.Sprintf("⚠ daily token limit reached (%s/%s) — local models only until midnight",
+			formatTokens(t.today.Tokens), formatTokens(FreeDailyTokens))
+	}
+	if t.today.Tokens >= FreeDailyTokens*80/100 {
+		return fmt.Sprintf("⚠ approaching daily token limit (%s/%s used)",
+			formatTokens(t.today.Tokens), formatTokens(FreeDailyTokens))
+	}
+	if t.today.HeavyCalls >= FreeDailyHeavyCalls {
+		return fmt.Sprintf("⚠ daily heavy-call limit reached (%d/%d) — routing to smaller models",
+			t.today.HeavyCalls, FreeDailyHeavyCalls)
+	}
+	if t.today.VisionCalls >= FreeDailyVisionCalls {
+		return fmt.Sprintf("⚠ daily vision-call limit reached (%d/%d)",
+			t.today.VisionCalls, FreeDailyVisionCalls)
+	}
 	return ""
 }
 
