@@ -1,5 +1,6 @@
-// Package usage tracks free-tier consumption and warns when approaching limits.
+// Package usage tracks token consumption for informational purposes.
 // Data stored in ~/.mantis/usage.json — persists across projects.
+// No limits are enforced — usage is unbounded.
 package usage
 
 import (
@@ -8,13 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"time"
-)
-
-// Limits for the free tier (approximate Ollama Cloud free tier values).
-const (
-	FreeDailyTokens      = 1_000_000
-	FreeDailyHeavyCalls  = 10
-	FreeDailyVisionCalls = 10
 )
 
 // DayUsage tracks usage for a single calendar day.
@@ -41,7 +35,7 @@ func New() *Tracker {
 	return t
 }
 
-// Add records token usage and returns a warning string if nearing limits.
+// Add records token usage. Always returns "" — no limits are enforced.
 func (t *Tracker) Add(tokens int, isHeavy, isVision bool) string {
 	t.today.Tokens += tokens
 	if isHeavy {
@@ -51,7 +45,7 @@ func (t *Tracker) Add(tokens int, isHeavy, isVision bool) string {
 		t.today.VisionCalls++
 	}
 	_ = t.flush()
-	return t.checkLimits()
+	return ""
 }
 
 // Summary returns a one-line usage status string.
@@ -60,25 +54,6 @@ func (t *Tracker) Summary() string {
 		formatTokens(t.today.Tokens), t.today.HeavyCalls, t.today.VisionCalls)
 }
 
-func (t *Tracker) checkLimits() string {
-	if t.today.Tokens >= FreeDailyTokens {
-		return fmt.Sprintf("⚠ daily token limit reached (%s/%s) — local models only until midnight",
-			formatTokens(t.today.Tokens), formatTokens(FreeDailyTokens))
-	}
-	if t.today.Tokens >= FreeDailyTokens*80/100 {
-		return fmt.Sprintf("⚠ approaching daily token limit (%s/%s used)",
-			formatTokens(t.today.Tokens), formatTokens(FreeDailyTokens))
-	}
-	if t.today.HeavyCalls >= FreeDailyHeavyCalls {
-		return fmt.Sprintf("⚠ daily heavy-call limit reached (%d/%d) — routing to smaller models",
-			t.today.HeavyCalls, FreeDailyHeavyCalls)
-	}
-	if t.today.VisionCalls >= FreeDailyVisionCalls {
-		return fmt.Sprintf("⚠ daily vision-call limit reached (%d/%d)",
-			t.today.VisionCalls, FreeDailyVisionCalls)
-	}
-	return ""
-}
 
 func (t *Tracker) loadToday() *DayUsage {
 	today := time.Now().Format("2006-01-02")
