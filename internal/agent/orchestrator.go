@@ -314,13 +314,14 @@ func synthesize(
 }
 
 // fallbackAssemble concatenates worker outputs when synthesis fails.
+// Shows explicit ✓/✗ status per worker so callers know what succeeded.
 func fallbackAssemble(scratch *agentScratch) string {
 	var sb strings.Builder
 	for pkg, r := range scratch.Workers {
-		fmt.Fprintf(&sb, "## %s\n\n", pkg)
 		if r.Err != "" {
-			fmt.Fprintf(&sb, "Error: %s\n\n", r.Err)
+			fmt.Fprintf(&sb, "## ✗ %s (failed: %s)\n\n", pkg, r.Err)
 		} else {
+			fmt.Fprintf(&sb, "## ✓ %s\n\n", pkg)
 			sb.WriteString(strings.TrimSpace(r.Code))
 			sb.WriteString("\n\n")
 		}
@@ -332,6 +333,9 @@ func fallbackAssemble(scratch *agentScratch) string {
 
 // collectPackages extracts the unique directory paths from an ImpactResult.
 func collectPackages(impact *intel.ImpactResult) []string {
+	if impact == nil {
+		return nil
+	}
 	seen := map[string]struct{}{}
 	var pkgs []string
 	for _, nodes := range impact.ByDepth {

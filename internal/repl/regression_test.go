@@ -366,3 +366,35 @@ func TestExtractAndWriteFiles_EditBlockSkipsWholeFileOverwrite(t *testing.T) {
 		t.Errorf("edit block should win, got: %s", string(got))
 	}
 }
+
+// ── stripInternalBlocks: DeepSeek-R1 think block stripping ───────────────────
+
+func TestStripInternalBlocks_ThinkTag(t *testing.T) {
+	input := "<think>\nThis is chain-of-thought reasoning.\nLet me analyze the problem.\n</think>\n\nHere is my answer."
+	got := stripInternalBlocks(input)
+	if strings.Contains(got, "<think>") || strings.Contains(got, "chain-of-thought") {
+		t.Errorf("stripInternalBlocks should remove <think> blocks, got: %q", got)
+	}
+	if !strings.Contains(got, "Here is my answer") {
+		t.Errorf("content after </think> should be preserved, got: %q", got)
+	}
+}
+
+func TestStripInternalBlocks_ThinkingTag(t *testing.T) {
+	input := "<thinking>\nInternal reasoning step.\n</thinking>\n\nFinal response."
+	got := stripInternalBlocks(input)
+	if strings.Contains(got, "<thinking>") || strings.Contains(got, "Internal reasoning") {
+		t.Errorf("stripInternalBlocks should remove <thinking> blocks, got: %q", got)
+	}
+	if !strings.Contains(got, "Final response") {
+		t.Errorf("content after </thinking> should be preserved, got: %q", got)
+	}
+}
+
+func TestStripInternalBlocks_NoThinkTag(t *testing.T) {
+	input := "Plain response with no think blocks."
+	got := stripInternalBlocks(input)
+	if !strings.Contains(got, "Plain response") {
+		t.Errorf("content without think blocks should be unchanged, got: %q", got)
+	}
+}

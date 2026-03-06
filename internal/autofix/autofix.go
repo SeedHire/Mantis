@@ -50,6 +50,9 @@ func Check(root string, writtenFiles []string) *Result {
 		return runCheck(root, "rust", "cargo check", []string{"cargo", "check"})
 
 	case fileExists(root, "tsconfig.json") && dirExists(root, "node_modules"):
+		if r := checkPrisma(root); r != nil && !r.Passed {
+			return r
+		}
 		return runCheck(root, "node", "npx tsc --noEmit",
 			[]string{"sh", "-c", "npx tsc --noEmit"})
 
@@ -64,6 +67,9 @@ func Check(root string, writtenFiles []string) *Result {
 		}
 		// TypeScript: compile check.
 		if fileExists(root, "tsconfig.json") {
+			if r := checkPrisma(root); r != nil && !r.Passed {
+				return r
+			}
 			return runCheck(root, "node", "npx tsc --noEmit",
 				[]string{"sh", "-c", "npx tsc --noEmit"})
 		}
@@ -224,6 +230,63 @@ func nodeEntryPoint(root string) string {
 		}
 	}
 	return ""
+}
+
+// checkPrisma validates the Prisma schema and ensures the client is generated.
+// Returns nil if no Prisma schema exists. Returns a failing Result if validation
+// fails or client generation fails — caller should use this instead of tsc output.
+func checkPrisma(root string) *Result {
+	schemaPath := filepath.Join(root, "prisma", "schema.prisma")
+	if _, err := os.Stat(schemaPath); err != nil {
+		return nil // no Prisma schema, skip
+	}
+
+	// Validate schema first.
+	vCtx, vCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer vCancel()
+	vCmd := exec.CommandContext(vCtx, "npx", "prisma", "validate")
+	vCmd.Dir = root
+	var vOut bytes.Buffer
+	vCmd.Stdout = &vOut
+	vCmd.Stderr = &vOut
+	if err := vCmd.Run(); err != nil {
+		output := stripANSI(vOut.String())
+		if len(output) > 3000 {
+			output = output[:3000] + "\n… (truncated)"
+		}
+		return &Result{
+			Passed:  false,
+			Project: "prisma",
+			Command: "npx prisma validate",
+			Output:  strings.TrimSpace(output),
+		}
+	}
+
+	// Check if client is generated; if not, generate it.
+	clientDir := filepath.Join(root, "node_modules", ".prisma", "client")
+	if _, err := os.Stat(clientDir); err != nil {
+		gCtx, gCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer gCancel()
+		gCmd := exec.CommandContext(gCtx, "npx", "prisma", "generate")
+		gCmd.Dir = root
+		var gOut bytes.Buffer
+		gCmd.Stdout = &gOut
+		gCmd.Stderr = &gOut
+		if err := gCmd.Run(); err != nil {
+			output := stripANSI(gOut.String())
+			if len(output) > 3000 {
+				output = output[:3000] + "\n… (truncated)"
+			}
+			return &Result{
+				Passed:  false,
+				Project: "prisma",
+				Command: "npx prisma generate",
+				Output:  strings.TrimSpace(output),
+			}
+		}
+	}
+
+	return &Result{Passed: true, Project: "prisma", Command: "npx prisma validate + generate"}
 }
 
 func fileExists(root, name string) bool {

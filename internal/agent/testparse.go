@@ -400,8 +400,10 @@ func parseGenericTestOutput(output string) []TestFailure {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 // FailureKey returns a stable string key for deduplication / stuck detection.
+// Intentionally excludes Message so that flaky tests with varying assertion values
+// (e.g. "expected 5 got 3" vs "expected 5 got 4") are still detected as stuck.
 func (f TestFailure) FailureKey() string {
-	return fmt.Sprintf("%s|%s|%d|%s", f.TestName, f.File, f.Line, f.Message)
+	return fmt.Sprintf("%s|%s|%d", f.TestName, f.File, f.Line)
 }
 
 // FailuresKey returns a combined key for a set of failures (for stuck detection).

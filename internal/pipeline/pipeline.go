@@ -926,6 +926,9 @@ ABSOLUTE RULES — violation means the code is REJECTED:
 3. If referencing a type from a prior file, use the EXACT name and field names shown.
 4. NEVER write "// TODO", "// FIXME", "throw new Error('not implemented')", or any placeholder.
 5. If you cannot fully implement something, OMIT it entirely rather than stubbing it.
+6. Route files MUST wire to actual controller methods — NEVER use res.status(501) or "not implemented" placeholders.
+7. When prior files show 'export default new ClassName()', import the DEFAULT EXPORT (the instance), do NOT call static methods on the class.
+8. Use the EXACT property names, constructor parameters, and method signatures shown in the "Exports" summary — do NOT invent alternatives.
 
 CRITICAL: Begin IMMEDIATELY with code blocks. No preamble.
 `
@@ -1008,7 +1011,8 @@ func readPriorContext(root string, writtenFiles []string, maxChars int) string {
 			}
 		}
 
-		block := fmt.Sprintf("\n### %s\n```\n%s\n```\n", relPath, snippet)
+		exportSummary := extractExportSummary(content)
+		block := fmt.Sprintf("\n### %s\n```\n%s\n```\n%s", relPath, snippet, exportSummary)
 		if totalChars+len(block) > maxChars {
 			break
 		}
@@ -1016,6 +1020,37 @@ func readPriorContext(root string, writtenFiles []string, maxChars int) string {
 		totalChars += len(block)
 	}
 
+	return sb.String()
+}
+
+// exportRe matches lines that export symbols in JS/TS/Go/Python.
+var exportRe = regexp.MustCompile(`(?m)^(?:export\s|func\s+[A-Z]|type\s+[A-Z]|class\s+\w|def\s+\w)`)
+
+// extractExportSummary scans file content for export/public declarations
+// and returns a formatted summary. Helps downstream tasks use exact names.
+func extractExportSummary(content string) string {
+	lines := strings.Split(content, "\n")
+	var exports []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if exportRe.MatchString(trimmed) {
+			exports = append(exports, trimmed)
+			if len(exports) >= 20 {
+				break
+			}
+		}
+	}
+	if len(exports) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("**Exports (use these exact names):**\n")
+	for _, e := range exports {
+		sb.WriteString("- `")
+		sb.WriteString(e)
+		sb.WriteString("`\n")
+	}
+	sb.WriteString("\n")
 	return sb.String()
 }
 
@@ -1320,6 +1355,12 @@ func validateContent(files []string) (warnings []string, stubRatio float64) {
 		"// placeholder", "// implement me", "# implement me",
 		"throw new Error(\"not implemented\")", "throw new Error('not implemented')",
 		"NotImplementedError", "pass  # stub", "pass # stub",
+		"not yet implemented", "not implemented yet",
+	}
+
+	// 501 patterns only checked in route/controller/handler files.
+	stub501Patterns := []string{
+		"res.status(501)", "status(501)",
 	}
 	stubPatterns := []string{
 		"return nil", "return undefined", "return {}", "return []",
@@ -1339,6 +1380,19 @@ func validateContent(files []string) (warnings []string, stubRatio float64) {
 				warnings = append(warnings, fmt.Sprintf("%s: contains '%s'", filepath.Base(f), p))
 				hasIssue = true
 				break
+			}
+		}
+		// Check 501 patterns only in route/controller/handler files.
+		if !hasIssue {
+			baseLower := strings.ToLower(filepath.Base(f))
+			if strings.Contains(baseLower, "route") || strings.Contains(baseLower, "controller") || strings.Contains(baseLower, "handler") {
+				for _, p := range stub501Patterns {
+					if strings.Contains(content, strings.ToLower(p)) {
+						warnings = append(warnings, fmt.Sprintf("%s: contains stub '%s'", filepath.Base(f), p))
+						hasIssue = true
+						break
+					}
+				}
 			}
 		}
 		if !hasIssue {
@@ -1401,7 +1455,39 @@ func installDeps(ctx context.Context, root string) {
 			}
 			fmt.Printf("%s  ⚠ install warning: %s%s\n", pColorDim, preview, pColorReset)
 		}
-		return // only run the first matching installer
+		break // run first matching installer, then check post-install hooks
+	}
+
+	// Post-install: Prisma generate if schema exists.
+	schemaPath := filepath.Join(root, "prisma", "schema.prisma")
+	if _, err := os.Stat(schemaPath); err == nil {
+		fmt.Printf("%s  ◆ validating Prisma schema...%s\n", pColorDim, pColorReset)
+		vCtx, vCancel := context.WithTimeout(ctx, 30*time.Second)
+		vCmd := execCommand(vCtx, "npx", "prisma", "validate")
+		vCmd.Dir = root
+		vOut, vErr := vCmd.CombinedOutput()
+		vCancel()
+		if vErr != nil {
+			preview := string(vOut)
+			if len(preview) > 200 {
+				preview = preview[:200] + "…"
+			}
+			fmt.Printf("%s  ⚠ prisma validate warning: %s%s\n", pColorDim, preview, pColorReset)
+		}
+
+		fmt.Printf("%s  ◆ generating Prisma client...%s\n", pColorDim, pColorReset)
+		gCtx, gCancel := context.WithTimeout(ctx, 60*time.Second)
+		gCmd := execCommand(gCtx, "npx", "prisma", "generate")
+		gCmd.Dir = root
+		gOut, gErr := gCmd.CombinedOutput()
+		gCancel()
+		if gErr != nil {
+			preview := string(gOut)
+			if len(preview) > 200 {
+				preview = preview[:200] + "…"
+			}
+			fmt.Printf("%s  ⚠ prisma generate warning: %s%s\n", pColorDim, preview, pColorReset)
+		}
 	}
 }
 
@@ -1443,6 +1529,10 @@ Remaining tasks are grouped by layer, and each must explicitly import from task 
 8. Tests and documentation
 
 Maximum 10 tasks. If you need more, merge them.
+
+### Framework rules:
+- TypeScript: tsconfig.json MUST NOT enable "noUnusedLocals" or "noUnusedParameters" (causes cascading errors in Express/middleware handlers).
+- Prisma: if using Prisma, all @relation fields with multiple references to the same model MUST have explicit relation names.
 
 ### Risks & Edge Cases
 ### Assumptions

@@ -328,15 +328,23 @@ FAIL
 // ── FailuresKey (stuck detection) ─────────────────────────────────────────────
 
 func TestFailuresKey_StuckDetection(t *testing.T) {
-	f1 := []TestFailure{{TestName: "TestA", File: "a.go", Line: 10, Message: "err"}}
-	f2 := []TestFailure{{TestName: "TestA", File: "a.go", Line: 10, Message: "err"}}
-	f3 := []TestFailure{{TestName: "TestA", File: "a.go", Line: 10, Message: "different"}}
+	f1 := []TestFailure{{TestName: "TestA", File: "a.go", Line: 10, Message: "expected 5 got 3"}}
+	f2 := []TestFailure{{TestName: "TestA", File: "a.go", Line: 10, Message: "expected 5 got 3"}}
+	// Same test location with a different assertion value (flaky test) — should still be "stuck".
+	f3 := []TestFailure{{TestName: "TestA", File: "a.go", Line: 10, Message: "expected 5 got 4"}}
+	// Different test name — should NOT be stuck.
+	f4 := []TestFailure{{TestName: "TestB", File: "a.go", Line: 10, Message: "err"}}
 
 	if FailuresKey(f1) != FailuresKey(f2) {
 		t.Error("identical failures should produce same key")
 	}
-	if FailuresKey(f1) == FailuresKey(f3) {
-		t.Error("different failures should produce different keys")
+	// Flaky test: same location, different message → same key (stuck detection fires).
+	if FailuresKey(f1) != FailuresKey(f3) {
+		t.Error("same test location with different message should still be detected as stuck (flaky test)")
+	}
+	// Different test name → different key.
+	if FailuresKey(f1) == FailuresKey(f4) {
+		t.Error("different test names should produce different keys")
 	}
 }
 

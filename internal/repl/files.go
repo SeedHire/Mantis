@@ -312,11 +312,15 @@ func stripFileBlocks(response string) string {
 	})
 }
 
-// stripInternalBlocks removes any [Internal analysis] ... sections the model
-// leaks into its final response. These are reasoning artifacts, not output.
+// stripInternalBlocks removes reasoning artifacts from model responses:
+//   - [Internal analysis] sections (Ollama custom)
+//   - <think>...</think> blocks (DeepSeek-R1 / SambaNova chain-of-thought)
+//   - <thinking>...</thinking> blocks (Anthropic-style)
 var internalBlockRe = regexp.MustCompile(`(?s)\[Internal analysis\].*?(\n\n|\z)`)
+var thinkBlockRe = regexp.MustCompile(`(?s)<think(?:ing)?>.*?</think(?:ing)?>`)
 
 func stripInternalBlocks(s string) string {
+	s = thinkBlockRe.ReplaceAllString(s, "")
 	s = internalBlockRe.ReplaceAllString(s, "")
 	// Strip "Would you like me to" trailing menus.
 	if idx := strings.Index(s, "\nWould you like me to"); idx != -1 {

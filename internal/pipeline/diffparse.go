@@ -108,12 +108,16 @@ func applyEdits(edits []EditBlock, root string) (modified []string, warnings []s
 
 	for _, edit := range edits {
 		relPath := edit.FilePath
-		if filepath.IsAbs(relPath) || strings.HasPrefix(filepath.Clean(relPath), "..") {
+		if filepath.IsAbs(relPath) {
 			warnings = append(warnings, fmt.Sprintf("skipped unsafe path: %s", relPath))
 			continue
 		}
-
 		abs := filepath.Join(root, filepath.Clean(relPath))
+		// Use filepath.Rel to confirm the resolved path is genuinely under root.
+		if rel, err := filepath.Rel(root, abs); err != nil || strings.HasPrefix(rel, "..") {
+			warnings = append(warnings, fmt.Sprintf("skipped unsafe path: %s", relPath))
+			continue
+		}
 		data, err := os.ReadFile(abs)
 		if err != nil {
 			warnings = append(warnings, fmt.Sprintf("%s: cannot read file: %v", relPath, err))
