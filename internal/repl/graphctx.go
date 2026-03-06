@@ -10,8 +10,8 @@ import (
 	"github.com/seedhire/mantis/internal/graph"
 )
 
-// filePathRe matches file paths like router.go, internal/auth/handler.go, src/utils.ts.
-var filePathRe = regexp.MustCompile(`(?:^|\s|["'` + "`" + `(])([a-zA-Z0-9_][\w/.\-]*\.(?:go|ts|tsx|js|jsx|py|rs|java|rb|c|cpp|h|css|scss|html|vue|svelte))(?:[:)\s"'` + "`" + `]|$)`)
+// filePathRe matches file paths like router.go, internal/auth/handler.go, ./cmd/main.go, src/utils.ts.
+var filePathRe = regexp.MustCompile(`(?:^|\s|["'` + "`" + `(])((?:\./)?[a-zA-Z0-9_][\w/.\-]*\.(?:go|ts|tsx|js|jsx|py|rs|java|rb|c|cpp|h|css|scss|html|vue|svelte))(?:[:)\s"'` + "`" + `]|$)`)
 
 // errorPathRe matches error output paths like internal/router/router.go:142: undefined: Foo
 var errorPathRe = regexp.MustCompile(`([\w/.\-]+\.(?:go|ts|tsx|js|jsx|py|rs|java)):(\d+):`)

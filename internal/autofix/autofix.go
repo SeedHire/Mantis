@@ -122,8 +122,9 @@ func ShouldRun(root string, writtenFiles []string) bool {
 func FormatError(r *Result) string {
 	return fmt.Sprintf(
 		"Build check failed (%s: %s).\n\n"+
-			"Fix ONLY the lines that caused the error. Do NOT rewrite entire files or regenerate a plan. "+
-			"Output ONLY the corrected file(s) using ```lang:filepath fences.\n\n```\n%s\n```",
+			"Fix ONLY the lines that caused the error. Do NOT rewrite entire files or regenerate a plan.\n"+
+			"For EXISTING files use ```edit:filepath fences with <<<SEARCH/===/>>>SEARCH markers.\n"+
+			"For NEW files use ```lang:filepath fences with full content.\n\n```\n%s\n```",
 		r.Project, r.Command, r.Output,
 	)
 }
