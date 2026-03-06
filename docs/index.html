@@ -6,9 +6,9 @@
   <title>Mantis — AI that actually knows your codebase</title>
   <link rel="icon" type="image/svg+xml" href="favicon.svg" />
   <link rel="shortcut icon" href="favicon.svg" />
-  <meta name="description" content="Free AI coding assistant with multimodal input, persistent project memory, 7-tier model routing, impact analysis, runtime traces, and architecture lint. Runs on Ollama Cloud or local." />
+  <meta name="description" content="Free AI coding assistant with multi-stage code generation pipeline, multi-agent orchestration, persistent project memory, 7-tier model routing, LSP/MCP servers, impact analysis, runtime traces, and architecture lint. Runs on Ollama Cloud or local." />
   <meta property="og:title" content="Mantis — AI that actually knows your codebase" />
-  <meta property="og:description" content="Multimodal AI coding assistant with memory, dependency graph, cross-repo analysis, runtime traces, and hallucination guard. $0/month." />
+  <meta property="og:description" content="23,800+ LOC AI coding assistant with agentic pipeline, build verification, LSP server, persistent memory, dependency graph, cross-repo analysis, and hallucination guard. $0/month." />
   <meta property="og:type" content="website" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -670,8 +670,8 @@
       <span class="metallic">that actually knows your codebase.</span>
     </h1>
     <p class="fade-up d3">
-      Ask, analyze, and ship with confidence using graph-aware context,
-      persistent project memory, and built-in guardrails.
+      Ask, build, and ship with confidence using agentic code generation,
+      iterative build verification, persistent project memory, and graph-aware context.
       No API bill. Ollama Cloud free tier or fully local.
     </p>
 
@@ -693,24 +693,28 @@
         <div><span class="t-gold">● BRAIN.md loaded · 14 decisions · 6 rejections</span></div>
         <div><span class="t-gold">● 187 files indexed · graph.db up to date</span></div>
         <div>&nbsp;</div>
-        <div><span class="t-dim">  /file  /vision  /brain  /cost  /reject  /quit</span></div>
-        <div>&nbsp;</div>
         <div><span class="t-dim">────────────────────────────────────────────────────────</span></div>
-        <div><span class="t-prompt">❯ </span>refactor processPayment to support partial refunds</div>
-        <div><span class="t-dim">[turn 1 · reason · multi-pass · </span><span class="t-copper t-bold">qwen2.5-coder:7b</span><span class="t-dim">]</span></div>
-        <div><span class="t-dim">────────────────────────────────────────────────────────</span></div>
+        <div><span class="t-prompt">❯ </span>build a todo app with express, typescript, and postgres</div>
         <div>&nbsp;</div>
-        <div><span class="t-copper t-bold">◈ Mantis</span> &nbsp;<span class="t-dim">[reasoning…]</span></div>
+        <div><span class="t-dim">  ◆ planning   [qwen2.5:14b]</span></div>
+        <div><span class="t-gold">  ✓ plan ready  </span><span class="t-dim">(4.2s · 1,847 tokens)</span></div>
+        <div><span class="t-dim">  ◆ coding   [qwen2.5-coder:7b] — 7 tasks</span></div>
         <div>&nbsp;</div>
-        <div><span class="t-warn">⚠ Impact: processPayment has 3 callers</span></div>
-        <div>&nbsp; <span class="t-gold">checkout.go:142</span>&nbsp; <span class="t-fg">CheckoutHandler</span> &nbsp;<span class="t-dim">← untested</span></div>
-        <div>&nbsp; <span class="t-gold">retry.go:89</span> &nbsp; &nbsp;<span class="t-fg">RetryFailedPayments</span> &nbsp;<span class="t-dim">← untested</span></div>
-        <div>&nbsp; <span class="t-gold">admin.go:211</span> &nbsp;<span class="t-fg">AdminRefund</span> &nbsp;<span class="t-dim">← covered</span></div>
+        <div><span class="t-dim">  ── tasks ──</span></div>
+        <div>&nbsp; <span class="t-green">✓</span> <span class="t-dim">Project setup and configuration</span> <span class="t-dim">(3 files · 892 tokens · 3.1s)</span></div>
+        <div>&nbsp; <span class="t-green">✓</span> <span class="t-dim">Data models and TypeScript interfaces</span> <span class="t-dim">(2 files · 634 tokens · 2.8s)</span></div>
+        <div>&nbsp; <span class="t-dim">  ◆ installing dependencies...</span></div>
+        <div>&nbsp; <span class="t-green">✓</span> <span class="t-dim">Database migrations and schema</span> <span class="t-dim">(2 files · 1,203 tokens · 4.1s)</span></div>
+        <div>&nbsp; <span class="t-green">✓</span> <span class="t-dim">Repository layer (data access)</span> <span class="t-dim">(2 files · 1,456 tokens · 5.2s)</span></div>
+        <div>&nbsp; <span class="t-gold">⠹</span> <span class="t-fg">Service layer (business logic)</span> <span class="t-dim">1,102 tokens · 3.8s</span></div>
+        <div>&nbsp; <span class="t-gold">⠹</span> <span class="t-fg">API controllers and routes</span> <span class="t-dim">847 tokens · 2.9s</span></div>
+        <div>&nbsp; ○ <span class="t-dim">Middleware, validation, error handling</span></div>
         <div>&nbsp;</div>
-        <div><span class="t-dim">From BRAIN.md: Redis was rejected for payment state (see REJECTED.md).</span></div>
-        <div><span class="t-fg">Adding </span><span class="t-gold">amount float64</span><span class="t-fg"> param, defaulting to full amount preserves callers…</span></div>
+        <div><span class="t-dim">  [task 5: fixing issues — attempt 1/3]</span></div>
+        <div><span class="t-gold">  ✓ code ready  </span><span class="t-dim">(6/7 tasks · 18.4s · 8,291 tokens)</span></div>
+        <div><span class="t-green">  ✓ tests verified  </span><span class="t-dim">(2 iterations)</span></div>
         <div>&nbsp;</div>
-        <div><span class="t-green">✓ verified · 0 hallucinated symbols</span></div>
+        <div><span class="t-dim">  ✻ Engineered in 32.1s</span></div>
         <div><span class="t-dim">────────────────────────────────────────────────────────</span></div>
         <div><span class="t-prompt">❯ </span><span class="cursor"></span></div>
       </div>
@@ -743,11 +747,11 @@
 <!-- ── Stat bar ──────────────────────────────────────────────────────────── -->
 <div class="stat-bar">
   <div class="container">
-    <div class="stat-item"><span class="stat-num">30+</span><span class="stat-label">CLI commands</span></div>
-    <div class="stat-item"><span class="stat-num">25+</span><span class="stat-label">built-in skills</span></div>
-    <div class="stat-item"><span class="stat-num">7 + Vision</span><span class="stat-label">routing tiers</span></div>
+    <div class="stat-item"><span class="stat-num">23,800+</span><span class="stat-label">lines of Go</span></div>
+    <div class="stat-item"><span class="stat-num">243</span><span class="stat-label">tests</span></div>
+    <div class="stat-item"><span class="stat-num">30</span><span class="stat-label">CLI commands</span></div>
+    <div class="stat-item"><span class="stat-num">27</span><span class="stat-label">packages</span></div>
     <div class="stat-item"><span class="stat-num">$0</span><span class="stat-label">monthly cost</span></div>
-    <div class="stat-item"><span class="stat-num">Go · TS · Py</span><span class="stat-label">language graph</span></div>
   </div>
 </div>
 
@@ -758,21 +762,72 @@
     <p class="section-sub">Keyword-first summary below. Expand only what you want to read.</p>
 
     <div class="keyword-cloud">
-      <span class="keyword-chip">Multimodal CLI</span>
-      <span class="keyword-chip">25 Built-In Skills</span>
-      <span class="keyword-chip">Custom Skills</span>
+      <span class="keyword-chip">Multi-Stage Pipeline</span>
+      <span class="keyword-chip">Agentic Code Generation</span>
+      <span class="keyword-chip">Build Verification Loop</span>
+      <span class="keyword-chip">Iterative Test Fixing</span>
+      <span class="keyword-chip">LSP Server</span>
+      <span class="keyword-chip">MCP Server</span>
       <span class="keyword-chip">Persistent Memory</span>
       <span class="keyword-chip">Ground Truth Guard</span>
-      <span class="keyword-chip">Semantic Recall</span>
+      <span class="keyword-chip">7-Tier Router + Vision</span>
       <span class="keyword-chip">Impact Analysis</span>
       <span class="keyword-chip">Cross-Repo Workspace</span>
       <span class="keyword-chip">Runtime Trace Analysis</span>
       <span class="keyword-chip">Architecture Lint</span>
-      <span class="keyword-chip">7-Tier Router + Vision</span>
-      <span class="keyword-chip">Token Savings</span>
+      <span class="keyword-chip">Web Search</span>
     </div>
 
     <div class="expand-list">
+      <details class="expand-item">
+        <summary><span class="expand-head">Code Generation Pipeline</span><span class="expand-icon">+</span></summary>
+        <div class="expand-content">
+          <div class="info-grid">
+            <div class="info-card">
+              <div class="info-title">Multi-Stage Pipeline</div>
+              <ul class="info-list">
+                <li>PLAN → CODE → TESTS stages with tier-optimized models</li>
+                <li>Plan decomposes into 6-10 focused tasks</li>
+                <li>First 2 tasks sequential (setup + types), rest parallel</li>
+                <li>Auto dependency install after setup task</li>
+              </ul>
+            </div>
+            <div class="info-card">
+              <div class="info-title">Build Verification</div>
+              <ul class="info-list">
+                <li>Build check after every task with up to 3 fix retries</li>
+                <li>Stuck detection: same error twice = move on</li>
+                <li>Content validation rejects TODOs, stubs, placeholders</li>
+                <li>Downstream tasks receive actual file content (types, interfaces)</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </details>
+      <details class="expand-item">
+        <summary><span class="expand-head">Multi-Agent Orchestration</span><span class="expand-icon">+</span></summary>
+        <div class="expand-content">
+          <div class="info-grid">
+            <div class="info-card">
+              <div class="info-title">Agent System</div>
+              <ul class="info-list">
+                <li>Auto-activates for high-impact changes (4+ files, 2+ packages)</li>
+                <li>Orchestrator decomposes task into per-package sub-tasks</li>
+                <li>Workers execute in parallel with 7 tools</li>
+                <li>Synthesizer combines worker outputs into coherent result</li>
+              </ul>
+            </div>
+            <div class="info-card">
+              <div class="info-title">Agent Tools</div>
+              <ul class="info-list">
+                <li><code>read_file</code>, <code>write_file</code>, <code>edit_file</code> with path traversal guard</li>
+                <li><code>run_bash</code> with allowlist (go/npm/cargo/pytest/git)</li>
+                <li><code>search_codebase</code>, <code>find_symbol</code>, <code>run_tests</code></li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </details>
       <details class="expand-item">
         <summary><span class="expand-head">Ask, Build, and See</span><span class="expand-icon">+</span></summary>
         <div class="expand-content">
@@ -780,17 +835,19 @@
             <div class="info-card">
               <div class="info-title">Interaction</div>
               <ul class="info-list">
-                <li><code>mantis</code> interactive workflow</li>
-                <li>One-shot CLI queries</li>
+                <li><code>mantis</code> interactive workflow with dynamic file reading</li>
+                <li>One-shot CLI queries with graph context auto-injection</li>
                 <li>Image analysis via <code>--image</code> and <code>/vision</code></li>
+                <li>Web search via <code>/search</code> (Tavily or DuckDuckGo)</li>
               </ul>
             </div>
             <div class="info-card">
               <div class="info-title">Speed Controls</div>
               <ul class="info-list">
-                <li><code>/file</code> to inject source quickly</li>
-                <li><code>/brain</code> to inspect memory state</li>
-                <li><code>/decision</code>, <code>/reject</code>, <code>/cost</code> for workflow control</li>
+                <li><code>/file</code> to inject source, <code>/fetch</code> for web pages</li>
+                <li><code>/test</code> iterative test-fix loop</li>
+                <li><code>/commit</code> and <code>/pr</code> for git workflow</li>
+                <li><code>/brain</code>, <code>/decision</code>, <code>/reject</code> for memory</li>
               </ul>
             </div>
           </div>
@@ -866,7 +923,7 @@
         </div>
       </details>
       <details class="expand-item">
-        <summary><span class="expand-head">Guardrails + Cost Control</span><span class="expand-icon">+</span></summary>
+        <summary><span class="expand-head">Guardrails + IDE Integration</span><span class="expand-icon">+</span></summary>
         <div class="expand-content">
           <div class="info-grid">
             <div class="info-card">
@@ -874,15 +931,17 @@
               <ul class="info-list">
                 <li><code>GROUND_TRUTH.json</code> catches invented symbols</li>
                 <li><code>mantis lint</code> enforces architecture boundaries</li>
-                <li>7-tier router picks model depth automatically</li>
+                <li>7-tier router with 97.7% classification accuracy</li>
+                <li>Iterative test loop auto-detects Go/Node/Python/Rust</li>
               </ul>
             </div>
             <div class="info-card">
-              <div class="info-title">Cost Clarity</div>
+              <div class="info-title">IDE + Tool Integration</div>
               <ul class="info-list">
-                <li>Session reports include route usage and token totals</li>
-                <li>Built-in paid-model comparison snapshot</li>
+                <li><code>mantis lsp</code> — LSP server with hover, symbols, diagnostics</li>
+                <li><code>mantis mcp</code> — MCP server for AI tool integration</li>
                 <li>Free-tier + local-first workflow by default</li>
+                <li>Per-turn token tracking and session cost reports</li>
               </ul>
             </div>
           </div>
@@ -904,9 +963,11 @@
         <div class="snap-card">
           <h3>Mantis</h3>
           <div class="pill-row">
+            <span class="pill good">Agentic Pipeline</span>
+            <span class="pill good">Build Verification</span>
             <span class="pill good">Persistent Memory</span>
             <span class="pill good">Cross-Repo Graph</span>
-            <span class="pill good">Runtime Traces</span>
+            <span class="pill good">LSP + MCP</span>
             <span class="pill good">$0 + Local Ollama</span>
           </div>
         </div>
@@ -1005,9 +1066,10 @@
         <div>&nbsp; <span class="file">DECISIONS.log</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← timestamped decisions</span></div>
         <div>&nbsp; <span class="file">REJECTED.md</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← approaches that failed</span></div>
         <div>&nbsp; <span class="file">GROUND_TRUTH.json</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← real function signatures</span></div>
-        <div>&nbsp; <span class="file">embeddings.db</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← semantic memory index</span></div>
-        <div>&nbsp; <span class="file">HANDOFF.md</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← team/AI handoff brief</span></div>
+        <div>&nbsp; <span class="file">embeddings.db</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← semantic memory (BM25 + cosine hybrid)</span></div>
         <div>&nbsp; <span class="file">graph.db</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← AST dependency graph</span></div>
+        <div>&nbsp; <span class="file">AGENT_SCRATCH.json</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← multi-agent communication</span></div>
+        <div>&nbsp; <span class="file">last-pipeline.md</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← full pipeline output</span></div>
         <div>&nbsp; <span class="dir">sessions/</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← persisted chat history</span></div>
         <div>&nbsp; <span class="dir">skills/</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← built-in + custom skill files</span></div>
         <div style="margin-top:.5rem"><span class="dir">.mantisrc.yml</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← CI lint rules</span></div>
@@ -1028,8 +1090,10 @@
       <div class="cmd-grid">
         <div class="cmd-row"><span class="cmd-name">mantis</span><span class="cmd-desc">interactive AI session with memory and routing</span></div>
         <div class="cmd-row"><span class="cmd-name">mantis "question"</span><span class="cmd-desc">one-shot answer from the terminal</span></div>
+        <div class="cmd-row"><span class="cmd-name">mantis --plan "build X"</span><span class="cmd-desc">plan-then-code pipeline with approval step</span></div>
         <div class="cmd-row"><span class="cmd-name">mantis --image screenshot.png</span><span class="cmd-desc">multimodal analysis from an image</span></div>
-        <div class="cmd-row"><span class="cmd-name">.mantis/skills/*.md</span><span class="cmd-desc">add custom skills; loaded automatically by task relevance</span></div>
+        <div class="cmd-row"><span class="cmd-name">mantis lsp</span><span class="cmd-desc">Language Server Protocol server for IDE integration</span></div>
+        <div class="cmd-row"><span class="cmd-name">mantis mcp</span><span class="cmd-desc">Model Context Protocol server for AI tools</span></div>
         <div class="cmd-row"><span class="cmd-name">mantis handoff</span><span class="cmd-desc">generate HANDOFF.md for async collaboration</span></div>
       </div>
     </div>
@@ -1082,7 +1146,7 @@
 <section class="cta-section">
   <div class="container">
     <h2><span class="metallic">One install. Full AI engineering stack.</span></h2>
-    <p>Assistant, graph intelligence, memory, lint guardrails, cross-repo analysis, and runtime traces at zero monthly cost.</p>
+    <p>Agentic code generation, build verification, LSP/MCP servers, persistent memory, graph intelligence, and runtime traces at zero monthly cost.</p>
     <a href="#install" class="btn btn-primary">↓ Install Mantis</a>
   </div>
 </section>
