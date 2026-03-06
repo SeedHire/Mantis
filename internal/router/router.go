@@ -51,50 +51,65 @@ type Intent struct {
 
 // ── Model preference lists ────────────────────────────────────────────────────
 // Each tier lists models in priority order (cloud first, local fallback).
+// Cloud model names require the ":cloud" or ":Nb-cloud" suffix for Ollama Cloud API.
+// Context windows: devstral-2 = 256K, qwen3-coder = 256K (1M extrapolated),
+//                  kimi-k2-thinking = 256K, deepseek-v3.2 = 160K, cogito-2.1 = 160K.
 var preferredModels = map[Tier][]string{
 	TierTrivial: {
-		"gemma3:4b", "ministral-3:3b", "gemma3:1b", "rnj-1:8b",
+		// cloud — small fast models, good for definitions/lookups
+		"gemma3:4b", "ministral-3:3b", "rnj-1:8b", "gemma3:1b",
 		// local
 		"qwen2.5-coder:1.5b", "qwen2.5-coder:0.5b", "llama3.2:1b", "phi3:mini", "gemma2:2b",
 	},
 	TierFast: {
-		"gemma3:12b", "ministral-3:8b", "gpt-oss:20b", "nemotron-3-nano:30b",
+		// cloud — mid-size, good for short code questions
+		"gemma3:12b", "ministral-3:8b", "gpt-oss:20b", "nemotron-3-nano:30b", "devstral-small-2:24b",
 		// local
 		"qwen2.5-coder:7b", "llama3.2:3b", "phi3:3.8b", "gemma2:9b",
 	},
 	TierCode: {
-		// Coding-specialist models — best for implement/debug/refactor
-		// Prioritise models with strong tool-calling and agentic capabilities.
-		"qwen3-coder-next", "qwen3-coder:480b", "deepseek-v3.2", "glm-5",
-		"devstral-2:123b", "devstral-small-2:24b", "devstral", "ministral-3:14b",
-		"deepseek-coder-v2:16b", "deepseek-v3", "gpt-oss:120b",
+		// cloud — coding-specialist models (correct :cloud tags required by Ollama Cloud API)
+		"qwen3-coder-next", "qwen3-coder:480b-cloud", "devstral-2:123b-cloud",
+		"deepseek-v3.2:cloud", "glm-5", "devstral-small-2:24b",
+		"ministral-3:14b", "gpt-oss:120b",
+		// fallback without cloud tag (works if model is locally available)
+		"qwen3-coder:480b", "devstral-2:123b", "deepseek-v3.2",
 		// local
-		"qwen2.5-coder:32b", "qwen2.5-coder:14b", "deepseek-coder:6.7b",
-		"codellama:13b",
+		"qwen2.5-coder:32b", "qwen2.5-coder:14b", "deepseek-coder-v2:16b",
+		"deepseek-coder:6.7b", "codellama:13b",
 	},
 	TierReason: {
-		// Reasoning/analysis models — best for architecture, explanation, tradeoffs
-		"kimi-k2-thinking", "deepseek-r1", "deepseek-r1:70b", "cogito-2.1:671b", "deepseek-v3.2",
+		// cloud — reasoning/chain-of-thought models (256K context)
+		"kimi-k2-thinking:cloud", "cogito-2.1:671b-cloud", "deepseek-v3.2:cloud",
 		"glm-5", "minimax-m2.1", "qwen3-next:80b",
+		// fallback
+		"kimi-k2-thinking", "cogito-2.1:671b", "deepseek-v3.2",
 		// local
 		"deepseek-r1:14b", "deepseek-r1:8b", "llama3.1:70b", "mixtral:8x7b", "llama3.3:70b",
 	},
 	TierHeavy: {
-		// Largest general + coding models for hard multi-file tasks
-		"devstral-2:123b", "deepseek-v3", "deepseek-r1:70b", "qwen3-coder:480b", "deepseek-v3.1:671b",
-		"kimi-k2.5", "mistral-large-3:675b", "minimax-m2.5",
-		"gemma3:27b", "glm-4.7", "qwen3.5:397b",
+		// cloud — largest models for hard multi-file tasks (256K context)
+		"devstral-2:123b-cloud", "qwen3-coder:480b-cloud", "kimi-k2-thinking:cloud",
+		"cogito-2.1:671b-cloud", "kimi-k2.5", "mistral-large-3:675b", "minimax-m2.5",
+		"glm-4.7", "qwen3.5:397b",
+		// fallback
+		"devstral-2:123b", "qwen3-coder:480b",
 		// local
 		"deepseek-r1:32b", "qwen2.5-coder:72b", "llama3.3:70b",
 	},
 	// TierMax uses ensemblePools — see EnsembleModels()
 	TierMax: {
-		"qwen3-coder:480b", "deepseek-v3.2", "devstral-2:123b", "deepseek-r1", "kimi-k2-thinking",
-		"deepseek-v3", "cogito-2.1:671b", "mistral-large-3:675b",
+		"qwen3-coder:480b-cloud", "devstral-2:123b-cloud", "kimi-k2-thinking:cloud",
+		"cogito-2.1:671b-cloud", "deepseek-v3.2:cloud", "mistral-large-3:675b",
 		"qwen3-coder-next", "glm-5", "devstral-small-2:24b",
+		// fallback
+		"qwen3-coder:480b", "devstral-2:123b", "kimi-k2-thinking",
 	},
 	TierVision: {
-		"qwen3-vl:235b-instruct", "qwen3-vl:235b", "gemini-3-flash-preview",
+		// cloud — multimodal models (256K context)
+		"qwen3-vl:235b-cloud", "qwen3-vl:235b-instruct", "gemini-3-flash-preview",
+		// fallback
+		"qwen3-vl:235b",
 		// local
 		"llama3.2-vision:11b", "llava:13b", "llava:7b", "moondream:1.8b",
 	},
@@ -103,19 +118,22 @@ var preferredModels = map[Tier][]string{
 // ensemblePools: one model per pool is selected for parallel ensemble execution.
 // Pool 1 = coding specialist, Pool 2 = reasoning, Pool 3 = large general.
 var ensemblePools = [][]string{
-	{"qwen3-coder-next", "qwen3-coder:480b", "devstral-2:123b", "devstral-small-2:24b", "devstral", "qwen2.5-coder:32b"},
-	{"kimi-k2-thinking", "deepseek-r1", "deepseek-r1:70b", "cogito-2.1:671b", "deepseek-v3.2", "llama3.3:70b"},
-	{"mistral-large-3:675b", "minimax-m2.5", "kimi-k2.5", "glm-5", "deepseek-v3", "gemma3:27b"},
+	// Pool 1: coding specialists (prefer cloud tags, fall back to local)
+	{"qwen3-coder:480b-cloud", "devstral-2:123b-cloud", "qwen3-coder-next", "devstral-small-2:24b", "qwen2.5-coder:32b"},
+	// Pool 2: reasoning / chain-of-thought
+	{"kimi-k2-thinking:cloud", "cogito-2.1:671b-cloud", "deepseek-v3.2:cloud", "kimi-k2-thinking", "llama3.3:70b"},
+	// Pool 3: large general-purpose
+	{"mistral-large-3:675b", "minimax-m2.5", "kimi-k2.5", "glm-5", "gemma3:27b"},
 }
 
 var defaultModels = map[Tier]string{
 	TierTrivial: "gemma3:4b",
 	TierFast:    "gemma3:12b",
-	TierCode:    "qwen3-coder-next",
-	TierReason:  "kimi-k2-thinking",
-	TierHeavy:   "devstral-2:123b",
-	TierMax:     "devstral-2:123b", // single-model fallback when ensemble unavailable
-	TierVision:  "qwen3-vl:235b-instruct",
+	TierCode:    "devstral-2:123b-cloud",  // 72.2% SWE-bench, 256K ctx
+	TierReason:  "kimi-k2-thinking:cloud", // 71.3% SWE-bench + reasoning, 256K ctx
+	TierHeavy:   "devstral-2:123b-cloud",
+	TierMax:     "devstral-2:123b-cloud", // single-model fallback when ensemble unavailable
+	TierVision:  "qwen3-vl:235b-cloud",
 }
 
 // ── Size-based fallback thresholds ────────────────────────────────────────────
