@@ -20,7 +20,9 @@ type Result struct {
 }
 
 // codeBlockRe extracts content inside fenced code blocks.
-var codeBlockRe = regexp.MustCompile("```[a-z]*\n([\\s\\S]*?)```")
+// Group 1: fence header (lang or lang:filepath). Group 2: code content.
+// edit:filepath blocks are skipped in the scanning loop (they contain SEARCH/REPLACE markers).
+var codeBlockRe = regexp.MustCompile("```([a-z][a-z]*(?::[^\n`]+)?)\n([\\s\\S]*?)```")
 
 // funcCallRe matches function/method call patterns like foo(), Bar(), obj.Method().
 var funcCallRe = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_]*)\s*\(`)
@@ -77,10 +79,15 @@ func Check(response string, tw *truth.Writer) Result {
 	seen := map[string]bool{}
 
 	for _, block := range codeBlocks {
-		if len(block) < 2 {
+		if len(block) < 3 {
 			continue
 		}
-		code := block[1]
+		header := block[1]
+		// Skip edit:filepath blocks — they contain SEARCH/REPLACE markers, not runnable code.
+		if strings.HasPrefix(header, "edit:") {
+			continue
+		}
+		code := block[2]
 		matches := funcCallRe.FindAllStringSubmatch(code, -1)
 		for _, m := range matches {
 			if len(m) < 2 {
@@ -225,8 +232,8 @@ func CheckConventions(response string, conventions []Convention) ConventionResul
 	}
 	// Also include generic code blocks (no file path → global rules only).
 	for _, m := range codeBlockRe.FindAllStringSubmatch(response, -1) {
-		if len(m) >= 2 {
-			blocks = append(blocks, codeBlock{code: m[1]})
+		if len(m) >= 3 && !strings.HasPrefix(m[1], "edit:") {
+			blocks = append(blocks, codeBlock{code: m[2]})
 		}
 	}
 	if len(blocks) == 0 {
