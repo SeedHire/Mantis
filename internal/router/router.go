@@ -3,12 +3,12 @@
 // Tiers (7):
 //
 //	TierTrivial  — one-liners, definitions, syntax lookups          (~1–4B model)
-//	TierFast     — short code questions, small completions          (~8–14B model)
-//	TierCode     — coding specialist: implement, debug, refactor    (qwen3-coder / deepseek-v3.2)
-//	TierReason   — analysis, architecture, deep explanation         (kimi-thinking / cogito)
-//	TierHeavy    — multi-file, large context, complex design        (devstral-2 / deepseek-v3)
+//	TierFast     — short code questions, small completions          (~8–24B model)
+//	TierCode     — coding specialist: implement, debug, refactor    (glm-5 / devstral-2)
+//	TierReason   — analysis, architecture, deep explanation         (kimi-k2-thinking / gpt-oss)
+//	TierHeavy    — multi-file, large context, complex design        (glm-4.7 / mistral-large-3)
 //	TierMax      — ensemble: 3 specialists in parallel + synthesis  (Opus-level output)
-//	TierVision   — any image / screenshot input                     (qwen3-vl / gemini)
+//	TierVision   — any image / screenshot input                     (gemini-3-flash-preview / qwen3-vl)
 package router
 
 import (
@@ -52,8 +52,14 @@ type Intent struct {
 // ── Model preference lists ────────────────────────────────────────────────────
 // Each tier lists models in priority order (cloud first, local fallback).
 // Cloud model names require the ":cloud" or ":Nb-cloud" suffix for Ollama Cloud API.
-// Context windows: devstral-2 = 256K, qwen3-coder = 256K (1M extrapolated),
-//                  kimi-k2-thinking = 256K, deepseek-v3.2 = 160K, cogito-2.1 = 160K.
+//
+// SWE-bench Verified scores (March 2026):
+//   glm-5 77.8% · glm-4.7 73.8% · devstral-2 72.2% · kimi-k2-thinking 71.3%
+//   qwen3-coder 480B 69.6% · devstral-small-2 68.0%
+//
+// Context windows:
+//   gemini-3-flash-preview 1M · qwen3-coder 256K (1M extrap.) · kimi-k2-thinking 256K
+//   devstral-2 256K · glm-5 198K · glm-4.7 200K · mistral-large-3 256K
 var preferredModels = map[Tier][]string{
 	TierTrivial: {
 		// cloud — small fast models, good for definitions/lookups
@@ -63,52 +69,67 @@ var preferredModels = map[Tier][]string{
 	},
 	TierFast: {
 		// cloud — mid-size, good for short code questions
-		"gemma3:12b", "ministral-3:8b", "gpt-oss:20b", "nemotron-3-nano:30b", "devstral-small-2:24b",
+		// devstral-small-2 = 68% SWE-bench at 24B, 256K ctx — best fast coding model
+		"devstral-small-2:24b-cloud", "gemma3:12b", "gpt-oss:20b-cloud",
+		"ministral-3:8b", "qwen3-coder-next:cloud",
 		// local
 		"qwen2.5-coder:7b", "llama3.2:3b", "phi3:3.8b", "gemma2:9b",
 	},
 	TierCode: {
-		// cloud — coding-specialist models (correct :cloud tags required by Ollama Cloud API)
-		"qwen3-coder-next", "qwen3-coder:480b-cloud", "devstral-2:123b-cloud",
-		"deepseek-v3.2:cloud", "glm-5", "devstral-small-2:24b",
-		"ministral-3:14b", "gpt-oss:120b",
-		// fallback without cloud tag (works if model is locally available)
-		"qwen3-coder:480b", "devstral-2:123b", "deepseek-v3.2",
+		// cloud — coding-specialist models ranked by SWE-bench Verified score
+		// glm-5: 77.8% SWE-bench (#1 open model), 198K ctx, 744B/40B active MoE
+		// devstral-2: 72.2% SWE-bench, 256K ctx, 123B dense, agentic multi-file
+		// qwen3-coder: 69.6% SWE-bench, 256K ctx (1M extrap.), 480B/35B active MoE
+		"glm-5:cloud", "devstral-2:123b-cloud", "qwen3-coder:480b-cloud",
+		"glm-4.7:cloud", "kimi-k2.5:cloud", "gpt-oss:120b-cloud",
+		"minimax-m2.5:cloud", "qwen3-coder-next:cloud",
+		// local fallbacks (bare names)
+		"glm-5", "devstral-2:123b", "qwen3-coder:480b", "deepseek-v3.1:671b",
 		// local
 		"qwen2.5-coder:32b", "qwen2.5-coder:14b", "deepseek-coder-v2:16b",
 		"deepseek-coder:6.7b", "codellama:13b",
 	},
 	TierReason: {
-		// cloud — reasoning/chain-of-thought models (256K context)
-		"kimi-k2-thinking:cloud", "cogito-2.1:671b-cloud", "deepseek-v3.2:cloud",
-		"glm-5", "minimax-m2.1", "qwen3-next:80b",
-		// fallback
-		"kimi-k2-thinking", "cogito-2.1:671b", "deepseek-v3.2",
+		// cloud — reasoning/chain-of-thought models
+		// kimi-k2-thinking: 99% HumanEval, 44.9% HLE, 256K ctx, 200+ sequential tool calls
+		// gpt-oss:120b: matches o4-mini on MMLU/HLE/TauBench
+		// glm-5: 92.7% AIME 2026, 86.0% GPQA-Diamond
+		"kimi-k2-thinking:cloud", "gpt-oss:120b-cloud", "glm-5:cloud",
+		"kimi-k2.5:cloud", "qwen3-next:80b-cloud", "deepseek-v3.1:671b-cloud",
+		// local fallbacks
+		"kimi-k2-thinking", "deepseek-v3.1:671b",
 		// local
 		"deepseek-r1:14b", "deepseek-r1:8b", "llama3.1:70b", "mixtral:8x7b", "llama3.3:70b",
 	},
 	TierHeavy: {
-		// cloud — largest models for hard multi-file tasks (256K context)
-		"devstral-2:123b-cloud", "qwen3-coder:480b-cloud", "kimi-k2-thinking:cloud",
-		"cogito-2.1:671b-cloud", "kimi-k2.5", "mistral-large-3:675b", "minimax-m2.5",
-		"glm-4.7", "qwen3.5:397b",
-		// fallback
-		"devstral-2:123b", "qwen3-coder:480b",
+		// cloud — largest models for hard multi-file tasks
+		// glm-4.7: 73.8% SWE-bench, 30B/3B active MoE (fast!), 200K ctx
+		// mistral-large-3: 92% HumanEval pass@1, 256K ctx, 675B/41B active MoE
+		// minimax-m2.5: within 0.6% of Claude Opus on SWE-bench, cost-efficient
+		"glm-4.7:cloud", "mistral-large-3:675b-cloud", "devstral-2:123b-cloud",
+		"qwen3-coder:480b-cloud", "kimi-k2-thinking:cloud", "minimax-m2.5:cloud",
+		"kimi-k2.5:cloud", "glm-5:cloud",
+		// local fallbacks
+		"devstral-2:123b", "qwen3-coder:480b", "deepseek-v3.1:671b",
 		// local
 		"deepseek-r1:32b", "qwen2.5-coder:72b", "llama3.3:70b",
 	},
 	// TierMax uses ensemblePools — see EnsembleModels()
 	TierMax: {
-		"qwen3-coder:480b-cloud", "devstral-2:123b-cloud", "kimi-k2-thinking:cloud",
-		"cogito-2.1:671b-cloud", "deepseek-v3.2:cloud", "mistral-large-3:675b",
-		"qwen3-coder-next", "glm-5", "devstral-small-2:24b",
-		// fallback
-		"qwen3-coder:480b", "devstral-2:123b", "kimi-k2-thinking",
+		// Single-model fallback when ensemble unavailable — use top all-round model
+		"glm-5:cloud", "kimi-k2-thinking:cloud", "qwen3-coder:480b-cloud",
+		"devstral-2:123b-cloud", "mistral-large-3:675b-cloud", "gpt-oss:120b-cloud",
+		"minimax-m2.5:cloud", "qwen3-coder-next:cloud",
+		// local fallbacks
+		"glm-5", "kimi-k2-thinking", "qwen3-coder:480b", "devstral-2:123b",
 	},
 	TierVision: {
-		// cloud — multimodal models (256K context)
-		"qwen3-vl:235b-cloud", "qwen3-vl:235b-instruct", "gemini-3-flash-preview",
-		// fallback
+		// cloud — multimodal models
+		// gemini-3-flash-preview: 1M ctx, 90.4% GPQA-Diamond — best vision on Ollama Cloud
+		// qwen3-vl: 256K ctx (1M extrap.), OS World SOTA, vision + tool use
+		// kimi-k2.5: native multimodal, vision-based coding
+		"gemini-3-flash-preview:cloud", "qwen3-vl:235b-cloud", "kimi-k2.5:cloud",
+		// local fallbacks
 		"qwen3-vl:235b",
 		// local
 		"llama3.2-vision:11b", "llava:13b", "llava:7b", "moondream:1.8b",
@@ -118,22 +139,22 @@ var preferredModels = map[Tier][]string{
 // ensemblePools: one model per pool is selected for parallel ensemble execution.
 // Pool 1 = coding specialist, Pool 2 = reasoning, Pool 3 = large general.
 var ensemblePools = [][]string{
-	// Pool 1: coding specialists (prefer cloud tags, fall back to local)
-	{"qwen3-coder:480b-cloud", "devstral-2:123b-cloud", "qwen3-coder-next", "devstral-small-2:24b", "qwen2.5-coder:32b"},
+	// Pool 1: coding specialists — ranked by SWE-bench Verified
+	{"glm-5:cloud", "devstral-2:123b-cloud", "qwen3-coder:480b-cloud", "glm-4.7:cloud", "qwen2.5-coder:32b"},
 	// Pool 2: reasoning / chain-of-thought
-	{"kimi-k2-thinking:cloud", "cogito-2.1:671b-cloud", "deepseek-v3.2:cloud", "kimi-k2-thinking", "llama3.3:70b"},
+	{"kimi-k2-thinking:cloud", "gpt-oss:120b-cloud", "deepseek-v3.1:671b-cloud", "kimi-k2-thinking", "llama3.3:70b"},
 	// Pool 3: large general-purpose
-	{"mistral-large-3:675b", "minimax-m2.5", "kimi-k2.5", "glm-5", "gemma3:27b"},
+	{"mistral-large-3:675b-cloud", "minimax-m2.5:cloud", "kimi-k2.5:cloud", "glm-5", "gemma3:27b"},
 }
 
 var defaultModels = map[Tier]string{
 	TierTrivial: "gemma3:4b",
-	TierFast:    "gemma3:12b",
-	TierCode:    "devstral-2:123b-cloud",  // 72.2% SWE-bench, 256K ctx
-	TierReason:  "kimi-k2-thinking:cloud", // 71.3% SWE-bench + reasoning, 256K ctx
-	TierHeavy:   "devstral-2:123b-cloud",
-	TierMax:     "devstral-2:123b-cloud", // single-model fallback when ensemble unavailable
-	TierVision:  "qwen3-vl:235b-cloud",
+	TierFast:    "devstral-small-2:24b-cloud",  // 68% SWE-bench at 24B, 256K ctx
+	TierCode:    "glm-5:cloud",                  // 77.8% SWE-bench (#1 open model), 198K ctx
+	TierReason:  "kimi-k2-thinking:cloud",       // 99% HumanEval, 44.9% HLE, 256K ctx
+	TierHeavy:   "glm-4.7:cloud",               // 73.8% SWE-bench, 30B/3B active MoE, 200K ctx
+	TierMax:     "glm-5:cloud",                  // best all-round: 77.8% SWE + 92.7% AIME
+	TierVision:  "gemini-3-flash-preview:cloud", // 1M ctx, 90.4% GPQA-Diamond
 }
 
 // ── Size-based fallback thresholds ────────────────────────────────────────────
