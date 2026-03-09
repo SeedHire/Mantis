@@ -110,29 +110,28 @@ type WrittenFile struct {
 	Diff    string // non-empty for modified files: compact +/- diff summary
 }
 
-// extractAndWriteFiles scans the AI response for fenced code blocks tagged
-// with a file path. Handles two formats:
-//   - ```lang:path/to/file — whole-file write (new files or full replacements)
-//   - ```edit:path/to/file — SEARCH/REPLACE patch for existing files
-//
-// Edit blocks always take priority: two passes are made so that an edit block
-// wins even when the model emits a whole-file block for the same path first.
-func extractAndWriteFiles(response, root string) []WrittenFile {
-	var written []WrittenFile
-	editPatched := map[string]bool{} // files already patched by an edit block
+// pendingChange holds a resolved file change not yet written to disk.
+type pendingChange struct {
+	path    string // relative path
+	content string // final content to write
+	isNew   bool   // true = new file
+	diff    string // precomputed colored diff (empty for new files)
+}
 
-	// Capture group 1 = block type (lang or "edit"), group 2 = filepath, group 3 = body.
-	re := regexp.MustCompile("(?m)^```([a-zA-Z0-9_+-]*)[:/ ]([^\\s`]+)\\n([\\s\\S]*?)\\n```")
+// codeBlockRe matches fenced code blocks tagged with a file path.
+// group 1 = block type (lang or "edit"), group 2 = filepath, group 3 = body.
+var codeBlockRe = regexp.MustCompile("(?m)^```([a-zA-Z0-9_+-]*)[:/ ]([^\\s`]+)\\n([\\s\\S]*?)\\n```")
 
-	type block struct {
-		blockType string
-		clean     string
-		body      string
-	}
+type parsedBlock struct {
+	blockType string
+	clean     string
+	body      string
+}
 
-	// Collect and validate all blocks first.
-	var blocks []block
-	for _, m := range re.FindAllStringSubmatch(response, -1) {
+// parseBlocks extracts and validates all code blocks from a response.
+func parseBlocks(response string) []parsedBlock {
+	var blocks []parsedBlock
+	for _, m := range codeBlockRe.FindAllStringSubmatch(response, -1) {
 		blockType := strings.ToLower(m[1])
 		filePath := strings.TrimSpace(m[2])
 		body := m[3]
@@ -149,84 +148,26 @@ func extractAndWriteFiles(response, root string) []WrittenFile {
 		if strings.HasPrefix(clean, "..") {
 			continue
 		}
-		blocks = append(blocks, block{blockType, clean, body})
+		blocks = append(blocks, parsedBlock{blockType, clean, body})
 	}
-
-	// Pass 1: edit blocks — these always win over whole-file blocks.
-	for _, b := range blocks {
-		if b.blockType != "edit" {
-			continue
-		}
-		if editPatched[b.clean] {
-			continue
-		}
-		editPatched[b.clean] = true
-		wfs := applySearchReplacePatches(b.clean, b.body, root)
-		written = append(written, wfs...)
-	}
-
-	// Pass 2: whole-file blocks — skip any file already handled by an edit block.
-	seen := map[string]bool{}
-	for _, b := range blocks {
-		if b.blockType == "edit" {
-			continue
-		}
-		if editPatched[b.clean] || seen[b.clean] {
-			continue
-		}
-		seen[b.clean] = true
-
-		dest := filepath.Join(root, b.clean)
-		_, statErr := os.Stat(dest)
-		isNew := os.IsNotExist(statErr)
-
-		// Warn when model wrote a whole-file block for an existing file — edit blocks
-		// are preferred for modifications to avoid silent overwrites.
-		if !isNew {
-			fmt.Printf("%s  ⚠ whole-file block for existing %s (prefer edit: blocks for patches)%s\n",
-				colorDim, b.clean, colorReset)
-		}
-
-		var oldContent string
-		if !isNew {
-			if raw, err := os.ReadFile(dest); err == nil {
-				oldContent = string(raw)
-			}
-		}
-		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-			continue
-		}
-		if err := os.WriteFile(dest, []byte(b.body+"\n"), 0o644); err != nil {
-			continue
-		}
-		diff := ""
-		if !isNew {
-			diff = diffLines(oldContent, b.body+"\n")
-		}
-		written = append(written, WrittenFile{Path: b.clean, Created: isNew, Diff: diff})
-	}
-
-	return written
+	return blocks
 }
 
-// applySearchReplacePatches reads the file at root/filePath, applies every
-// <<<SEARCH/===/>>>SEARCH section in body, writes the result, and returns the
-// WrittenFile record. Skips individual sections that are not found or ambiguous.
-func applySearchReplacePatches(filePath, body, root string) []WrittenFile {
+// dryRunSearchReplacePatches applies SEARCH/REPLACE patches in memory without writing.
+// Returns the new content, old content, number of applied patches, and any error.
+func dryRunSearchReplacePatches(filePath, body, root string) (newContent, oldContent string, applied int, err error) {
 	dest := filepath.Join(root, filePath)
 	data, err := os.ReadFile(dest)
 	if err != nil {
-		fmt.Printf("%s  ⚠ edit: %s not found (skipped)%s\n", colorDim, filePath, colorReset)
-		return nil
+		return "", "", 0, fmt.Errorf("edit: %s not found", filePath)
 	}
 
 	const searchOpen = "<<<SEARCH"
 	const separator = "==="
 	const searchClose = ">>>SEARCH"
 
-	oldContent := string(data)
+	oldContent = string(data)
 	content := oldContent
-	applied := 0
 	remaining := body
 
 	for {
@@ -273,14 +214,182 @@ func applySearchReplacePatches(filePath, body, root string) []WrittenFile {
 		applied++
 	}
 
+	return content, oldContent, applied, nil
+}
+
+// collectAllChanges parses the AI response and resolves all file changes in memory.
+// Nothing is written to disk. Edit blocks take priority over whole-file blocks.
+func collectAllChanges(response, root string) []pendingChange {
+	blocks := parseBlocks(response)
+	var changes []pendingChange
+	editPatched := map[string]bool{}
+
+	// Pass 1: edit blocks.
+	for _, b := range blocks {
+		if b.blockType != "edit" {
+			continue
+		}
+		if editPatched[b.clean] {
+			continue
+		}
+		editPatched[b.clean] = true
+
+		newContent, oldContent, applied, err := dryRunSearchReplacePatches(b.clean, b.body, root)
+		if err != nil {
+			fmt.Printf("%s  ⚠ %v (skipped)%s\n", colorDim, err, colorReset)
+			continue
+		}
+		if applied == 0 {
+			continue
+		}
+		changes = append(changes, pendingChange{
+			path:    b.clean,
+			content: newContent,
+			isNew:   false,
+			diff:    diffLines(oldContent, newContent),
+		})
+	}
+
+	// Pass 2: whole-file blocks.
+	seen := map[string]bool{}
+	for _, b := range blocks {
+		if b.blockType == "edit" {
+			continue
+		}
+		if editPatched[b.clean] || seen[b.clean] {
+			continue
+		}
+		seen[b.clean] = true
+
+		dest := filepath.Join(root, b.clean)
+		_, statErr := os.Stat(dest)
+		isNew := os.IsNotExist(statErr)
+		finalContent := b.body + "\n"
+
+		if !isNew {
+			fmt.Printf("%s  ⚠ whole-file block for existing %s (prefer edit: blocks for patches)%s\n",
+				colorDim, b.clean, colorReset)
+		}
+
+		var diff string
+		if !isNew {
+			if raw, err := os.ReadFile(dest); err == nil {
+				diff = diffLines(string(raw), finalContent)
+			}
+		}
+		changes = append(changes, pendingChange{
+			path:    b.clean,
+			content: finalContent,
+			isNew:   isNew,
+			diff:    diff,
+		})
+	}
+
+	return changes
+}
+
+// writePendingChanges writes all pending changes to disk and returns WrittenFile records.
+func writePendingChanges(changes []pendingChange, root string) []WrittenFile {
+	var written []WrittenFile
+	for _, c := range changes {
+		dest := filepath.Join(root, c.path)
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			continue
+		}
+		if err := os.WriteFile(dest, []byte(c.content), 0o644); err != nil {
+			fmt.Printf("%s  ⚠ write %s: %v%s\n", colorDim, c.path, err, colorReset)
+			continue
+		}
+		written = append(written, WrittenFile{Path: c.path, Created: c.isNew, Diff: c.diff})
+	}
+	return written
+}
+
+// promptWriteApproval shows a diff preview and asks the user to confirm writing.
+// Returns true if the user approves, false on decline or error.
+func promptWriteApproval(changes []pendingChange, rl readliner) bool {
+	if len(changes) == 0 {
+		return false
+	}
+
+	fmt.Printf("\n%s┌─ Preview (%d file(s)) ──%s\n", colorDim, len(changes), colorReset)
+	for _, c := range changes {
+		icon := "✚ new"
+		if !c.isNew {
+			icon = "✎ mod"
+		}
+		fmt.Printf("%s│ %s %s%s\n", colorDim, icon, c.path, colorReset)
+		if c.diff != "" {
+			for _, line := range strings.Split(c.diff, "\n") {
+				fmt.Printf("%s│%s   %s\n", colorDim, colorReset, line)
+			}
+		}
+	}
+	fmt.Printf("%s└──%s\n", colorDim, colorReset)
+
+	fmt.Printf("Write %d file(s)? [Y/n]: ", len(changes))
+	line, err := rl.Readline()
+	if err != nil {
+		return false // Ctrl+C or error
+	}
+	ans := strings.TrimSpace(strings.ToLower(line))
+	return ans == "" || ans == "y" || ans == "yes" || ans == "a"
+}
+
+// readliner is the subset of readline.Instance used by promptWriteApproval.
+// Extracted as interface for testability.
+type readliner interface {
+	Readline() (string, error)
+}
+
+// extractAndWriteFilesWithApproval collects changes, shows a diff preview,
+// and writes only if the user approves. Returns nil if declined.
+func extractAndWriteFilesWithApproval(response, root string, rl readliner) []WrittenFile {
+	changes := collectAllChanges(response, root)
+	if len(changes) == 0 {
+		return nil
+	}
+	if !promptWriteApproval(changes, rl) {
+		fmt.Printf("%s  (write declined)%s\n", colorDim, colorReset)
+		return nil
+	}
+	return writePendingChanges(changes, root)
+}
+
+// extractAndWriteFiles scans the AI response for fenced code blocks tagged
+// with a file path. Handles two formats:
+//   - ```lang:path/to/file — whole-file write (new files or full replacements)
+//   - ```edit:path/to/file — SEARCH/REPLACE patch for existing files
+//
+// Edit blocks always take priority: two passes are made so that an edit block
+// wins even when the model emits a whole-file block for the same path first.
+// This variant writes immediately with no approval gate (for automated paths).
+func extractAndWriteFiles(response, root string) []WrittenFile {
+	changes := collectAllChanges(response, root)
+	if len(changes) == 0 {
+		return nil
+	}
+	return writePendingChanges(changes, root)
+}
+
+// applySearchReplacePatches reads the file at root/filePath, applies every
+// <<<SEARCH/===/>>>SEARCH section in body, writes the result, and returns the
+// WrittenFile record. Skips individual sections that are not found or ambiguous.
+func applySearchReplacePatches(filePath, body, root string) []WrittenFile {
+	newContent, oldContent, applied, err := dryRunSearchReplacePatches(filePath, body, root)
+	if err != nil {
+		fmt.Printf("%s  ⚠ %v (skipped)%s\n", colorDim, err, colorReset)
+		return nil
+	}
 	if applied == 0 {
 		return nil
 	}
-	if err := os.WriteFile(dest, []byte(content), 0o644); err != nil {
+	dest := filepath.Join(root, filePath)
+	if err := os.WriteFile(dest, []byte(newContent), 0o644); err != nil {
 		fmt.Printf("%s  ⚠ edit %s: write error: %v%s\n", colorDim, filePath, err, colorReset)
 		return nil
 	}
-	return []WrittenFile{{Path: filePath, Created: false, Diff: diffLines(oldContent, content)}}
+	return []WrittenFile{{Path: filePath, Created: false, Diff: diffLines(oldContent, newContent)}}
 }
 
 // looksLikeFilePath returns true if s looks like a file path:

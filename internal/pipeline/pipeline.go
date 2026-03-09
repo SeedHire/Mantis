@@ -670,6 +670,7 @@ func runTaskBased(
 	var allCode strings.Builder
 	var totalPT, totalCT int
 	var allWrittenFiles []string // tracks all files written across tasks
+	var sealedManifest string    // populated after sequential tasks, injected into parallel workers
 
 	// Start the spinner animation for running tasks.
 	stopSpinner := taskSpinner(tasks, len(tasks), &mu, &outMu)
@@ -695,7 +696,7 @@ func runTaskBased(
 		taskCtx, taskCancel := context.WithTimeout(ctx, taskTimeout)
 		defer taskCancel()
 
-		taskPrompt := taskCodePrompt(userRequest, planText, tasks[i].Title, root, writtenFiles)
+		taskPrompt := taskCodePrompt(userRequest, planText, tasks[i].Title, root, writtenFiles, sealedManifest)
 		msgs := []interface{}{
 			ollama.Message{Role: "system", Content: systemPrompt + taskStageSuffix},
 			ollama.Message{Role: "user", Content: taskPrompt},
@@ -858,6 +859,16 @@ func runTaskBased(
 		}
 	}
 
+	// After sequential tasks, extract sealed types manifest so parallel workers
+	// cannot redefine shared types/interfaces defined by task 0-1.
+	if root != "" && len(allWrittenFiles) > 0 {
+		mu.Lock()
+		snapshot := make([]string, len(allWrittenFiles))
+		copy(snapshot, allWrittenFiles)
+		mu.Unlock()
+		sealedManifest = extractSealedTypes(root, snapshot)
+	}
+
 	if len(tasks) > seqCount {
 		// Phase 2: Run remaining tasks in parallel batches.
 		// Batch size limited to avoid overwhelming the API.
@@ -915,7 +926,7 @@ You are implementing ONE specific task from a larger plan.
 - If prior tasks already created files you need to import from, assume they exist and IMPORT from them.
 
 CRITICAL RULES to avoid breaking parallel tasks:
-1. NEVER redefine interfaces, types, or enums that belong to a prior task's files — only IMPORT them.
+1. NEVER redefine any symbol listed in the "SEALED TYPES" section — those are LOCKED. Import them.
 2. NEVER recreate a file that the "Already implemented files" list shows — only EDIT it if you must.
 3. Use CONSISTENT constructor signatures: if prior tasks use dependency injection (passing db/repo as args), do the same.
 4. If you need a type from another file, import it — do NOT copy-paste or redefine it inline.
@@ -1054,7 +1065,75 @@ func extractExportSummary(content string) string {
 	return sb.String()
 }
 
-func taskCodePrompt(request, plan, taskTitle, root string, writtenFiles []string) string {
+// sealedTypePatterns matches exported type/interface/class/enum declarations across languages.
+var sealedTypePatterns = []*regexp.Regexp{
+	// TS/JS: export (interface|type|class|enum) Name
+	regexp.MustCompile(`(?m)^export\s+(?:interface|type|class|enum)\s+(\w+)`),
+	// TS/JS: export (const|let|var) Name
+	regexp.MustCompile(`(?m)^export\s+(?:const|let|var)\s+(\w+)`),
+	// TS/JS: export default class Name
+	regexp.MustCompile(`(?m)^export\s+default\s+class\s+(\w+)`),
+	// Go: type Name struct/interface
+	regexp.MustCompile(`(?m)^type\s+([A-Z]\w*)\s+(?:struct|interface)\b`),
+	// Go: func Name( — exported functions (capital first letter)
+	regexp.MustCompile(`(?m)^func\s+([A-Z]\w*)\(`),
+	// Python: class Name
+	regexp.MustCompile(`(?m)^class\s+([A-Z]\w*)`),
+	// Python: def Name — exported functions (capital first letter)
+	regexp.MustCompile(`(?m)^def\s+([A-Z]\w*)`),
+}
+
+// extractSealedTypes scans files written by earlier tasks and extracts all exported
+// type/interface/class/enum names into a "sealed types manifest" block. This block is
+// injected into parallel worker prompts so models cannot redefine shared types.
+// Returns "" if no types are found.
+func extractSealedTypes(root string, writtenFiles []string) string {
+	if root == "" || len(writtenFiles) == 0 {
+		return ""
+	}
+
+	seen := map[string]bool{}
+	var names []string
+
+	for _, f := range writtenFiles {
+		absPath := f
+		if !filepath.IsAbs(absPath) {
+			absPath = filepath.Join(root, absPath)
+		}
+		data, err := os.ReadFile(absPath)
+		if err != nil {
+			continue
+		}
+		content := string(data)
+		for _, re := range sealedTypePatterns {
+			for _, m := range re.FindAllStringSubmatch(content, -1) {
+				name := m[1]
+				if !seen[name] {
+					seen[name] = true
+					names = append(names, name)
+				}
+			}
+		}
+	}
+
+	if len(names) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("\n\n## SEALED TYPES (from task 1 — data models/types task)\n")
+	sb.WriteString("These types already exist on disk.\n")
+	sb.WriteString("**DO NOT redefine any of the following. IMPORT them.**\n")
+	for _, n := range names {
+		sb.WriteString("- `")
+		sb.WriteString(n)
+		sb.WriteString("`\n")
+	}
+	sb.WriteString("\nViolating this rule means your output will be REJECTED.\n")
+	return sb.String()
+}
+
+func taskCodePrompt(request, plan, taskTitle, root string, writtenFiles []string, sealedManifest string) string {
 	var sb strings.Builder
 	sb.WriteString("## Original Request\n")
 	sb.WriteString(request)
@@ -1063,6 +1142,10 @@ func taskCodePrompt(request, plan, taskTitle, root string, writtenFiles []string
 	sb.WriteString("\n\n## YOUR CURRENT TASK\nImplement ONLY this task: **")
 	sb.WriteString(taskTitle)
 	sb.WriteString("**\n\nOutput only the files needed for this specific task.")
+
+	if sealedManifest != "" {
+		sb.WriteString(sealedManifest)
+	}
 
 	priorCtx := readPriorContext(root, writtenFiles, 12000)
 	if priorCtx != "" {

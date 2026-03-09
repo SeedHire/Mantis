@@ -47,6 +47,7 @@ var rootCmd = &cobra.Command{
 			PlanMode:  replPlan,
 			Continue:  replContinue,
 			Version:   version,
+			Offline:   replOffline,
 		}
 		if len(args) > 0 {
 			cfg.InitialQuery = strings.Join(args, " ")
@@ -60,6 +61,7 @@ var replBudget int
 var replImage string
 var replPlan bool
 var replContinue bool
+var replOffline bool
 
 // ── init ──────────────────────────────────────────────────────────────────────
 
@@ -1401,6 +1403,7 @@ func init() {
 	rootCmd.Flags().StringVar(&replImage, "image", "", "Image file path for multimodal input")
 	rootCmd.Flags().BoolVar(&replPlan, "plan", false, "Plan mode: review plan before code execution")
 	rootCmd.Flags().BoolVar(&replContinue, "continue", false, "Resume most recent session")
+	rootCmd.Flags().BoolVar(&replOffline, "offline", false, "Skip GitHub auth gate — for local-only use without internet")
 
 	rootCmd.AddCommand(initCmd, contextCmd, watchCmd, findCmd, impactCmd, deadCmd, circularCmd, graphCmd, lintCmd, tuiCmd, handoffCmd, hotspotsCmd, riskyCmd, couplingCmd, intentCmd, todosCmd, specGapsCmd, workspaceCmd, traceCmd, mcpCmd, lspCmd)
 

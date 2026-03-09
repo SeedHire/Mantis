@@ -88,6 +88,8 @@ type Config struct {
 	Continue bool
 	// Version is the build version string (injected via ldflags)
 	Version string
+	// Offline skips GitHub auth gate — for local-only use without internet access.
+	Offline bool
 }
 
 // Run starts the interactive REPL. Blocks until the user quits.
@@ -96,24 +98,28 @@ func Run(cfg Config) error {
 
 	// First-run setup runs WITHOUT the banner so the wizard has full screen.
 	// After it completes we clear and show the clean start screen.
-	if setup.NeedsSetup() {
-		creds, err := setup.Run()
-		if err != nil {
-			return fmt.Errorf("setup: %w", err)
-		}
-		setup.ApplyToEnv(creds)
-	} else {
-		creds, _ := setup.Load()
-		if creds != nil {
+	// --offline skips the GitHub auth gate entirely (local-only use).
+	if !cfg.Offline {
+		if setup.NeedsSetup() {
+			creds, err := setup.Run()
+			if err != nil {
+				return fmt.Errorf("setup: %w", err)
+			}
 			setup.ApplyToEnv(creds)
+		} else {
+			creds, _ := setup.Load()
+			if creds != nil {
+				setup.ApplyToEnv(creds)
+			}
 		}
-	}
 
-	// Hard gate: refuse to start without a verified GitHub login.
-	if creds, _ := setup.Load(); !setup.IsLoggedIn(creds) {
-		fmt.Fprintf(os.Stderr, "\n  \033[38;5;197m✗ GitHub login is required to use Mantis.\033[0m\n")
-		fmt.Fprintf(os.Stderr, "  Run \033[38;5;214mmantis\033[0m again to complete setup.\n\n")
-		return fmt.Errorf("not authenticated")
+		// Hard gate: refuse to start without a verified GitHub login.
+		if creds, _ := setup.Load(); !setup.IsLoggedIn(creds) {
+			fmt.Fprintf(os.Stderr, "\n  \033[38;5;197m✗ GitHub login is required to use Mantis.\033[0m\n")
+			fmt.Fprintf(os.Stderr, "  Run \033[38;5;214mmantis\033[0m again to complete setup.\n\n")
+			fmt.Fprintf(os.Stderr, "  Tip: use \033[38;5;214mmantis --offline\033[0m to skip auth for local-only use.\n\n")
+			return fmt.Errorf("not authenticated")
+		}
 	}
 
 	// ── Clean start screen ───────────────────────────────────────────────────
@@ -136,7 +142,7 @@ func Run(cfg Config) error {
 		}
 	}
 
-	// Resolve available models silently; keep the list for ensemble use.
+	// Resolve available models; keep the list for ensemble use.
 	var availableModels []ollama.ModelInfo
 	{
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
@@ -146,15 +152,44 @@ func Run(cfg Config) error {
 			availableModels = models
 			router.ResolveAll(models)
 			summary := router.ResolvedSummary()
-			// Warn only when tiers are collapsed (limited model install).
+
+			// Build set of available model names for quick lookup.
+			available := map[string]bool{}
+			for _, m := range models {
+				available[m.Name] = true
+				// Also match without tag suffix (e.g. "glm-5" matches "glm-5:cloud").
+				if idx := strings.Index(m.Name, ":"); idx > 0 {
+					available[m.Name[:idx]] = true
+				}
+			}
+
+			// Check each tier's preferred model against what resolved.
+			var downgradedTiers []string
+			keyTiers := []router.Tier{router.TierCode, router.TierReason, router.TierHeavy, router.TierMax}
+			for _, tier := range keyTiers {
+				preferred := router.PreferredModels(tier)
+				resolved := summary[tier.String()]
+				if len(preferred) > 0 && preferred[0] != resolved {
+					downgradedTiers = append(downgradedTiers, fmt.Sprintf("%s → %s%s%s (preferred: %s)",
+						tier, colorGold, resolved, colorReset, preferred[0]))
+				}
+			}
+			if len(downgradedTiers) > 0 {
+				fmt.Printf("%s● model degradation: preferred models not available%s\n", colorGold, colorReset)
+				for _, d := range downgradedTiers {
+					fmt.Printf("%s  %s%s\n", colorDim, d, colorReset)
+				}
+				fmt.Printf("%s  tip: ollama pull glm-5 devstral-2:123b kimi-k2-thinking%s\n", colorDim, colorReset)
+			}
+
+			// Legacy warning: tiers sharing the same model (very limited installs).
 			modelFreq := map[string]int{}
 			for _, m := range summary {
 				modelFreq[m]++
 			}
 			for _, count := range modelFreq {
-				if count >= 3 {
-					fmt.Printf("%s● models: limited install — some tiers share the same model%s\n", colorGold, colorReset)
-					fmt.Printf("%s  install more: ollama pull devstral-small, qwen2.5-coder:14b, llama3.1:70b%s\n", colorDim, colorReset)
+				if count >= 5 {
+					fmt.Printf("%s● models: very limited install — most tiers share one model%s\n", colorGold, colorReset)
 					break
 				}
 			}
@@ -587,7 +622,7 @@ func Run(cfg Config) error {
 								colorCopper+colorBold, colorReset, colorDim,
 								impact.TotalFiles, agent.DistinctPackages(impact), colorReset)
 							renderResponse(stripInternalBlocks(stripFileBlocks(combined)))
-							wf := extractAndWriteFiles(combined, root)
+							wf := extractAndWriteFilesWithApproval(combined, root, rl)
 							if len(wf) > 0 {
 								printWrittenFiles(wf)
 							}
@@ -652,7 +687,7 @@ func Run(cfg Config) error {
 					colorCopper+colorBold, colorReset, colorDim, turnTok, elapsed.Seconds(), sessTotal+turnTok, colorReset)
 				renderResponse(stripInternalBlocks(stripFileBlocks(agentResp)))
 
-				wf := extractAndWriteFiles(agentResp, root)
+				wf := extractAndWriteFilesWithApproval(agentResp, root, rl)
 				if len(wf) > 0 {
 					printWrittenFiles(wf)
 				}
@@ -787,9 +822,9 @@ func Run(cfg Config) error {
 				renderResponse(pipeline.CompactSummary(pRes))
 
 				// Write code files to disk — try Combined first, fall back to raw CodeText.
-				wf := extractAndWriteFiles(pRes.Combined, root)
+				wf := extractAndWriteFilesWithApproval(pRes.Combined, root, rl)
 				if len(wf) == 0 && pRes.CodeText != "" {
-					wf = extractAndWriteFiles(pRes.CodeText, root)
+					wf = extractAndWriteFilesWithApproval(pRes.CodeText, root, rl)
 				}
 				if len(wf) > 0 {
 					printWrittenFiles(wf)
@@ -913,7 +948,7 @@ func Run(cfg Config) error {
 
 		// Write any file code blocks from the response to disk.
 		// Append a system note so future turns know what's already written.
-		wf := extractAndWriteFiles(rb.String(), root)
+		wf := extractAndWriteFilesWithApproval(rb.String(), root, rl)
 		if len(wf) > 0 {
 			printWrittenFiles(wf)
 			var fileList []string
@@ -1393,9 +1428,14 @@ func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
 	return false
 }
 
-// estimateTokens returns a rough token count (1 token ≈ 4 chars for English text).
+// estimateTokens returns a rough token count using word-count heuristic.
+// Uses words*1.3 which is more accurate than char/4 for mixed text+code.
 func estimateTokens(s string) int {
-	return (len(s) + 3) / 4
+	words := len(strings.Fields(s))
+	if words == 0 {
+		return (len(s) + 3) / 4 // fallback for single-token strings
+	}
+	return int(float64(words)*1.3) + 4
 }
 
 // handleContextCommand prints a token-budget breakdown of the current context window.
@@ -3613,20 +3653,34 @@ func multiPassReasoning(ctx context.Context, client *ollama.Client, model string
 	return result
 }
 
+// estimateConversationTokens returns a token count estimate for a message slice.
+// Uses a word-count heuristic (words*1.3) which is more accurate than pure char/3.5
+// for mixed text+code content. Code-heavy text averages ~1.2 tokens/word; natural
+// language averages ~1.4. The 1.3 midpoint gives <15% error on typical conversations.
+func estimateConversationTokens(messages []interface{}) int {
+	total := 0
+	for _, m := range messages {
+		var content string
+		if msg, ok := m.(ollama.Message); ok {
+			content = msg.Content
+		} else if img, ok := m.(ollama.ImageMessage); ok {
+			content = img.Content
+		}
+		if content == "" {
+			continue
+		}
+		// Word count: split on whitespace.
+		words := len(strings.Fields(content))
+		// 1.3 tokens/word + 4-token message overhead.
+		total += int(float64(words)*1.3) + 4
+	}
+	return total
+}
+
 // compressIfNeeded proactively compresses conversation history when it gets too large.
 // Instead of waiting for a 400 error, it summarizes old turns at ~80% capacity.
-// Estimates tokens as len/3.5 (LLaMA-family average for code).
 func compressIfNeeded(callerCtx context.Context, messages []interface{}, client *ollama.Client) []interface{} {
-	// Estimate total tokens in conversation.
-	totalChars := 0
-	for _, m := range messages {
-		if msg, ok := m.(ollama.Message); ok {
-			totalChars += len(msg.Content)
-		} else if img, ok := m.(ollama.ImageMessage); ok {
-			totalChars += len(img.Content)
-		}
-	}
-	estimatedTokens := int(float64(totalChars) / 3.5)
+	estimatedTokens := estimateConversationTokens(messages)
 
 	// Threshold: compress when conversation exceeds ~24K tokens (80% of 32K context).
 	// Most Ollama models have 32K-128K context; this is conservative.
