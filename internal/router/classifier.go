@@ -38,36 +38,88 @@ type EmbedChunk struct {
 }
 
 // ── LRU cache ────────────────────────────────────────────────────────────────
+// True LRU using a doubly-linked list + map: O(1) get, O(1) put, LRU eviction.
 
 type cacheEntry struct {
 	tier Tier
 	conf float64
 }
 
-var (
-	routerCache   = map[string]cacheEntry{}
-	routerCacheMu sync.Mutex
-)
-
-func cacheGet(query string) (cacheEntry, bool) {
-	routerCacheMu.Lock()
-	e, ok := routerCache[query]
-	routerCacheMu.Unlock()
-	return e, ok
+type lruNode struct {
+	key        string
+	val        cacheEntry
+	prev, next *lruNode
 }
 
-func cachePut(query string, e cacheEntry) {
-	routerCacheMu.Lock()
-	if len(routerCache) >= cacheSize {
-		// Evict one random entry (good enough for this use case).
-		for k := range routerCache {
-			delete(routerCache, k)
-			break
-		}
+type lruCache struct {
+	mu       sync.Mutex
+	cap      int
+	items    map[string]*lruNode
+	head     *lruNode // most recently used sentinel
+	tail     *lruNode // least recently used sentinel
+}
+
+func newLRU(cap int) *lruCache {
+	h := &lruNode{}
+	t := &lruNode{}
+	h.next = t
+	t.prev = h
+	return &lruCache{cap: cap, items: make(map[string]*lruNode, cap), head: h, tail: t}
+}
+
+func (c *lruCache) get(key string) (cacheEntry, bool) {
+	c.mu.Lock()
+	n, ok := c.items[key]
+	if ok {
+		c.moveToFront(n)
 	}
-	routerCache[query] = e
-	routerCacheMu.Unlock()
+	c.mu.Unlock()
+	if !ok {
+		return cacheEntry{}, false
+	}
+	return n.val, true
 }
+
+func (c *lruCache) put(key string, val cacheEntry) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if n, ok := c.items[key]; ok {
+		n.val = val
+		c.moveToFront(n)
+		return
+	}
+	if len(c.items) >= c.cap {
+		// Evict LRU entry (node just before tail sentinel).
+		lru := c.tail.prev
+		c.remove(lru)
+		delete(c.items, lru.key)
+	}
+	n := &lruNode{key: key, val: val}
+	c.addToFront(n)
+	c.items[key] = n
+}
+
+func (c *lruCache) moveToFront(n *lruNode) {
+	c.remove(n)
+	c.addToFront(n)
+}
+
+func (c *lruCache) remove(n *lruNode) {
+	n.prev.next = n.next
+	n.next.prev = n.prev
+}
+
+func (c *lruCache) addToFront(n *lruNode) {
+	n.next = c.head.next
+	n.prev = c.head
+	c.head.next.prev = n
+	c.head.next = n
+}
+
+var routerLRU = newLRU(cacheSize)
+
+func cacheGet(query string) (cacheEntry, bool) { return routerLRU.get(query) }
+func cachePut(query string, e cacheEntry)      { routerLRU.put(query, e) }
 
 // ── Indexer ───────────────────────────────────────────────────────────────────
 

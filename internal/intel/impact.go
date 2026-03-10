@@ -111,7 +111,9 @@ func isIgnoredPath(path string) bool {
 
 type notFoundError struct{ name string }
 
-func (e *notFoundError) Error() string { return "not found: " + e.name }
+func (e *notFoundError) Error() string {
+	return "symbol not found: " + e.name + " → run 'mantis init' to rebuild the dependency graph"
+}
 
 // findFileNodeBySuffix finds a file node whose path ends with suffix.
 func findFileNodeBySuffix(q *graph.Querier, suffix string) (*graph.Node, error) {

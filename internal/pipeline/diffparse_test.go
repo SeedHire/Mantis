@@ -66,10 +66,10 @@ func TestApplyEdits_Success(t *testing.T) {
 	os.WriteFile(file, []byte("package main\n\nfunc old() {}\n"), 0o644)
 
 	edits := []EditBlock{{FilePath: "main.go", OldText: "func old() {}", NewText: "func new() {}"}}
-	modified, warnings := applyEdits(edits, root)
+	modified, skipped := applyEdits(edits, root)
 
-	if len(warnings) != 0 {
-		t.Errorf("unexpected warnings: %v", warnings)
+	if skipped != 0 {
+		t.Errorf("unexpected skips: %d", skipped)
 	}
 	if len(modified) != 1 {
 		t.Fatalf("expected 1 modified, got %d", len(modified))
@@ -86,13 +86,13 @@ func TestApplyEdits_NotFound(t *testing.T) {
 	os.WriteFile(filepath.Join(root, "f.go"), []byte("package main\n"), 0o644)
 
 	edits := []EditBlock{{FilePath: "f.go", OldText: "nonexistent", NewText: "replaced"}}
-	modified, warnings := applyEdits(edits, root)
+	modified, skipped := applyEdits(edits, root)
 
 	if len(modified) != 0 {
 		t.Errorf("expected 0 modified, got %d", len(modified))
 	}
-	if len(warnings) != 1 || !strings.Contains(warnings[0], "not found") {
-		t.Errorf("expected 'not found' warning, got %v", warnings)
+	if skipped != 1 {
+		t.Errorf("expected 1 skip for not-found, got %d", skipped)
 	}
 }
 
@@ -101,20 +101,39 @@ func TestApplyEdits_Ambiguous(t *testing.T) {
 	os.WriteFile(filepath.Join(root, "f.go"), []byte("foo bar foo"), 0o644)
 
 	edits := []EditBlock{{FilePath: "f.go", OldText: "foo", NewText: "baz"}}
-	_, warnings := applyEdits(edits, root)
+	_, skipped := applyEdits(edits, root)
 
-	if len(warnings) != 1 || !strings.Contains(warnings[0], "ambiguous") {
-		t.Errorf("expected ambiguous warning, got %v", warnings)
+	if skipped != 1 {
+		t.Errorf("expected 1 skip for ambiguous match, got %d", skipped)
 	}
 }
 
 func TestApplyEdits_PathTraversal(t *testing.T) {
 	root := t.TempDir()
 	edits := []EditBlock{{FilePath: "../../etc/passwd", OldText: "root", NewText: "evil"}}
-	_, warnings := applyEdits(edits, root)
+	_, skipped := applyEdits(edits, root)
 
-	if len(warnings) != 1 || !strings.Contains(warnings[0], "unsafe") {
-		t.Errorf("expected unsafe path warning, got %v", warnings)
+	if skipped != 1 {
+		t.Errorf("expected 1 skip for unsafe path, got %d", skipped)
+	}
+}
+
+// TestApplyEdits_FuzzyMatch verifies that whitespace-normalised SEARCH still applies.
+func TestApplyEdits_FuzzyMatch(t *testing.T) {
+	root := t.TempDir()
+	// File has extra spaces inside the function body.
+	content := "package main\n\nfunc  foo()  {\n  return\n}\n"
+	os.WriteFile(filepath.Join(root, "f.go"), []byte(content), 0o644)
+
+	// SEARCH text has single spaces (exact mismatch, fuzzy match).
+	edits := []EditBlock{{FilePath: "f.go", OldText: "func  foo()  {\n  return\n}", NewText: "func foo() { return }"}}
+	modified, skipped := applyEdits(edits, root)
+
+	if skipped != 0 {
+		t.Errorf("fuzzy match: expected 0 skips, got %d", skipped)
+	}
+	if len(modified) != 1 {
+		t.Errorf("fuzzy match: expected 1 modified, got %d", len(modified))
 	}
 }
 

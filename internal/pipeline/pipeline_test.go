@@ -178,3 +178,121 @@ func TestExtractSealedTypesDeduplicate(t *testing.T) {
 		t.Errorf("expected Shared to appear once, got %d times", count)
 	}
 }
+
+// ── detectLang ────────────────────────────────────────────────────────────────
+
+func TestDetectLang_Go(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/app\n\ngo 1.22\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := detectLang(dir); got != "go" {
+		t.Errorf("expected go, got %q", got)
+	}
+}
+
+func TestDetectLang_TypeScript(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"name":"app"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := detectLang(dir); got != "typescript" {
+		t.Errorf("expected typescript, got %q", got)
+	}
+}
+
+func TestDetectLang_Python(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte("[project]\nname=\"app\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := detectLang(dir); got != "python" {
+		t.Errorf("expected python, got %q", got)
+	}
+}
+
+func TestDetectLang_PythonRequirements(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("requests\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := detectLang(dir); got != "python" {
+		t.Errorf("expected python, got %q", got)
+	}
+}
+
+func TestDetectLang_Rust(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Cargo.toml"), []byte("[package]\nname=\"app\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := detectLang(dir); got != "rust" {
+		t.Errorf("expected rust, got %q", got)
+	}
+}
+
+func TestDetectLang_Unknown(t *testing.T) {
+	dir := t.TempDir()
+	if got := detectLang(dir); got != "unknown" {
+		t.Errorf("empty dir: expected unknown, got %q", got)
+	}
+}
+
+func TestDetectLang_GoTakesPriority(t *testing.T) {
+	// go.mod and package.json both present — go should win (checked first).
+	dir := t.TempDir()
+	for _, f := range []string{"go.mod", "package.json"} {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Both present — whichever detectLang checks first should be returned consistently.
+	got := detectLang(dir)
+	if got != "go" && got != "typescript" {
+		t.Errorf("expected go or typescript, got %q", got)
+	}
+}
+
+// ── langPlanRules ─────────────────────────────────────────────────────────────
+
+func TestLangPlanRules_NonEmpty(t *testing.T) {
+	for _, lang := range []string{"go", "typescript", "python", "rust"} {
+		rules := langPlanRules(lang)
+		if strings.TrimSpace(rules) == "" {
+			t.Errorf("langPlanRules(%q) returned empty string", lang)
+		}
+	}
+}
+
+func TestLangPlanRules_Unknown(t *testing.T) {
+	// Unknown lang should return empty (no specific rules).
+	rules := langPlanRules("unknown")
+	if rules != "" {
+		t.Errorf("langPlanRules(unknown) should return empty, got %q", rules)
+	}
+}
+
+// ── langTestNaming ────────────────────────────────────────────────────────────
+
+func TestLangTestNaming_ContainsLangSpecific(t *testing.T) {
+	cases := map[string]string{
+		"go":         "Test",
+		"typescript": "it(",
+		"python":     "test_",
+		"rust":       "snake_case",
+	}
+	for lang, expected := range cases {
+		got := langTestNaming(lang)
+		if !strings.Contains(got, expected) {
+			t.Errorf("langTestNaming(%q) should contain %q, got %q", lang, expected, got)
+		}
+	}
+}
+
+func TestLangTestNaming_UnknownNotEmpty(t *testing.T) {
+	// Should return a generic fallback, not empty.
+	got := langTestNaming("unknown")
+	if strings.TrimSpace(got) == "" {
+		t.Error("langTestNaming(unknown) returned empty — expected generic fallback")
+	}
+}

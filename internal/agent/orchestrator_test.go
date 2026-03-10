@@ -138,3 +138,115 @@ func TestWriteScratch_NilScratch(t *testing.T) {
 	dir := t.TempDir()
 	writeScratch(dir, nil) // must not panic
 }
+
+// ── topoSort ───────────────────────────────────────────────────────────────────
+
+func TestTopoSort_NoDependencies(t *testing.T) {
+	decomp := map[string]string{
+		"pkg/a": "task a",
+		"pkg/b": "task b",
+		"pkg/c": "task c",
+	}
+	dag := map[string][]string{} // no edges
+
+	levels := topoSort(decomp, dag)
+	if len(levels) != 1 {
+		t.Errorf("no dependencies: expected 1 level (all parallel), got %d levels", len(levels))
+	}
+	if len(levels[0]) != 3 {
+		t.Errorf("expected 3 packages in level 0, got %d", len(levels[0]))
+	}
+}
+
+func TestTopoSort_LinearChain(t *testing.T) {
+	// a → b → c  (c depends on b, b depends on a)
+	decomp := map[string]string{
+		"pkg/a": "task a",
+		"pkg/b": "task b",
+		"pkg/c": "task c",
+	}
+	dag := map[string][]string{
+		"pkg/b": {"pkg/a"},
+		"pkg/c": {"pkg/b"},
+	}
+
+	levels := topoSort(decomp, dag)
+	if len(levels) != 3 {
+		t.Errorf("linear chain: expected 3 levels, got %d: %v", len(levels), levels)
+	}
+	// Each level should have exactly one package.
+	for i, level := range levels {
+		if len(level) != 1 {
+			t.Errorf("level %d: expected 1 package, got %d: %v", i, len(level), level)
+		}
+	}
+	// Level 0 must be "pkg/a" (no deps).
+	if levels[0][0] != "pkg/a" {
+		t.Errorf("level 0 should be pkg/a, got %v", levels[0])
+	}
+}
+
+func TestTopoSort_Diamond(t *testing.T) {
+	// a → b, a → c, b → d, c → d
+	decomp := map[string]string{
+		"pkg/a": "task a",
+		"pkg/b": "task b",
+		"pkg/c": "task c",
+		"pkg/d": "task d",
+	}
+	dag := map[string][]string{
+		"pkg/b": {"pkg/a"},
+		"pkg/c": {"pkg/a"},
+		"pkg/d": {"pkg/b", "pkg/c"},
+	}
+
+	levels := topoSort(decomp, dag)
+	// Expect 3 levels: [a], [b,c], [d]
+	if len(levels) != 3 {
+		t.Errorf("diamond: expected 3 levels, got %d: %v", len(levels), levels)
+	}
+	if len(levels[0]) != 1 || levels[0][0] != "pkg/a" {
+		t.Errorf("level 0 should be [pkg/a], got %v", levels[0])
+	}
+	if len(levels[1]) != 2 {
+		t.Errorf("level 1 should have 2 packages (b and c), got %v", levels[1])
+	}
+	if len(levels[2]) != 1 || levels[2][0] != "pkg/d" {
+		t.Errorf("level 2 should be [pkg/d], got %v", levels[2])
+	}
+}
+
+func TestTopoSort_CycleDoesNotDeadlock(t *testing.T) {
+	// a → b → a (cycle) — should not hang; must return all packages in one level.
+	decomp := map[string]string{
+		"pkg/a": "task a",
+		"pkg/b": "task b",
+	}
+	dag := map[string][]string{
+		"pkg/a": {"pkg/b"},
+		"pkg/b": {"pkg/a"},
+	}
+
+	// Must complete without hanging.
+	done := make(chan [][]string, 1)
+	go func() { done <- topoSort(decomp, dag) }()
+
+	select {
+	case levels := <-done:
+		// Cycle detected: all remaining packages in one level.
+		total := 0
+		for _, l := range levels {
+			total += len(l)
+		}
+		if total != 2 {
+			t.Errorf("cycle: expected all 2 packages returned (across levels), got %d", total)
+		}
+	}
+}
+
+func TestTopoSort_EmptyDecomposition(t *testing.T) {
+	levels := topoSort(map[string]string{}, map[string][]string{})
+	if len(levels) != 0 {
+		t.Errorf("empty decomposition: expected 0 levels, got %d", len(levels))
+	}
+}

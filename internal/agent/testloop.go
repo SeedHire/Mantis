@@ -2,8 +2,11 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/seedhire/mantis/internal/ollama"
@@ -78,6 +81,7 @@ func (tl *TestLoop) Run(ctx context.Context) (*TestLoopResult, error) {
 			if len(fixSummaries) > 0 {
 				result.FixSummary = strings.Join(fixSummaries, "\n")
 			}
+			writeTestCheckpoint(tl.Root, iter+1, true, nil)
 			return result, nil
 		}
 
@@ -112,6 +116,8 @@ func (tl *TestLoop) Run(ctx context.Context) (*TestLoopResult, error) {
 		}
 		lastFailuresKey = currentKey
 		result.Failures = failures
+		// 8.5.2: Write checkpoint so next run can resume if the process crashes.
+		writeTestCheckpoint(tl.Root, iter+1, false, failures)
 
 		// ── Read failing source files ────────────────────────────────────
 		sourceContext := tl.readFailureContext(failures)
@@ -291,6 +297,14 @@ func (tl *TestLoop) promptFix(ctx context.Context, failures []TestFailure, sourc
 		if toolErrCount >= 3 {
 			return "aborted: too many tool errors", nil
 		}
+
+		// 7.4: Interleaved thinking — force model to reason before next tool call.
+		// Source: GLM-4.7 pattern. Reduces stuck loops by making the model
+		// explicitly reflect on what it learned before choosing the next action.
+		msgs = append(msgs, ollama.Message{
+			Role:    "user",
+			Content: "Before your next action, briefly state:\n1. What you learned from the tool result(s) above\n2. What you will do next and why",
+		})
 	}
 
 	return summary, nil
@@ -302,4 +316,29 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[len(s)-maxLen:] + "\n[truncated — showing last " + fmt.Sprintf("%d", maxLen) + " chars]"
+}
+
+// ── Checkpoint (8.5.2) ────────────────────────────────────────────────────────
+
+type testCheckpoint struct {
+	Iteration int           `json:"iteration"`
+	Passed    bool          `json:"passed"`
+	Remaining []TestFailure `json:"remaining"`
+}
+
+// writeTestCheckpoint persists the current test state to .mantis/testloop-state.json.
+// If the process crashes mid-loop, the next run can inspect this file and skip
+// re-running tests that already passed. Best-effort: errors are silently ignored.
+func writeTestCheckpoint(root string, iter int, passed bool, failures []TestFailure) {
+	if root == "" {
+		return
+	}
+	dir := filepath.Join(root, ".mantis")
+	_ = os.MkdirAll(dir, 0o755)
+	cp := testCheckpoint{Iteration: iter, Passed: passed, Remaining: failures}
+	data, err := json.Marshal(cp)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(dir, "testloop-state.json"), data, 0o644)
 }

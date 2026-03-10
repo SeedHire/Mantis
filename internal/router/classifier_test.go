@@ -126,6 +126,64 @@ func TestItoaMatchesFmt(t *testing.T) {
 	}
 }
 
+// ── LRU correctness ───────────────────────────────────────────────────────────
+
+// TestLRU_BasicEviction fills a cap-2 LRU, then adds a third entry and verifies
+// the least-recently-used entry is evicted.
+func TestLRU_BasicEviction(t *testing.T) {
+	c := newLRU(2)
+	c.put("a", cacheEntry{tier: TierFast, conf: 0.5})
+	c.put("b", cacheEntry{tier: TierCode, conf: 0.6})
+
+	// Access "a" to make it the most-recently-used.
+	if _, ok := c.get("a"); !ok {
+		t.Fatal("expected 'a' to be present")
+	}
+
+	// Add "c" — should evict "b" (LRU).
+	c.put("c", cacheEntry{tier: TierReason, conf: 0.7})
+
+	if _, ok := c.get("b"); ok {
+		t.Error("expected 'b' to be evicted (LRU), but it is still present")
+	}
+	if _, ok := c.get("a"); !ok {
+		t.Error("expected 'a' to remain (it was recently accessed)")
+	}
+	if _, ok := c.get("c"); !ok {
+		t.Error("expected 'c' to be present (just added)")
+	}
+}
+
+// TestLRU_UpdateExisting verifies that updating an existing key moves it to front
+// and does not grow the cache.
+func TestLRU_UpdateExisting(t *testing.T) {
+	c := newLRU(2)
+	c.put("x", cacheEntry{tier: TierFast, conf: 0.5})
+	c.put("y", cacheEntry{tier: TierCode, conf: 0.6})
+
+	// Re-insert "x" with a new value (should move it to front).
+	c.put("x", cacheEntry{tier: TierReason, conf: 0.9})
+
+	if len(c.items) != 2 {
+		t.Errorf("expected 2 items after update, got %d", len(c.items))
+	}
+	got, ok := c.get("x")
+	if !ok {
+		t.Fatal("expected 'x' after update")
+	}
+	if got.tier != TierReason {
+		t.Errorf("expected updated tier TierReason, got %v", got.tier)
+	}
+}
+
+// TestLRU_MissonEmpty confirms an empty LRU returns miss for any key.
+func TestLRU_MissOnEmpty(t *testing.T) {
+	c := newLRU(5)
+	if _, ok := c.get("nonexistent"); ok {
+		t.Error("empty LRU should return miss for any key")
+	}
+}
+
 // ── Cache round-trip ──────────────────────────────────────────────────────────
 
 // TestCacheRoundTrip verifies cacheGet/cachePut store and retrieve entries.

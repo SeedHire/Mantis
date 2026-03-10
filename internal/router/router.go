@@ -13,6 +13,7 @@ package router
 
 import (
 	"context"
+	"os"
 	"strings"
 	"sync"
 
@@ -40,13 +41,23 @@ func (t Tier) String() string {
 	return names[t]
 }
 
+// EditFormat specifies the preferred code edit format for the resolved model.
+type EditFormat string
+
+const (
+	EditFormatSearchReplace EditFormat = "search-replace" // SEARCH/REPLACE blocks (capable models ≥24B)
+	EditFormatWholeFile     EditFormat = "whole-file"     // full file output (small models 7-13B)
+	EditFormatUnifiedDiff   EditFormat = "unified-diff"   // unified diff (large reasoning models)
+)
+
 // Intent holds the routing decision for a user message.
 type Intent struct {
 	Tier        Tier
-	TaskType    string // the detected sub-type
+	TaskType    string     // the detected sub-type
 	NeedsGraph  bool
 	NeedsVision bool
 	Confidence  float64
+	EditFormat  EditFormat // 7.9: model-aware edit format
 }
 
 // ── Model preference lists ────────────────────────────────────────────────────
@@ -355,6 +366,31 @@ func SetResolved(tier Tier, model string) {
 	resolvedModelsMu.Unlock()
 }
 
+// ContextWindowFor returns the recommended NumCtx for the given model name.
+// Models with large advertised context windows get larger NumCtx values.
+// Defaults to 32768 for unknown/small models.
+func ContextWindowFor(model string) int {
+	lower := strings.ToLower(model)
+	switch {
+	case strings.Contains(lower, "gemini-3-flash"):
+		return 131072 // 128K — practical cap even though model supports 1M
+	case strings.Contains(lower, "devstral-2"),
+		strings.Contains(lower, "qwen3-coder"),
+		strings.Contains(lower, "kimi-k2"),
+		strings.Contains(lower, "mistral-large-3"),
+		strings.Contains(lower, "deepseek-v3.1"):
+		return 65536 // 64K — these support 256K but 64K balances RAM/speed
+	case strings.Contains(lower, "glm-5"),
+		strings.Contains(lower, "glm-4.7"),
+		strings.Contains(lower, "deepseek-r1:70b"),
+		strings.Contains(lower, "deepseek-r1:32b"),
+		strings.Contains(lower, "llama3.3:70b"):
+		return 49152 // 48K
+	default:
+		return 32768 // 32K — safe default for small local models
+	}
+}
+
 // ResolvedSummary returns a human-readable mapping of tier → resolved model.
 func ResolvedSummary() map[string]string {
 	summary := make(map[string]string)
@@ -362,6 +398,29 @@ func ResolvedSummary() map[string]string {
 		summary[tier.String()] = ModelFor(tier)
 	}
 	return summary
+}
+
+// EditFormatForTier returns the best edit format for a given tier.
+// TierFast (7-13B models): whole-file (simpler, more reliable).
+// TierMax (large reasoning): unified diff (most expressive).
+// Everything else: SEARCH/REPLACE blocks.
+func EditFormatForTier(t Tier) EditFormat {
+	switch t {
+	case TierTrivial, TierFast:
+		return EditFormatWholeFile
+	case TierMax:
+		return EditFormatUnifiedDiff
+	default:
+		return EditFormatSearchReplace
+	}
+}
+
+// DraftModel returns the speculative decoding draft model if configured via
+// MANTIS_DRAFT_MODEL env var. Returns empty string when not set (disables feature).
+// Usage: set MANTIS_DRAFT_MODEL=qwen2.5-coder:7b to pair a small local draft model
+// with larger cloud models for up to 4x speedup on structured outputs.
+func DraftModel() string {
+	return strings.TrimSpace(os.Getenv("MANTIS_DRAFT_MODEL"))
 }
 
 // isQuantized returns true if the model name suggests a quantized variant (q4, q5, q8, etc).

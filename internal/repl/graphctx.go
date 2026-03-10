@@ -130,8 +130,13 @@ func graphContextFor(files []string, root string, querier *graph.Querier) (conte
 	var sb strings.Builder
 	sb.WriteString("<graph_context>\n")
 
+	rootClean := filepath.Clean(root) + string(filepath.Separator)
 	for _, n := range neighbors {
-		abs := filepath.Join(root, n.path)
+		abs := filepath.Clean(filepath.Join(root, n.path))
+		// Prevent path traversal — only read files inside project root.
+		if !strings.HasPrefix(abs, rootClean) {
+			continue
+		}
 		snippet := readFileHead(abs, 30)
 		if snippet == "" {
 			continue

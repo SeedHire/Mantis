@@ -517,6 +517,38 @@ func printWrittenFiles(files []WrittenFile) {
 	fmt.Println()
 }
 
+// printWrittenFilesCapped prints at most `cap` files and summarises the rest.
+// It also prints a /undo hint so users know how to revert.
+func printWrittenFilesCapped(files []WrittenFile, cap int) {
+	if len(files) == 0 {
+		return
+	}
+	shown := files
+	overflow := 0
+	if len(files) > cap {
+		shown = files[:cap]
+		overflow = len(files) - cap
+	}
+	for _, f := range shown {
+		icon := "✚"
+		if !f.Created {
+			icon = "✎"
+		}
+		fmt.Printf("%s%s %s%s\n", colorGreen, icon, f.Path, colorReset)
+		if f.Diff != "" {
+			for _, line := range strings.Split(f.Diff, "\n") {
+				fmt.Printf("   %s\n", line)
+			}
+		}
+	}
+	if overflow > 0 {
+		fmt.Printf("%s  … and %d more file(s) · see .mantis/last-pipeline.md%s\n",
+			colorDim, overflow, colorReset)
+	}
+	fmt.Printf("%s  %d file(s) written · /undo to revert all%s\n\n",
+		colorDim, len(files), colorReset)
+}
+
 // stripFileBlocks removes fenced code blocks that are tagged with a file path
 // (i.e., blocks that extractAndWriteFiles will write to disk) from a response,
 // replacing them with a compact single-line notice so the terminal stays clean.

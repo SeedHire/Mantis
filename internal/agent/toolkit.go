@@ -80,13 +80,15 @@ type ApprovalFunc func(prompt string) bool
 // AgentToolkit provides typed tool access for coding agents.
 // All file and bash operations are scoped to projectRoot for safety.
 type AgentToolkit struct {
-	projectRoot string
-	querier     *graph.Querier
-	embStore    *embeddings.Store
-	fileMu      sync.Mutex            // guards WriteFile against parallel worker races
-	ApproveFunc ApprovalFunc          // if set, git write ops require approval
-	readTimes   map[string]time.Time  // stale-read detection: path → mtime at last read
-	staleMu     sync.Mutex            // guards readTimes
+	projectRoot    string
+	querier        *graph.Querier
+	embStore       *embeddings.Store
+	fileMu         sync.Mutex            // guards WriteFile against parallel worker races
+	ApproveFunc    ApprovalFunc          // if set, git write ops require approval
+	readTimes      map[string]time.Time  // stale-read detection: path → mtime at last read
+	staleMu        sync.Mutex            // guards readTimes
+	bashFailCount  int                   // 7.3: consecutive bash failure counter
+	bashFailMu     sync.Mutex            // guards bashFailCount
 }
 
 // NewToolkit creates a toolkit bound to the given project root.
@@ -236,13 +238,104 @@ func (t *AgentToolkit) RunBash(cmd string, timeoutSec int) (output string, exitC
 	return out, exitCode
 }
 
-// SearchCodebase performs hybrid semantic + BM25 search over the codebase.
-func (t *AgentToolkit) SearchCodebase(ctx context.Context, query string, limit int) ([]embeddings.Chunk, error) {
-	if t.embStore == nil {
-		return nil, fmt.Errorf("embeddings store not available")
-	}
+// SearchCodebase dispatches to one of three retrieval tiers based on searchType:
+//   - "symbol"   → graph querier symbol lookup (finds structs/functions by name)
+//   - "path"     → glob file search by path pattern
+//   - "semantic" → hybrid BM25 + cosine embedding search (default)
+//   - "auto"     → heuristically picks the best tier from the query shape
+//
+// Source: Cline/Roo-Code three-tier retrieval architecture.
+func (t *AgentToolkit) SearchCodebase(ctx context.Context, query, searchType string, limit int) ([]embeddings.Chunk, error) {
 	if limit <= 0 {
 		limit = 5
+	}
+
+	// Auto-detect: symbol name (no spaces, PascalCase/snake_case) → symbol tier;
+	// path pattern (contains / or *) → path tier; else → semantic.
+	if searchType == "" || searchType == "auto" {
+		switch {
+		case strings.Contains(query, "/") || strings.Contains(query, "*"):
+			searchType = "path"
+		case !strings.Contains(query, " ") && len(query) > 2:
+			searchType = "symbol"
+		default:
+			searchType = "semantic"
+		}
+	}
+
+	switch searchType {
+	case "symbol":
+		if t.querier == nil {
+			// Graceful fallback to semantic if graph unavailable.
+			return t.searchSemantic(ctx, query, limit)
+		}
+		nodes, err := t.querier.FindNodeByName(query)
+		if err != nil || len(nodes) == 0 {
+			return t.searchSemantic(ctx, query, limit) // fallback
+		}
+		var chunks []embeddings.Chunk
+		for _, n := range nodes {
+			if len(chunks) >= limit {
+				break
+			}
+			src := ""
+			if data, err := os.ReadFile(n.FilePath); err == nil {
+				src = string(data)
+				if len(src) > 1000 {
+					src = src[:1000]
+				}
+			}
+			chunks = append(chunks, embeddings.Chunk{
+				ID:           n.ID,
+				Source:       n.FilePath,
+				SectionLabel: string(n.Type) + ":" + n.Name,
+				Text:         src,
+				Score:        1.0,
+			})
+		}
+		return chunks, nil
+
+	case "path":
+		pattern := query
+		if !filepath.IsAbs(pattern) {
+			pattern = filepath.Join(t.projectRoot, "**", pattern)
+		}
+		matches, err := filepath.Glob(pattern)
+		if err != nil || len(matches) == 0 {
+			// Try simpler join if double-star glob didn't work.
+			matches, _ = filepath.Glob(filepath.Join(t.projectRoot, pattern))
+		}
+		var chunks []embeddings.Chunk
+		for i, m := range matches {
+			if i >= limit {
+				break
+			}
+			data, err := os.ReadFile(m)
+			if err != nil {
+				continue
+			}
+			preview := string(data)
+			if len(preview) > 600 {
+				preview = preview[:600]
+			}
+			rel, _ := filepath.Rel(t.projectRoot, m)
+			chunks = append(chunks, embeddings.Chunk{
+				Source: rel,
+				Text:   preview,
+				Score:  1.0,
+			})
+		}
+		return chunks, nil
+
+	default: // "semantic"
+		return t.searchSemantic(ctx, query, limit)
+	}
+}
+
+// searchSemantic is the existing hybrid BM25+cosine search path.
+func (t *AgentToolkit) searchSemantic(ctx context.Context, query string, limit int) ([]embeddings.Chunk, error) {
+	if t.embStore == nil {
+		return nil, fmt.Errorf("embeddings store not available → run 'mantis init' to enable semantic search")
 	}
 	return t.embStore.SearchHybrid(ctx, query, limit)
 }
@@ -268,7 +361,7 @@ func (t *AgentToolkit) EditFile(path, oldString, newString string) error {
 	content := string(data)
 	count := strings.Count(content, oldString)
 	if count == 0 {
-		return fmt.Errorf("edit_file: old_string not found in %s", path)
+		return fmt.Errorf("edit_file: old_string not found in %s → re-read the file first to confirm the exact text", path)
 	}
 	if count > 1 {
 		return fmt.Errorf("edit_file: old_string matches %d times in %s — be more specific", count, path)
@@ -324,7 +417,7 @@ func (t *AgentToolkit) RunTests(packages string, timeoutSec int) (string, int) {
 // FindSymbol looks up a symbol by name in the dependency graph.
 func (t *AgentToolkit) FindSymbol(name string) ([]*graph.Node, error) {
 	if t.querier == nil {
-		return nil, fmt.Errorf("graph querier not available")
+		return nil, fmt.Errorf("graph not available → run 'mantis init' in the project root to build the dependency graph")
 	}
 	return t.querier.FindNodeByName(name)
 }
@@ -458,6 +551,104 @@ func (t *AgentToolkit) checkStale(abs string) error {
 	return nil
 }
 
+// ── 7.3: ACI guardrails ───────────────────────────────────────────────────────
+
+// lintBeforeWrite runs a quick syntax check on content based on file extension.
+// Returns a user-friendly error message if syntax is invalid, empty string if OK.
+// Source: SWE-agent ACI pattern — catch syntax errors before disk write.
+func lintBeforeWrite(path, content string) string {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".go":
+		return lintGo(path, content)
+	case ".json":
+		return lintJSON(path, content)
+	default:
+		return "" // no linter available — allow write
+	}
+}
+
+// lintGo shells out to `gofmt` to check Go syntax without modifying the file.
+func lintGo(path, content string) string {
+	cmd := exec.Command("gofmt", "-e")
+	cmd.Stdin = strings.NewReader(content)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	cmd.Stdout = nil // discard formatted output
+	if err := cmd.Run(); err != nil {
+		msg := stderr.String()
+		if msg == "" {
+			msg = err.Error()
+		}
+		// Extract first error line for the model.
+		lines := strings.SplitN(msg, "\n", 4)
+		preview := strings.Join(lines, "\n")
+		return fmt.Sprintf("SYNTAX_ERROR in %s:\n%s\nFix the syntax error before writing.", path, preview)
+	}
+	return ""
+}
+
+// lintJSON validates JSON syntax.
+func lintJSON(path, content string) string {
+	if !json.Valid([]byte(content)) {
+		return fmt.Sprintf("SYNTAX_ERROR in %s: invalid JSON — check for missing commas, brackets, or trailing commas.", path)
+	}
+	return ""
+}
+
+// structuredBashError wraps raw bash stderr with a structured hint.
+// Source: SWE-agent ACI — structured error feedback reduces compounding errors.
+func structuredBashError(cmd string, exitCode int, output string) string {
+	var hint string
+	lower := strings.ToLower(output)
+
+	switch {
+	case strings.Contains(lower, "undefined:") || strings.Contains(lower, "undeclared name"):
+		hint = "HINT: undefined symbol — check for missing import or typo in variable/function name"
+	case strings.Contains(lower, "cannot find module") || strings.Contains(lower, "module not found"):
+		hint = "HINT: missing module — run 'go mod tidy' or check the import path"
+	case strings.Contains(lower, "syntax error") || strings.Contains(lower, "expected"):
+		hint = "HINT: syntax error — check for missing brackets, semicolons, or mismatched delimiters"
+	case strings.Contains(lower, "permission denied"):
+		hint = "HINT: permission denied — check file permissions or try a different path"
+	case strings.Contains(lower, "no such file or directory"):
+		hint = "HINT: file not found — verify the path exists (use read_file or search_codebase to confirm)"
+	case strings.Contains(lower, "connection refused") || strings.Contains(lower, "timeout"):
+		hint = "HINT: network error — the service may not be running or the port may be wrong"
+	case strings.Contains(lower, "already exists"):
+		hint = "HINT: resource already exists — check if you need to update instead of create"
+	case strings.Contains(lower, "type mismatch") || strings.Contains(lower, "cannot use"):
+		hint = "HINT: type error — check that argument types match the function signature"
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "COMMAND_FAILED: exit %d\n", exitCode)
+	if hint != "" {
+		sb.WriteString(hint)
+		sb.WriteString("\n")
+	}
+	sb.WriteString("OUTPUT:\n")
+	sb.WriteString(output)
+	return sb.String()
+}
+
+// bashFailureGuard checks consecutive bash failures and returns a stop prompt
+// if the threshold is reached. Returns empty string if under threshold.
+func (t *AgentToolkit) bashFailureGuard(failed bool) string {
+	t.bashFailMu.Lock()
+	defer t.bashFailMu.Unlock()
+	if failed {
+		t.bashFailCount++
+		if t.bashFailCount >= 3 {
+			t.bashFailCount = 0 // reset so model gets another chance
+			return "STOP: 3 consecutive bash commands have failed. Before taking another action, explain what you are trying to accomplish and what went wrong. Then try a different approach."
+		}
+	} else {
+		t.bashFailCount = 0
+	}
+	return ""
+}
+
 // ── Ollama tool definitions ───────────────────────────────────────────────────
 
 // Tools returns the Ollama tool definitions for this toolkit.
@@ -514,12 +705,13 @@ func (t *AgentToolkit) Tools() []ollama.Tool {
 			Type: "function",
 			Function: ollama.ToolFunction{
 				Name:        "search_codebase",
-				Description: "Semantic + keyword search over the codebase. Returns relevant file snippets.",
+				Description: "Search the codebase using one of three tiers: symbol (find structs/functions by name), path (glob file search), semantic (natural language). Auto-detects the best tier when search_type is omitted.",
 				Parameters: rawJSON(`{
 					"type": "object",
 					"properties": {
-						"query": {"type":"string","description":"Natural language or keyword search query"},
-						"limit": {"type":"integer","description":"Max results to return (default 5)"}
+						"query":       {"type":"string","description":"Search query: symbol name, path glob, or natural language"},
+						"search_type": {"type":"string","enum":["auto","semantic","symbol","path"],"description":"Search tier. auto (default) picks based on query shape."},
+						"limit":       {"type":"integer","description":"Max results to return (default 5)"}
 					},
 					"required": ["query"]
 				}`),
@@ -657,6 +849,10 @@ func (t *AgentToolkit) Dispatch(ctx context.Context, toolName string, argsRaw js
 		if err := json.Unmarshal(argsRaw, &args); err != nil {
 			return "", fmt.Errorf("bad args: %w", err)
 		}
+		// 7.3: Lint before write — catch syntax errors before disk write.
+		if lintErr := lintBeforeWrite(args.Path, args.Content); lintErr != "" {
+			return lintErr, nil // return as tool output, not error — model can fix and retry
+		}
 		if err := t.WriteFile(args.Path, args.Content); err != nil {
 			return "", err
 		}
@@ -672,19 +868,26 @@ func (t *AgentToolkit) Dispatch(ctx context.Context, toolName string, argsRaw js
 		}
 		out, code := t.RunBash(args.Command, args.TimeoutSec)
 		if code != 0 {
-			return fmt.Sprintf("exit %d\n%s", code, out), nil
+			// 7.3: Structured error hints + consecutive failure tracking.
+			structured := structuredBashError(args.Command, code, out)
+			if guard := t.bashFailureGuard(true); guard != "" {
+				structured += "\n\n" + guard
+			}
+			return structured, nil
 		}
+		t.bashFailureGuard(false) // reset on success
 		return out, nil
 
 	case "search_codebase":
 		var args struct {
-			Query string `json:"query"`
-			Limit int    `json:"limit"`
+			Query      string `json:"query"`
+			SearchType string `json:"search_type"`
+			Limit      int    `json:"limit"`
 		}
 		if err := json.Unmarshal(argsRaw, &args); err != nil {
 			return "", fmt.Errorf("bad args: %w", err)
 		}
-		chunks, err := t.SearchCodebase(ctx, args.Query, args.Limit)
+		chunks, err := t.SearchCodebase(ctx, args.Query, args.SearchType, args.Limit)
 		if err != nil {
 			return "", err
 		}
@@ -709,6 +912,14 @@ func (t *AgentToolkit) Dispatch(ctx context.Context, toolName string, argsRaw js
 		}
 		if err := t.EditFile(args.Path, args.OldString, args.NewString); err != nil {
 			return "", err
+		}
+		// 7.3: Lint after edit — verify the resulting file is syntactically valid.
+		if abs, pathErr := t.safePath(args.Path); pathErr == nil {
+			if data, readErr := os.ReadFile(abs); readErr == nil {
+				if lintErr := lintBeforeWrite(args.Path, string(data)); lintErr != "" {
+					return fmt.Sprintf("edited %s — WARNING: %s", args.Path, lintErr), nil
+				}
+			}
 		}
 		return fmt.Sprintf("edited %s", args.Path), nil
 

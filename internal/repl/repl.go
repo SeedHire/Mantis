@@ -29,6 +29,7 @@ import (
 	"github.com/seedhire/mantis/internal/embeddings"
 	"github.com/seedhire/mantis/internal/graph"
 	"github.com/seedhire/mantis/internal/intel"
+	"github.com/seedhire/mantis/internal/parser"
 	"github.com/seedhire/mantis/internal/nl"
 	"github.com/seedhire/mantis/internal/ollama"
 	"github.com/seedhire/mantis/internal/pipeline"
@@ -145,9 +146,21 @@ func Run(cfg Config) error {
 	// Resolve available models; keep the list for ensemble use.
 	var availableModels []ollama.ModelInfo
 	{
+		fmt.Printf("%s  connecting to Ollama...%s", colorDim, colorReset)
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		models, err := client.ListModels(ctx)
 		cancel()
+		fmt.Printf("\r%s                          %s\r", colorDim, colorReset) // clear line
+		if err != nil {
+			if strings.Contains(err.Error(), "connection refused") || strings.Contains(err.Error(), "dial") {
+				fmt.Printf("\033[38;5;196m● Ollama is not running — start it with: ollama serve\033[0m\n")
+				fmt.Printf("%s  mantis requires Ollama for model inference%s\n", colorDim, colorReset)
+			} else {
+				fmt.Printf("%s● could not list models: %v%s\n", colorGold, err, colorReset)
+			}
+		} else if len(models) == 0 {
+			fmt.Printf("\033[38;5;196m● No models installed — install one with: ollama pull qwen3-coder\033[0m\n")
+		}
 		if err == nil && len(models) > 0 {
 			availableModels = models
 			router.ResolveAll(models)
@@ -175,11 +188,16 @@ func Run(cfg Config) error {
 				}
 			}
 			if len(downgradedTiers) > 0 {
-				fmt.Printf("%s● model degradation: preferred models not available%s\n", colorGold, colorReset)
+				fmt.Printf("%s● running on local fallback models (preferred tier unavailable)%s\n", colorGold, colorReset)
 				for _, d := range downgradedTiers {
-					fmt.Printf("%s  %s%s\n", colorDim, d, colorReset)
+					// Strip the "(preferred: X)" suffix — not actionable for the user.
+					line := d
+					if idx := strings.Index(line, " (preferred:"); idx > 0 {
+						line = line[:idx]
+					}
+					fmt.Printf("%s  %s%s\n", colorDim, line, colorReset)
 				}
-				fmt.Printf("%s  tip: ollama pull glm-5 devstral-2:123b kimi-k2-thinking%s\n", colorDim, colorReset)
+				fmt.Printf("%s  set MANTIS_CLOUD_KEY to unlock cloud tier%s\n", colorDim, colorReset)
 			}
 
 			// Legacy warning: tiers sharing the same model (very limited installs).
@@ -201,7 +219,7 @@ func Run(cfg Config) error {
 	if !b.Exists() {
 		_ = b.Init()
 	}
-	brainContext := b.Load()
+	brainContext := b.LoadHot() // 7.5: hot tier only; cold memory retrieved on-demand
 	conventions := verify.ParseConventions(b.ReadFile("CONVENTIONS.md"))
 
 	// Semantic embeddings — optional, used for memory retrieval + router classifier.
@@ -244,6 +262,7 @@ func Run(cfg Config) error {
 	usageTracker := usage.New()
 	tlog := telemetry.New()
 	sessID := fmt.Sprintf("%d", time.Now().UnixMilli())
+	evLog := NewEventLog(mantisDir, sessID)       // event log: EVENTS.jsonl for /replay
 	if creds != nil && creds.GitHubUser != "" {
 		tlog.SetUser(creds.GitHubUser, "v0.3.0")
 	}
@@ -335,9 +354,14 @@ func Run(cfg Config) error {
 		readline.PcItem("/context"),
 		readline.PcItem("/fetch"),
 		readline.PcItem("/search"),
+		readline.PcItem("/ask"),
+		readline.PcItem("/replay"),
+		readline.PcItem("/benchmark"),
 		readline.PcItem("/test"),
+		readline.PcItem("/index"),
 		readline.PcItem("/commit"),
 		readline.PcItem("/pr"),
+		readline.PcItem("/git-log"),
 		readline.PcItem("/undo"),
 		readline.PcItem("/quit"),
 	)
@@ -360,6 +384,9 @@ func Run(cfg Config) error {
 		return runWithScanner(cfg, client, sess, b, dispatcher, messages, truthWriter, usageTracker, routerStore, webFetcher)
 	}
 	defer rl.Close()
+
+	// 8.5.3: Check for unfinished pipeline progress from a prior session.
+	checkUnfinishedProgress(mantisDir, rl)
 
 	// ── Soft-interrupt state ─────────────────────────────────────────────────
 	// Ctrl+C during generation cancels the current stream (soft).
@@ -440,7 +467,8 @@ func Run(cfg Config) error {
 
 		// Slash commands.
 		if strings.HasPrefix(input, "/") {
-			if quit := handleSlashCommand(input, sess, b, &messages, client, &brainContext, &planMode, cfg, webFetcher, opLog); quit {
+			evLog.RecordSlashCommand(turn, strings.Fields(input)[0])
+			if quit := handleSlashCommand(input, sess, b, &messages, client, &brainContext, &planMode, cfg, webFetcher, opLog, embStore); quit {
 				break
 			}
 			continue
@@ -465,6 +493,7 @@ func Run(cfg Config) error {
 		model := router.ModelFor(intent.Tier)
 		turn++
 		turnStart := time.Now()
+		evLog.RecordUserMessage(turn, input)
 
 		// Per-turn context — cancelled by Ctrl+C (setActiveCancel) or at turn end.
 		// All sub-operations (agent, pipeline, stream, verify) derive from this,
@@ -581,7 +610,7 @@ func Run(cfg Config) error {
 			if dispatcher != nil && dispatcher.IsAvailable() {
 				graphQuerier = dispatcher.Querier()
 			}
-			if ctxMsg := contextMessageFor(input, root, brainContext, truthWriter, graphQuerier, autoReadFiles); ctxMsg != nil {
+			if ctxMsg := contextMessageFor(turnCtx, input, root, brainContext, truthWriter, graphQuerier, embStore, autoReadFiles); ctxMsg != nil {
 				// Merge context injection with enriched userContent (build output, project files).
 				if msg, ok := ctxMsg.(ollama.Message); ok {
 					msg.Content = strings.Replace(msg.Content, "\n\nNow answer: "+input, "\n\nNow answer: "+userContent, 1)
@@ -615,6 +644,12 @@ func Run(cfg Config) error {
 					if impact, err := intel.Impact(querier, target, 5); err == nil &&
 						agent.ShouldRunMultiAgent(impact) {
 						toolkit := agent.NewToolkit(root, querier, embStore)
+						// Wire approval gate so git ops inside sub-agents never panic on nil ApproveFunc.
+						toolkit.ApproveFunc = func(desc string) bool {
+							fmt.Printf("%s\u26a0\ufe0f  Agent wants to: %s%s\n  Approve? [y/N] ", colorGold, desc, colorReset)
+							line, _ := rl.Readline()
+							return strings.TrimSpace(strings.ToLower(line)) == "y"
+						}
 						agentCtx, agentCancel := context.WithTimeout(turnCtx, 15*time.Minute)
 						combined, agentErr := agent.Run(
 							agentCtx, input, impact, toolkit, client,
@@ -826,13 +861,26 @@ func Run(cfg Config) error {
 				}
 				renderResponse(pipeline.CompactSummary(pRes))
 
-				// Write code files to disk — try Combined first, fall back to raw CodeText.
-				wf := extractAndWriteFilesWithApproval(pRes.Combined, root, rl, approvalCache, opLog)
-				if len(wf) == 0 && pRes.CodeText != "" {
-					wf = extractAndWriteFilesWithApproval(pRes.CodeText, root, rl, approvalCache, opLog)
-				}
-				if len(wf) > 0 {
-					printWrittenFiles(wf)
+				// P9.6: task-based pipeline already wrote all files during execution.
+				// Re-extracting Combined would replay the same edit blocks against
+				// already-modified files, producing duplicate ⚠ SEARCH warnings.
+				// Use the WrittenFiles list from task execution directly instead.
+				var wf []WrittenFile
+				if len(pRes.WrittenFiles) > 0 {
+					for _, p := range pRes.WrittenFiles {
+						wf = append(wf, WrittenFile{Path: p})
+					}
+					// P9.9: cap the preview to 5 files + show /undo hint.
+					printWrittenFilesCapped(wf, 5)
+				} else {
+					// Fallback: non-task-based pipeline (monolithic path).
+					wf = extractAndWriteFilesWithApproval(pRes.Combined, root, rl, approvalCache, opLog)
+					if len(wf) == 0 && pRes.CodeText != "" {
+						wf = extractAndWriteFilesWithApproval(pRes.CodeText, root, rl, approvalCache, opLog)
+					}
+					if len(wf) > 0 {
+						printWrittenFilesCapped(wf, 5)
+					}
 				}
 				messages = append(messages, ollama.Message{Role: "assistant", Content: pRes.Combined})
 				// Verify build and auto-fix if needed (uses background ctx so not bounded by streamCtx).
@@ -923,7 +971,12 @@ func Run(cfg Config) error {
 				turnCancel()
 				continue
 			}
-			fmt.Printf("\n%s⚠ %v%s\n\n", colorRed, streamErr, colorReset)
+			errStr := streamErr.Error()
+			if strings.Contains(errStr, "connection refused") || strings.Contains(errStr, "dial tcp") {
+				fmt.Printf("\n\033[38;5;196m⚠ Ollama is not running — start it with: ollama serve\033[0m\n\n")
+			} else {
+				fmt.Printf("\n%s⚠ %v%s\n\n", colorRed, streamErr, colorReset)
+			}
 			tlog.Log(telemetry.Event{
 				SessionID:    sessID,
 				Turn:         turn,
@@ -967,6 +1020,7 @@ func Run(cfg Config) error {
 		}
 
 		messages = append(messages, ollama.Message{Role: "assistant", Content: rb.String()})
+		evLog.RecordModelResponse(turn, model, intent.Tier.String(), rb.String())
 
 		// Verify build and auto-fix errors up to 2 times.
 		wf = verifyAndFix(turnCtx, client, model, intent.Tier, root, wf, &messages)
@@ -1215,7 +1269,7 @@ func runOnce(cfg Config, client *ollama.Client, sess *session.Session,
 }
 
 func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
-	messages *[]interface{}, client *ollama.Client, brainContext *string, planMode *bool, cfg Config, webFetcher *web.Fetcher, oplog *OperationLog) (quit bool) {
+	messages *[]interface{}, client *ollama.Client, brainContext *string, planMode *bool, cfg Config, webFetcher *web.Fetcher, oplog *OperationLog, embStore *embeddings.Store) (quit bool) {
 
 	parts := strings.Fields(input)
 	cmd := parts[0]
@@ -1271,7 +1325,7 @@ func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
 			fmt.Printf("%s● MANTIS.md written  %s(%.1fs)%s\n\n", colorGreen, colorDim, time.Since(initStart).Seconds(), colorReset)
 			renderResponse(generated)
 			// Reload brain context so the new MANTIS.md takes effect immediately.
-			*brainContext = b.Load()
+			*brainContext = b.LoadHot()
 			*messages = []interface{}{
 				ollama.Message{Role: "system", Content: buildSystemPrompt(*brainContext, b.LoadSkillsForTask("implement", 20000), router.TierCode)},
 			}
@@ -1420,6 +1474,42 @@ func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
 				}
 			}
 		}
+	case "/replay":
+		sid := ""
+		if len(parts) >= 2 {
+			sid = parts[1]
+		}
+		root, _ := os.Getwd()
+		ReplaySession(filepath.Join(root, ".mantis"), sid)
+		fmt.Println()
+	case "/benchmark":
+		root, _ := os.Getwd()
+		RunBenchmark(client, filepath.Join(root, ".mantis"))
+	case "/ask":
+		if len(parts) < 2 {
+			fmt.Printf("%s  Usage: /ask <question>%s\n\n", colorDim, colorReset)
+			break
+		}
+		question := strings.Join(parts[1:], " ")
+		runAskMode(question, client, *brainContext, cfg)
+	case "/index":
+		if embStore == nil {
+			fmt.Printf("%s  embeddings store not available%s\n\n", colorDim, colorReset)
+			break
+		}
+		indexRoot, _ := os.Getwd()
+		allParsers := []parser.Parser{
+			&parser.GoParser{Root: indexRoot},
+			&parser.TypeScriptParser{},
+			&parser.PythonParser{Root: indexRoot},
+		}
+		fmt.Printf("%s  ◆ indexing source code...%s\n", colorDim, colorReset)
+		count, err := embStore.IndexSourceFiles(context.Background(), indexRoot, allParsers, true)
+		if err != nil {
+			fmt.Printf("%s  ⚠ indexing error: %v%s\n\n", colorDim, err, colorReset)
+		} else {
+			fmt.Printf("%s  ✓ indexed %d symbol(s) for semantic search%s\n\n", colorGold, count, colorReset)
+		}
 	case "/test":
 		packages := ""
 		if len(parts) >= 2 {
@@ -1427,6 +1517,14 @@ func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
 		}
 		testRoot, _ := os.Getwd()
 		runTestLoopCommand(testRoot, client, packages)
+	case "/git-log":
+		root, _ := os.Getwd()
+		cmd := exec.Command("git", "-C", root, "log", "--oneline", "--grep=mantis:", "-n", "10")
+		if out, err := cmd.CombinedOutput(); err == nil && len(out) > 0 {
+			fmt.Printf("%s  Recent mantis commits:%s\n%s\n", colorDim, colorReset, string(out))
+		} else {
+			fmt.Printf("%s  No mantis commits found%s\n\n", colorDim, colorReset)
+		}
 	case "/commit":
 		handleCommitCommand(client, cfg)
 	case "/pr":
@@ -1446,7 +1544,7 @@ func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
 			fmt.Println()
 		}
 	default:
-		fmt.Printf("%sunknown command — /help%s\n\n", colorDim, colorReset)
+		fmt.Printf("%sunknown command '%s' — type /help for available commands%s\n\n", colorDim, cmd, colorReset)
 	}
 	return false
 }
@@ -1558,6 +1656,93 @@ func extractTestPackage(input string) string {
 }
 
 // runTestLoopCommand runs the iterative test loop from the /test slash command.
+// checkUnfinishedProgress checks .mantis/PROGRESS.md for incomplete tasks from the last
+// pipeline run and shows a banner so the user can decide to resume. Read-only — it never
+// modifies the file or conversation state. (8.5.3)
+func checkUnfinishedProgress(mantisDir string, rl readliner) {
+	data, err := os.ReadFile(filepath.Join(mantisDir, "PROGRESS.md"))
+	if err != nil {
+		return // no progress file = nothing to resume
+	}
+	lines := strings.Split(string(data), "\n")
+
+	var pending, failed []string
+	var taskLine string
+	for _, line := range lines {
+		if strings.HasPrefix(line, "**Task:**") {
+			taskLine = strings.TrimPrefix(line, "**Task:** ")
+		}
+		if strings.HasPrefix(line, "- [ ]") || strings.HasPrefix(line, "- [!]") {
+			label := strings.TrimPrefix(strings.TrimPrefix(line, "- [ ] "), "- [!] ")
+			if strings.HasPrefix(line, "- [!]") {
+				failed = append(failed, label)
+			} else {
+				pending = append(pending, label)
+			}
+		}
+	}
+
+	if len(pending)+len(failed) == 0 {
+		return // all tasks done
+	}
+
+	fmt.Printf("\n%s● Unfinished pipeline from last session:%s\n", colorGold, colorReset)
+	if taskLine != "" {
+		fmt.Printf("%s  Task: %s%s\n", colorDim, taskLine, colorReset)
+	}
+	for _, p := range pending {
+		fmt.Printf("%s  [ ] %s%s\n", colorDim, p, colorReset)
+	}
+	for _, f := range failed {
+		fmt.Printf("%s  [!] %s (failed)%s\n", colorRed, f, colorReset)
+	}
+	fmt.Printf("%s  Continue? [y/N]%s ", colorGold, colorReset)
+	line, _ := rl.Readline()
+	if strings.TrimSpace(strings.ToLower(line)) != "y" {
+		fmt.Println()
+		return
+	}
+	// User confirmed — print a contextual hint they can paste as their next message.
+	fmt.Printf("%s  → Resuming. Type your next instruction or paste the task name to continue.%s\n\n",
+		colorDim, colorReset)
+}
+
+// runAskMode handles /ask <question>: read-only expert consultation.
+// Routes to TierReason with full brain context; never writes files.
+// No approval prompt, no hallucination correction loop — just renders the answer.
+func runAskMode(question string, client *ollama.Client, brainContext string, cfg Config) {
+	model := router.ModelFor(router.TierReason)
+	fmt.Printf("%s◉ /ask%s  [%s%s%s]\n", colorCopper+colorBold, colorReset, colorDim, model, colorReset)
+
+	sysContent := "You are a senior software engineer providing expert read-only analysis. " +
+		"Do NOT write, create, or modify any files. " +
+		"Provide clear, accurate, concise analysis based on the context provided."
+	if brainContext != "" {
+		sysContent += "\n\n<project_memory>\n" + brainContext + "\n</project_memory>"
+	}
+
+	msgs := []interface{}{
+		ollama.Message{Role: "system", Content: sysContent},
+		ollama.Message{Role: "user", Content: question},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	opts := &ollama.ModelOptions{Temperature: 0.4, NumCtx: router.ContextWindowFor(model)}
+	var buf strings.Builder
+	_, _, err := client.StreamChat(ctx, model, msgs, opts, func(chunk string) {
+		buf.WriteString(chunk)
+		fmt.Print(chunk)
+	})
+	fmt.Println()
+	if err != nil {
+		fmt.Printf("%s  /ask failed: %v%s\n\n", colorDim, err, colorReset)
+		return
+	}
+	fmt.Println()
+}
+
 func runTestLoopCommand(root string, client *ollama.Client, packages string) {
 	toolkit := agent.NewToolkit(root, nil, nil)
 	tl := &agent.TestLoop{
@@ -1984,7 +2169,7 @@ Then give your final answer after </thinking>. Example:
 // Injects README for project questions, ContextSnippet for code questions,
 // and graph context when file paths or symbols are detected.
 // readCache tracks which files have already been injected this session.
-func contextMessageFor(input, root string, brainContext string, tw *truth.Writer, querier *graph.Querier, readCache map[string]bool) interface{} {
+func contextMessageFor(ctx context.Context, input, root string, brainContext string, tw *truth.Writer, querier *graph.Querier, embStore *embeddings.Store, readCache map[string]bool) interface{} {
 	lower := strings.ToLower(input)
 	isProjectQ := strings.Contains(lower, "project") || strings.Contains(lower, "what is") ||
 		strings.Contains(lower, "what does") || strings.Contains(lower, "what are") ||
@@ -2002,14 +2187,56 @@ func contextMessageFor(input, root string, brainContext string, tw *truth.Writer
 		if readme := readFileSnippet(filepath.Join(root, "README.md"), 1500); readme != "" {
 			parts = append(parts, "Project README:\n"+readme)
 		}
-		if brainContext != "" {
-			parts = append(parts, "Project memory:\n"+brainContext)
+	}
+
+	// 7.5: Cold memory — retrieve relevant BRAIN.md/REJECTED.md chunks on demand.
+	// Skip chunks already present in hot memory (brainContext) to avoid duplication.
+	if embStore != nil {
+		if coldChunks, err := embStore.SearchHybrid(ctx, input, 2); err == nil {
+			var cold []string
+			for _, c := range coldChunks {
+				if (c.Source == "brain" || c.Source == "rejected" || c.Source == "decision") && c.Text != "" {
+					// Deduplicate: skip if chunk text already appears in hot memory.
+					if brainContext != "" && strings.Contains(brainContext, c.Text[:min(len(c.Text), 80)]) {
+						continue
+					}
+					cold = append(cold, fmt.Sprintf("[%s] %s", c.SectionLabel, c.Text))
+				}
+			}
+			if len(cold) > 0 {
+				parts = append(parts, "<cold_memory>\n"+strings.Join(cold, "\n\n")+"\n</cold_memory>")
+			}
 		}
 	}
 
 	if isCodeQ && tw != nil {
 		if snippet := tw.ContextSnippetN(8, 800); snippet != "" {
 			parts = append(parts, "Codebase symbols (verified):\n"+snippet)
+		}
+	}
+
+	// 7.1: Repo-map — inject PageRank-ranked symbol index for codebase orientation.
+	if isCodeQ && querier != nil {
+		if entries, err := querier.RepoMap(2048); err == nil && len(entries) > 0 {
+			mapStr := graph.RepoMapString(entries)
+			if mapStr != "" {
+				parts = append(parts, "<repo_map>\n"+mapStr+"</repo_map>")
+			}
+		}
+	}
+
+	// 7.7: Code context — inject top semantic code chunks matching the query.
+	if isCodeQ && embStore != nil {
+		if results, err := embStore.SearchHybrid(ctx, input, 3); err == nil {
+			var codeChunks []string
+			for _, r := range results {
+				if strings.HasPrefix(r.ID, "code:") && r.Text != "" {
+					codeChunks = append(codeChunks, fmt.Sprintf("// %s (%s)\n%s", r.Source, r.SectionLabel, r.Text))
+				}
+			}
+			if len(codeChunks) > 0 {
+				parts = append(parts, "<code_context>\n"+strings.Join(codeChunks, "\n\n")+"\n</code_context>")
+			}
 		}
 	}
 
@@ -2052,7 +2279,21 @@ func contextMessageFor(input, root string, brainContext string, tw *truth.Writer
 	if len(parts) == 0 {
 		return nil
 	}
-	return ollama.Message{Role: "user", Content: "[context]\n" + strings.Join(parts, "\n\n") + "\n[/context]\n\nNow answer: " + input}
+	// Token budget: cap total context injection at ~3K tokens (≈12K chars).
+	// If over budget, drop sections from the front (least important first).
+	const maxContextChars = 12000
+	combined := strings.Join(parts, "\n\n")
+	if len(combined) > maxContextChars {
+		// Trim from the front (repo_map, cold_memory) to keep files + graph (most specific).
+		for len(parts) > 1 && len(combined) > maxContextChars {
+			parts = parts[1:]
+			combined = strings.Join(parts, "\n\n")
+		}
+		if len(combined) > maxContextChars {
+			combined = combined[len(combined)-maxContextChars:]
+		}
+	}
+	return ollama.Message{Role: "user", Content: "[context]\n" + combined + "\n[/context]\n\nNow answer: " + input}
 }
 
 // injectBuildFiles reads build-related configuration files from the project root
@@ -3082,10 +3323,15 @@ func printHelp() {
 		{"/vision <path>", "analyze an image or screenshot"},
 		{"/fetch <url>", "fetch a web page into context (Jina Reader)"},
 		{"/search <query>", "web search — Jina (keyless) or Tavily (MANTIS_TAVILY_KEY)"},
+		{"/ask <question>", "read-only expert analysis — no file writes"},
+		{"/replay [sid]", "replay event log for this or a given session"},
+		{"/benchmark", "score model quality across 10 coding tasks"},
 		{"/test [pkg]", "run tests → fix failures → repeat until green"},
+		{"/index", "index source code for semantic search"},
 		{"/undo", "revert all files written by the last AI response"},
 		{"/commit", "generate commit message, preview, commit"},
 		{"/pr", "push branch + generate PR title/body + create GitHub PR"},
+		{"/git-log", "show last 10 mantis auto-commits"},
 		{"/plan", "toggle plan mode (review before code)"},
 		{"/context", "show context window token breakdown"},
 		{"/reset", "clear conversation (brain memory kept)"},
@@ -3094,7 +3340,6 @@ func printHelp() {
 		{"/brain", "show project memory"},
 		{"/save", "save session to project memory now"},
 		{"/models", "show available models and current routing"},
-		{"/model <tier>", "switch tier: trivial fast code reason heavy max"},
 		{"/reject <reason>", "log last suggestion as rejected approach"},
 		{"/decision <text>", "log an architecture decision"},
 		{"/telemetry on|off", "enable / disable anonymous usage upload"},
@@ -3742,17 +3987,17 @@ func compressIfNeeded(callerCtx context.Context, messages []interface{}, client 
 	oldTurns := turns[:len(turns)-6]
 	recentTurns := turns[len(turns)-6:]
 
-	// Build summary of old turns — preserve decisions, file names, and rejected approaches.
+	// Build Acon-style structured summary (arXiv 2510.00615):
+	// Five distinct sections preserve different information types without merging them.
 	var summaryInput strings.Builder
-	summaryInput.WriteString("Summarize this conversation in concise bullet points.\n")
-	summaryInput.WriteString("You MUST preserve:\n")
-	summaryInput.WriteString("- Every technical decision made (e.g. 'chose PostgreSQL over SQLite because...')\n")
-	summaryInput.WriteString("- Every file path written to disk (e.g. 'wrote src/models/user.ts')\n")
-	summaryInput.WriteString("- Any approach that was tried and rejected, and why\n")
-	summaryInput.WriteString("- The current project stack (language, framework, database, auth method)\n")
-	summaryInput.WriteString("- Any open TODOs or next steps discussed\n")
-	summaryInput.WriteString("Format: use DECISION:, FILE:, REJECTED:, STACK:, TODO: prefixes on those lines.\n")
-	summaryInput.WriteString("Keep it under 600 words.\n\n")
+	summaryInput.WriteString("Compress the conversation below, preserving ALL of the following in labeled sections:\n\n")
+	summaryInput.WriteString("FACTS: Technical decisions made, files written to disk, stack choices (language/framework/DB/auth)\n")
+	summaryInput.WriteString("ACTIONS: What was tried and the exact outcome — do NOT merge separate attempts into one line\n")
+	summaryInput.WriteString("STATE: Current state of each modified file (which functions exist, which are stubs or incomplete)\n")
+	summaryInput.WriteString("PRECONDITIONS: What must be true before the next step can proceed (dependencies, build state, env vars)\n")
+	summaryInput.WriteString("NEXT: Explicit next steps the user requested or were discussed\n\n")
+	summaryInput.WriteString("Format each section with its label on its own line (e.g. 'FACTS:'). Never merge items across sections.\n")
+	summaryInput.WriteString("Keep it under 700 words.\n\n")
 	for _, m := range oldTurns {
 		if msg, ok := m.(ollama.Message); ok {
 			role := msg.Role
@@ -3767,7 +4012,7 @@ func compressIfNeeded(callerCtx context.Context, messages []interface{}, client 
 	// Use a fast model for summarization.
 	summaryModel := router.ModelFor(router.TierFast)
 	summaryMsgs := []interface{}{
-		ollama.Message{Role: "system", Content: "You are a conversation summarizer. Output only bullet points."},
+		ollama.Message{Role: "system", Content: "You are a conversation compressor. Output exactly five labeled sections: FACTS, ACTIONS, STATE, PRECONDITIONS, NEXT. No preamble."},
 		ollama.Message{Role: "user", Content: summaryInput.String()},
 	}
 
@@ -3902,7 +4147,7 @@ func runWithScanner(cfg Config, client *ollama.Client, sess *session.Session,
 			continue
 		}
 		if strings.HasPrefix(input, "/") {
-			if quit := handleSlashCommand(input, sess, b, &messages, client, &scannerBrainCtx, &scannerPlanMode, cfg, webFetcher, nil); quit {
+			if quit := handleSlashCommand(input, sess, b, &messages, client, &scannerBrainCtx, &scannerPlanMode, cfg, webFetcher, nil, nil); quit {
 				break
 			}
 			continue

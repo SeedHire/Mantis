@@ -94,6 +94,48 @@
     .fade-in { opacity: 0; transform: translateY(24px); transition: opacity .6s ease, transform .6s ease; }
     .fade-in.visible { opacity: 1; transform: translateY(0); }
 
+    /* ── Stagger reveal (JS adds .revealed with per-child delay) ── */
+    [data-stagger] > * {
+      opacity: 0;
+      transform: translateY(16px);
+      transition: opacity .45s ease, transform .45s ease;
+    }
+
+    /* Slide-in from left / right */
+    .slide-left {
+      opacity: 0; transform: translateX(-40px);
+      transition: opacity .65s cubic-bezier(.22,1,.36,1), transform .65s cubic-bezier(.22,1,.36,1);
+    }
+    .slide-right {
+      opacity: 0; transform: translateX(40px);
+      transition: opacity .65s cubic-bezier(.22,1,.36,1), transform .65s cubic-bezier(.22,1,.36,1);
+    }
+    .slide-left.visible, .slide-right.visible {
+      opacity: 1; transform: translateX(0);
+    }
+
+    /* Scale-up reveal for bento cards */
+    .scale-in {
+      opacity: 0; transform: scale(.93) translateY(12px);
+      transition: opacity .5s cubic-bezier(.22,1,.36,1), transform .5s cubic-bezier(.22,1,.36,1);
+    }
+    .scale-in.visible { opacity: 1; transform: scale(1) translateY(0); }
+
+    /* Subtle parallax — shifted by JS on scroll */
+    .parallax-slow { will-change: transform; }
+
+    /* Respect reduced motion preference */
+    @media (prefers-reduced-motion: reduce) {
+      .fade-up, .fade-in, .slide-left, .slide-right, .scale-in,
+      [data-stagger] > * {
+        opacity: 1 !important;
+        transform: none !important;
+        transition: none !important;
+        animation: none !important;
+      }
+      .parallax-slow { will-change: auto; }
+    }
+
     /* ── Nav ─────────────────────────────────────────── */
     nav {
       position: fixed; top: 0; left: 0; right: 0; z-index: 100;
@@ -737,7 +779,7 @@
     </div>
 
     <!-- Terminal Demo — fixed height, scrolls as lines fill -->
-    <div class="terminal-wrap fade-up d4">
+    <div class="terminal-wrap fade-up d4 parallax-slow">
       <div class="terminal-bar">
         <span class="dot dot-red"></span>
         <span class="dot dot-yellow"></span>
@@ -774,8 +816,8 @@
 </div>
 
 <!-- ── Stats bar — user-centric KPIs ──────────────────── -->
-<div class="stat-bar fade-in">
-  <div class="container">
+<div class="stat-bar">
+  <div class="container" data-stagger>
     <div class="stat-item"><span class="stat-num">$0</span><span class="stat-label">forever</span></div>
     <div class="stat-item"><span class="stat-num">7</span><span class="stat-label">model tiers, auto-routed</span></div>
     <div class="stat-item"><span class="stat-num">22</span><span class="stat-label">slash commands</span></div>
@@ -785,9 +827,9 @@
 </div>
 
 <!-- ── Keyword cloud ──────────────────────────────────── -->
-<div class="keyword-strip fade-in">
+<div class="keyword-strip">
   <div class="container">
-    <div class="keyword-cloud">
+    <div class="keyword-cloud" data-stagger>
       <span class="keyword-chip">Multi-Stage Pipeline</span>
       <span class="keyword-chip">Multi-Agent Orchestration</span>
       <span class="keyword-chip">Diff Preview + Approval</span>
@@ -811,12 +853,12 @@
 </div>
 
 <!-- ── How it works — Horizontal flowing timeline ──────── -->
-<section class="fade-in" style="padding:72px 0;">
+<section style="padding:72px 0;">
   <div class="container">
-    <p class="section-label">How it works</p>
-    <h2 class="section-title">One prompt. <span class="metallic">Ship-ready code.</span></h2>
+    <p class="section-label fade-in">How it works</p>
+    <h2 class="section-title fade-in">One prompt. <span class="metallic">Ship-ready code.</span></h2>
 
-    <div class="h-timeline">
+    <div class="h-timeline parallax-slow">
       <!-- SVG curved flow line -->
       <svg class="flow-line" viewBox="0 0 1100 80" preserveAspectRatio="none" fill="none">
         <defs>
@@ -833,7 +875,7 @@
               stroke="url(#flowGrad)" stroke-width="6" stroke-linecap="round" opacity=".04" filter="blur(4px)"/>
       </svg>
 
-      <div class="h-timeline-nodes">
+      <div class="h-timeline-nodes" data-stagger>
         <!-- 1. Plan — above -->
         <div class="h-node">
           <div class="h-card">
@@ -895,16 +937,16 @@
 </section>
 
 <!-- ── Diff Preview showcase ──────────────────────────── -->
-<section class="fade-in">
+<section>
   <div class="container">
     <div class="diff-layout">
-      <div class="diff-text">
+      <div class="diff-text slide-left">
         <p class="section-label">You stay in control</p>
         <h3>Review every change <span class="metallic">before it lands.</span></h3>
         <p>Every file Mantis writes shows a colored diff with an approval prompt. New files, modifications, deletions — you see it all and decide what gets written.</p>
         <p style="color:var(--fg-muted); font-size:.85rem;">No silent overwrites. No surprises. Accept, reject, or ask for changes.</p>
       </div>
-      <div class="diff-terminal">
+      <div class="diff-terminal slide-right">
         <div class="terminal-bar">
           <span class="dot dot-red"></span>
           <span class="dot dot-yellow"></span>
@@ -927,19 +969,19 @@
 </section>
 
 <!-- ── Strengths — Bento grid ──────────────────────────── -->
-<section class="fade-in" style="padding:72px 0;">
+<section style="padding:72px 0;">
   <div class="container">
-    <p class="section-label">Why Mantis</p>
-    <h2 class="section-title">Built different. <span class="metallic">Ships different.</span></h2>
+    <p class="section-label fade-in">Why Mantis</p>
+    <h2 class="section-title fade-in">Built different. <span class="metallic">Ships different.</span></h2>
 
-    <div class="bento">
+    <div class="bento" data-stagger-scale>
       <!-- Row 1: $0 (1col) + Graph (3col wide) -->
-      <div class="bento-card">
+      <div class="bento-card scale-in">
         <div class="bento-big-num">$0</div>
         <h3>Forever.</h3>
         <p>No API keys. No subscriptions. No caps. Ollama Cloud free tier or local.</p>
       </div>
-      <div class="bento-card bento-3">
+      <div class="bento-card bento-3 scale-in">
         <div class="bento-label">Codebase Intelligence</div>
         <h3>Sees your entire codebase, not just one file.</h3>
         <p>AST dependency graph via tree-sitter. Impact analysis, dead code, hotspots, coupling. Go, TypeScript, Python.</p>
@@ -950,7 +992,7 @@
       </div>
 
       <!-- Row 2: Memory (2col) + Offline (1col) + Router (1col) -->
-      <div class="bento-card bento-2">
+      <div class="bento-card bento-2 scale-in">
         <div class="bento-label">Memory</div>
         <h3>Never forgets.</h3>
         <p>Decisions, rejections, conventions persist across sessions. Hybrid BM25 + cosine search.</p>
@@ -958,24 +1000,24 @@
           <span class="dir">.mantis/</span> <span class="dir">├─</span> <span class="file">BRAIN.md</span> <span class="dir">├─</span> <span class="file">CONVENTIONS.md</span> <span class="dir">├─</span> <span class="file">DECISIONS.log</span> <span class="dir">├─</span> <span class="file">REJECTED.md</span> <span class="dir">├─</span> <span class="file">GROUND_TRUTH.json</span> <span class="dir">└─</span> <span class="file">embeddings.db</span>
         </div>
       </div>
-      <div class="bento-card">
+      <div class="bento-card scale-in">
         <div class="bento-label">Privacy</div>
         <h3>100% offline.</h3>
         <p>Code never leaves your machine. Air-gapped environments. <code style="color:var(--copper-lt);background:var(--surface2);padding:1px 5px;border-radius:3px;font-size:.75rem;">--offline</code></p>
       </div>
-      <div class="bento-card">
+      <div class="bento-card scale-in">
         <div class="bento-label">Routing</div>
         <h3>7 model tiers.</h3>
         <p>Auto-routed from 4B to 32B+ by intent. 97.7% classification accuracy.</p>
       </div>
 
       <!-- Row 3: Diff (2col) + Pipeline summary (2col) -->
-      <div class="bento-card bento-2">
+      <div class="bento-card bento-2 scale-in">
         <div class="bento-label">Safety</div>
         <h3>Diff preview + undo.</h3>
         <p>Colored per-file diff before every write. Accept or reject. Roll back with <code style="color:var(--copper-lt);background:var(--surface2);padding:1px 5px;border-radius:3px;font-size:.75rem;">/undo</code>. Ground truth guard catches hallucinated signatures.</p>
       </div>
-      <div class="bento-card bento-2">
+      <div class="bento-card bento-2 scale-in">
         <div class="bento-label">Pipeline</div>
         <h3>One prompt builds your entire app.</h3>
         <p>Parallel agents, build verification, iterative test fixing, sealed types. Convention enforcement on every response.</p>
@@ -988,7 +1030,7 @@
 </section>
 
 <!-- ── CTA ─────────────────────────────────────────────── -->
-<div class="cta-section fade-in">
+<div class="cta-section fade-in" data-parallax=".03">
   <div class="container">
     <h2><span class="metallic">Start building.</span> Zero setup.</h2>
     <p>Install Mantis, run <code style="color:var(--copper-lt)">mantis init</code> in any project, and start coding. Full documentation covers every command and workflow.</p>
@@ -1021,11 +1063,72 @@
     });
   }
 
-  // ── IntersectionObserver for fade-in ──
-  const observer = new IntersectionObserver((entries) => {
-    entries.forEach(e => { if (e.isIntersecting) e.target.classList.add('visible'); });
+  // ── IntersectionObserver for fade-in, slide-in, scale-in ──
+  const revealObserver = new IntersectionObserver((entries) => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        e.target.classList.add('visible');
+        revealObserver.unobserve(e.target);
+      }
+    });
+  }, { threshold: 0.12, rootMargin: '0px 0px -40px 0px' });
+  document.querySelectorAll('.fade-in, .slide-left, .slide-right').forEach(el => revealObserver.observe(el));
+  // scale-in outside of stagger containers get individual observation
+  document.querySelectorAll('.scale-in').forEach(el => {
+    if (!el.closest('[data-stagger-scale]')) revealObserver.observe(el);
+  });
+
+  // ── Stagger reveal (data-stagger containers) ──
+  const staggerObserver = new IntersectionObserver((entries) => {
+    entries.forEach(e => {
+      if (!e.isIntersecting) return;
+      staggerObserver.unobserve(e.target);
+      const children = e.target.children;
+      Array.from(children).forEach((child, i) => {
+        setTimeout(() => {
+          child.style.opacity = '1';
+          child.style.transform = 'translateY(0)';
+        }, i * 80);
+      });
+    });
   }, { threshold: 0.15 });
-  document.querySelectorAll('.fade-in').forEach(el => observer.observe(el));
+  document.querySelectorAll('[data-stagger]').forEach(el => staggerObserver.observe(el));
+
+  // ── Stagger scale-in (bento cards with cascading delay) ──
+  const scaleStaggerObs = new IntersectionObserver((entries) => {
+    entries.forEach(e => {
+      if (!e.isIntersecting) return;
+      scaleStaggerObs.unobserve(e.target);
+      const cards = e.target.querySelectorAll('.scale-in');
+      cards.forEach((card, i) => {
+        card.style.transitionDelay = `${i * 0.09}s`;
+        // Trigger after delay is set
+        requestAnimationFrame(() => card.classList.add('visible'));
+      });
+    });
+  }, { threshold: 0.1 });
+  document.querySelectorAll('[data-stagger-scale]').forEach(el => scaleStaggerObs.observe(el));
+
+  // ── Subtle parallax on scroll ──
+  const parallaxEls = document.querySelectorAll('.parallax-slow');
+  if (parallaxEls.length) {
+    let ticking = false;
+    window.addEventListener('scroll', () => {
+      if (ticking) return;
+      ticking = true;
+      requestAnimationFrame(() => {
+        const scrollY = window.scrollY;
+        parallaxEls.forEach(el => {
+          const rect = el.getBoundingClientRect();
+          const center = rect.top + rect.height / 2;
+          const viewCenter = window.innerHeight / 2;
+          const offset = (center - viewCenter) * 0.04;
+          el.style.transform = `translateY(${offset}px)`;
+        });
+        ticking = false;
+      });
+    }, { passive: true });
+  }
 
   // ── Terminal typing animation (fixed height, auto-scrolls) ──
   const termLines = [

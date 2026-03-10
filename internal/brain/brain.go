@@ -166,6 +166,46 @@ func (b *Brain) Load() string {
 	return strings.Join(parts, "\n\n---\n\n")
 }
 
+// LoadHot returns only the "hot" memory tier: MANTIS.md, CONVENTIONS.md,
+// and the last 3 decisions from DECISIONS.log. This keeps the always-injected
+// system prompt small (~800 tokens). BRAIN.md and REJECTED.md are "cold" memory
+// retrieved on-demand via embeddings search. (7.5: Tiered Cold Memory)
+func (b *Brain) LoadHot() string {
+	var parts []string
+
+	if mantis := b.ReadMantisFile(); mantis != "" {
+		parts = append(parts, "## Project Guide (MANTIS.md)\n"+mantis)
+	}
+	if conv := b.readFile("CONVENTIONS.md"); conv != "" {
+		parts = append(parts, "## Project Conventions\n"+conv)
+	}
+	// Last 3 decisions only.
+	if decisions := b.lastDecisions(3); decisions != "" {
+		parts = append(parts, "## Recent Decisions\n"+decisions)
+	}
+	if gt := b.loadGroundTruthN(30, 4000); gt != "" {
+		parts = append(parts, "## Live Code State (GROUND_TRUTH)\n"+gt)
+	}
+
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "\n\n---\n\n")
+}
+
+// lastDecisions returns the last N entries from DECISIONS.log.
+func (b *Brain) lastDecisions(n int) string {
+	content := b.readFile("DECISIONS.log")
+	if content == "" {
+		return ""
+	}
+	lines := strings.Split(strings.TrimSpace(content), "\n")
+	if len(lines) <= n {
+		return content
+	}
+	return strings.Join(lines[len(lines)-n:], "\n")
+}
+
 // LogDecision appends a timestamped decision to DECISIONS.log.
 func (b *Brain) LogDecision(decision string) error {
 	path := filepath.Join(b.dir, "DECISIONS.log")
@@ -193,13 +233,38 @@ func (b *Brain) LogRejected(approach, reason string) error {
 	return err
 }
 
-// UpdateBrain rewrites BRAIN.md with the provided summary content.
-// Called at the end of each session with an AI-generated summary.
+// UpdateBrain appends a dated session entry to BRAIN.md (ACE-style incremental memory).
+// Instead of rewriting the whole file each session (which causes brevity-bias drift),
+// each session contributes a new dated section. Every 10 sections a consolidation header
+// is inserted to keep the file scannable without losing any prior entries.
+//
+// Source: "Agentic Context Engineering" (arXiv 2510.04618)
 func (b *Brain) UpdateBrain(summary string) error {
 	path := filepath.Join(b.dir, "BRAIN.md")
-	content := fmt.Sprintf("# BRAIN.md — Mantis Project Memory\n# Last updated: %s\n\n%s\n",
-		time.Now().Format("2006-01-02 15:04"), summary)
-	return os.WriteFile(path, []byte(content), 0o644)
+
+	existing, _ := os.ReadFile(path)
+	existingStr := string(existing)
+
+	// Count existing dated session sections to decide when to add a consolidation marker.
+	sectionCount := strings.Count(existingStr, "\n## Session ")
+	needsConsolidation := sectionCount > 0 && sectionCount%10 == 0
+
+	var sb strings.Builder
+	if existingStr == "" {
+		sb.WriteString("# BRAIN.md — Mantis Project Memory\n\n")
+	} else {
+		sb.WriteString(strings.TrimRight(existingStr, "\n"))
+		sb.WriteByte('\n')
+	}
+
+	if needsConsolidation {
+		sb.WriteString(fmt.Sprintf("\n---\n## Consolidated checkpoint (%d sessions)\n\n", sectionCount))
+	}
+
+	sb.WriteString(fmt.Sprintf("\n## Session %s\n\n%s\n",
+		time.Now().Format("2006-01-02 15:04"), strings.TrimSpace(summary)))
+
+	return os.WriteFile(path, []byte(sb.String()), 0o644)
 }
 
 // ReadBrain returns the raw contents of BRAIN.md.

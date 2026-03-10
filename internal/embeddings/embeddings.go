@@ -49,7 +49,7 @@ type Store struct {
 	client *ollama.Client
 	model  string
 	dim    int
-	dimMu  sync.Mutex // BUG-01: guards dim against concurrent writers
+	dimMu  sync.RWMutex // guards dim: Lock/Unlock for the first write, RLock/RUnlock for reads
 }
 
 // Open creates or opens the embeddings database.
@@ -160,12 +160,18 @@ func (s *Store) Embed(ctx context.Context, text string) ([]float64, error) {
 	if err != nil {
 		return nil, err
 	}
-	// BUG-01: protect dim from concurrent writes (Embed is called from parallel search paths).
-	s.dimMu.Lock()
-	if s.dim == 0 {
-		s.dim = len(vec)
+	// Write-lock only on first call when dim is unset; subsequent calls do a
+	// cheap RLock read and skip the write. This prevents a data race under -race.
+	s.dimMu.RLock()
+	alreadySet := s.dim != 0
+	s.dimMu.RUnlock()
+	if !alreadySet {
+		s.dimMu.Lock()
+		if s.dim == 0 { // double-check under write lock
+			s.dim = len(vec)
+		}
+		s.dimMu.Unlock()
 	}
-	s.dimMu.Unlock()
 	return vec, nil
 }
 

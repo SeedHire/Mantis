@@ -75,6 +75,7 @@ type ModelOptions struct {
 	Temperature float64 `json:"temperature,omitempty"`
 	NumCtx      int     `json:"num_ctx,omitempty"`
 	NumPredict  int     `json:"num_predict,omitempty"`
+	NumDraft    int     `json:"num_draft,omitempty"` // speculative decoding draft tokens (Ollama ≥0.3)
 }
 
 // ChatChunk is one streamed line from the API.
