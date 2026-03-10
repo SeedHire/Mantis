@@ -270,7 +270,7 @@ func TestExtractAndWriteFiles_EditBlock(t *testing.T) {
 	}
 
 	response := "```edit:hello.go\n<<<SEARCH\nreturn \"hello\"\n===\nreturn \"world\"\n>>>SEARCH\n```"
-	written := extractAndWriteFiles(response, dir)
+	written := extractAndWriteFiles(response, dir, nil)
 
 	if len(written) != 1 {
 		t.Fatalf("expected 1 written file, got %d", len(written))
@@ -301,7 +301,7 @@ func TestExtractAndWriteFiles_EditBlockNotFound(t *testing.T) {
 
 	// SEARCH text that doesn't exist in the file.
 	response := "```edit:main.go\n<<<SEARCH\nnonexistent text\n===\nnew text\n>>>SEARCH\n```"
-	written := extractAndWriteFiles(response, dir)
+	written := extractAndWriteFiles(response, dir, nil)
 
 	// Should produce no written files (skipped due to not-found).
 	if len(written) != 0 {
@@ -325,7 +325,7 @@ func TestExtractAndWriteFiles_EditBlockAndWholeFile(t *testing.T) {
 
 	// Response: edit block for a.go, whole-file block for new b.go.
 	response := "```edit:a.go\n<<<SEARCH\nconst X = 1\n===\nconst X = 42\n>>>SEARCH\n```\n\n```go:b.go\npackage b\n```"
-	written := extractAndWriteFiles(response, dir)
+	written := extractAndWriteFiles(response, dir, nil)
 
 	if len(written) != 2 {
 		t.Fatalf("expected 2 written files, got %d: %v", len(written), written)
@@ -354,7 +354,7 @@ func TestExtractAndWriteFiles_EditBlockSkipsWholeFileOverwrite(t *testing.T) {
 
 	// Edit block + a whole-file block for the SAME file — edit wins, whole-file skipped.
 	response := "```edit:main.go\n<<<SEARCH\nconst V = 1\n===\nconst V = 99\n>>>SEARCH\n```\n\n```go:main.go\npackage main\n\nconst V = 0\n```"
-	written := extractAndWriteFiles(response, dir)
+	written := extractAndWriteFiles(response, dir, nil)
 
 	// Should be 1 written file (not 2 — whole-file is deduped).
 	if len(written) != 1 {

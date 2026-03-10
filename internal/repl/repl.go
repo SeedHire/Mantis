@@ -239,6 +239,8 @@ func Run(cfg Config) error {
 
 	// Session tracker.
 	sess := session.New()
+	approvalCache := NewApprovalCache()           // permission caching: remembers approved dirs across turns
+	opLog := NewOperationLog(mantisDir)           // operation log: enables /undo across turns
 	usageTracker := usage.New()
 	tlog := telemetry.New()
 	sessID := fmt.Sprintf("%d", time.Now().UnixMilli())
@@ -336,6 +338,7 @@ func Run(cfg Config) error {
 		readline.PcItem("/test"),
 		readline.PcItem("/commit"),
 		readline.PcItem("/pr"),
+		readline.PcItem("/undo"),
 		readline.PcItem("/quit"),
 	)
 
@@ -437,7 +440,7 @@ func Run(cfg Config) error {
 
 		// Slash commands.
 		if strings.HasPrefix(input, "/") {
-			if quit := handleSlashCommand(input, sess, b, &messages, client, &brainContext, &planMode, cfg, webFetcher); quit {
+			if quit := handleSlashCommand(input, sess, b, &messages, client, &brainContext, &planMode, cfg, webFetcher, opLog); quit {
 				break
 			}
 			continue
@@ -593,10 +596,12 @@ func Run(cfg Config) error {
 			userMsg = ollama.Message{Role: "user", Content: userContent}
 		}
 
-		messages = append(messages, userMsg)
-
-		// Proactive context compression — compress old turns before they cause overflow.
+		// Phase 0: proactive compaction — check token budget BEFORE adding the new
+		// turn. Compressing with the prior history still intact gives the summarizer
+		// more headroom and avoids the threshold being blown by a long user message.
 		messages = compressIfNeeded(turnCtx, messages, client)
+
+		messages = append(messages, userMsg)
 
 		// ── Multi-agent fan-out for complex multi-package tasks ───────────────
 		// Gate: TierHeavy or TierCode, graph available, impact spans 4+ files
@@ -622,7 +627,7 @@ func Run(cfg Config) error {
 								colorCopper+colorBold, colorReset, colorDim,
 								impact.TotalFiles, agent.DistinctPackages(impact), colorReset)
 							renderResponse(stripInternalBlocks(stripFileBlocks(combined)))
-							wf := extractAndWriteFilesWithApproval(combined, root, rl)
+							wf := extractAndWriteFilesWithApproval(combined, root, rl, approvalCache, opLog)
 							if len(wf) > 0 {
 								printWrittenFiles(wf)
 							}
@@ -687,7 +692,7 @@ func Run(cfg Config) error {
 					colorCopper+colorBold, colorReset, colorDim, turnTok, elapsed.Seconds(), sessTotal+turnTok, colorReset)
 				renderResponse(stripInternalBlocks(stripFileBlocks(agentResp)))
 
-				wf := extractAndWriteFilesWithApproval(agentResp, root, rl)
+				wf := extractAndWriteFilesWithApproval(agentResp, root, rl, approvalCache, opLog)
 				if len(wf) > 0 {
 					printWrittenFiles(wf)
 				}
@@ -822,9 +827,9 @@ func Run(cfg Config) error {
 				renderResponse(pipeline.CompactSummary(pRes))
 
 				// Write code files to disk — try Combined first, fall back to raw CodeText.
-				wf := extractAndWriteFilesWithApproval(pRes.Combined, root, rl)
+				wf := extractAndWriteFilesWithApproval(pRes.Combined, root, rl, approvalCache, opLog)
 				if len(wf) == 0 && pRes.CodeText != "" {
-					wf = extractAndWriteFilesWithApproval(pRes.CodeText, root, rl)
+					wf = extractAndWriteFilesWithApproval(pRes.CodeText, root, rl, approvalCache, opLog)
 				}
 				if len(wf) > 0 {
 					printWrittenFiles(wf)
@@ -948,7 +953,7 @@ func Run(cfg Config) error {
 
 		// Write any file code blocks from the response to disk.
 		// Append a system note so future turns know what's already written.
-		wf := extractAndWriteFilesWithApproval(rb.String(), root, rl)
+		wf := extractAndWriteFilesWithApproval(rb.String(), root, rl, approvalCache, opLog)
 		if len(wf) > 0 {
 			printWrittenFiles(wf)
 			var fileList []string
@@ -1024,11 +1029,12 @@ func Run(cfg Config) error {
 				}
 				fmt.Printf("%s  [verifying symbols… re-prompting for accuracy (%d/%d)]%s\n",
 					colorDim, retry+1, maxRetries, colorReset)
-				correctionMsg := fmt.Sprintf(
-					"Your previous answer referenced symbols that don't exist in this project: %s\n"+
-						"The actual symbols in this codebase are:\n%s\n"+
-						"Please correct your answer using only real symbols.",
-					strings.Join(vr.UnknownSymbols, ", "), corrections)
+				correctionMsg := buildReminder(
+					fmt.Sprintf("Your previous answer referenced symbols that don't exist in this project: %s",
+						strings.Join(vr.UnknownSymbols, ", ")),
+					fmt.Sprintf("The actual symbols in this codebase are:\n%s\n\nCorrect your answer using only real symbols.", corrections),
+					retry+1, maxRetries,
+				)
 
 				retryMsgs := append(append([]interface{}{}, messages...), ollama.Message{Role: "user", Content: correctionMsg})
 				var rb2 strings.Builder
@@ -1045,7 +1051,7 @@ func Run(cfg Config) error {
 				sess.Add(model, intent.Tier, pt2, ct2, false)
 				fmt.Printf("%s◈ Mantis%s %s(corrected)%s\n", colorCopper+colorBold, colorReset, colorDim, colorReset)
 				renderResponse(stripInternalBlocks(stripFileBlocks(rb2.String())))
-				if wf := extractAndWriteFiles(rb2.String(), root); len(wf) > 0 {
+				if wf := extractAndWriteFiles(rb2.String(), root, opLog); len(wf) > 0 {
 					printWrittenFiles(wf)
 				}
 
@@ -1081,15 +1087,18 @@ func Run(cfg Config) error {
 				}
 				prevConvViolation = cr.Warning
 
-				correctionMsg := fmt.Sprintf(
-					"Your previous response violated project conventions. Fix ONLY the violations below — "+
-						"do not change anything else in your answer.\n\n"+
-						"## Violations\n%s\n\n"+
-						"## Rules\n"+
-						"- Apply the minimal edit to comply with each rule above.\n"+
-						"- Do not add explanations or apologies.\n"+
-						"- If fixing a code file, use ```edit:filepath blocks to show only the changed sections.",
-					cr.Warning)
+				correctionMsg := buildReminder(
+					"Your previous response violated project conventions.",
+					fmt.Sprintf(
+						"Fix ONLY the violations below — do not change anything else in your answer.\n\n"+
+							"## Violations\n%s\n\n"+
+							"## Rules\n"+
+							"- Apply the minimal edit to comply with each rule above.\n"+
+							"- Do not add explanations or apologies.\n"+
+							"- If fixing a code file, use ```edit:filepath blocks to show only the changed sections.",
+						cr.Warning),
+					convIter+1, 2,
+				)
 				fmt.Printf("%s  [conventions violated (%d/2) — re-prompting]%s\n", colorDim, convIter+1, colorReset)
 				// BUG-04: copy slice before append to avoid aliasing the backing array.
 				retryMsgs := append(append([]interface{}{}, messages...), ollama.Message{Role: "user", Content: correctionMsg})
@@ -1111,7 +1120,7 @@ func Run(cfg Config) error {
 					fmt.Printf("%s◈ Mantis%s %s(convention-corrected)%s\n",
 						colorCopper+colorBold, colorReset, colorDim, colorReset)
 					renderResponse(stripInternalBlocks(stripFileBlocks(rb3.String())))
-					if wf2 := extractAndWriteFiles(rb3.String(), root); len(wf2) > 0 {
+					if wf2 := extractAndWriteFiles(rb3.String(), root, opLog); len(wf2) > 0 {
 						printWrittenFiles(wf2)
 					}
 					break
@@ -1206,7 +1215,7 @@ func runOnce(cfg Config, client *ollama.Client, sess *session.Session,
 }
 
 func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
-	messages *[]interface{}, client *ollama.Client, brainContext *string, planMode *bool, cfg Config, webFetcher *web.Fetcher) (quit bool) {
+	messages *[]interface{}, client *ollama.Client, brainContext *string, planMode *bool, cfg Config, webFetcher *web.Fetcher, oplog *OperationLog) (quit bool) {
 
 	parts := strings.Fields(input)
 	cmd := parts[0]
@@ -1422,6 +1431,20 @@ func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
 		handleCommitCommand(client, cfg)
 	case "/pr":
 		handlePRCommand(client)
+	case "/undo":
+		if oplog == nil {
+			fmt.Printf("%s  undo not available in this mode%s\n\n", colorDim, colorReset)
+			break
+		}
+		restored, err := oplog.UndoLastBatch()
+		if err != nil {
+			fmt.Printf("%s  nothing to undo%s\n\n", colorDim, colorReset)
+		} else {
+			for _, line := range restored {
+				fmt.Printf("%s  ↩ %s%s\n", colorGold, line, colorReset)
+			}
+			fmt.Println()
+		}
 	default:
 		fmt.Printf("%sunknown command — /help%s\n\n", colorDim, colorReset)
 	}
@@ -2823,6 +2846,16 @@ func printSep() {
 	fmt.Printf("%s%s%s\n", colorDim, strings.Repeat("─", w), colorReset)
 }
 
+// buildReminder formats an event-driven correction as a structured user-role message.
+// Including the attempt counter and violation type follows OPENDEV's finding that
+// user-role messages at the exact failure point attract stronger attention than
+// static system prompt edits, especially in long sessions.
+//
+// Format: "[REMINDER — attempt N of M] <violationType>\n\n<detail>"
+func buildReminder(violationType, detail string, attempt, maxAttempts int) string {
+	return fmt.Sprintf("[REMINDER — attempt %d of %d] %s\n\n%s", attempt, maxAttempts, violationType, detail)
+}
+
 // renderResponse renders markdown through glamour for clean terminal output.
 // Falls back to plain print if glamour fails.
 func renderResponse(content string) {
@@ -3050,6 +3083,7 @@ func printHelp() {
 		{"/fetch <url>", "fetch a web page into context (Jina Reader)"},
 		{"/search <query>", "web search — Jina (keyless) or Tavily (MANTIS_TAVILY_KEY)"},
 		{"/test [pkg]", "run tests → fix failures → repeat until green"},
+		{"/undo", "revert all files written by the last AI response"},
 		{"/commit", "generate commit message, preview, commit"},
 		{"/pr", "push branch + generate PR title/body + create GitHub PR"},
 		{"/plan", "toggle plan mode (review before code)"},
@@ -3186,7 +3220,7 @@ func verifyAndFix(
 
 		// Show fixed files only (no full response dump).
 		fmt.Printf("%s◈ Mantis%s %s(auto-fix)%s\n", colorCopper+colorBold, colorReset, colorDim, colorReset)
-		newFiles := extractAndWriteFiles(rb.String(), root)
+		newFiles := extractAndWriteFiles(rb.String(), root, nil) // oplog n/a in verifyAndFix
 		if len(newFiles) > 0 {
 			printWrittenFiles(newFiles)
 			written = append(written, newFiles...)
@@ -3868,7 +3902,7 @@ func runWithScanner(cfg Config, client *ollama.Client, sess *session.Session,
 			continue
 		}
 		if strings.HasPrefix(input, "/") {
-			if quit := handleSlashCommand(input, sess, b, &messages, client, &scannerBrainCtx, &scannerPlanMode, cfg, webFetcher); quit {
+			if quit := handleSlashCommand(input, sess, b, &messages, client, &scannerBrainCtx, &scannerPlanMode, cfg, webFetcher, nil); quit {
 				break
 			}
 			continue

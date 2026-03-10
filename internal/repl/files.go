@@ -6,7 +6,45 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 )
+
+// ApprovalCache tracks which directory patterns the user has already approved
+// for writes during this session. Prevents repeated approval prompts for the
+// same directories across multi-file pipeline runs (permission persistence).
+type ApprovalCache struct {
+	mu          sync.RWMutex
+	approvedDirs map[string]bool
+}
+
+// NewApprovalCache creates an empty per-session cache.
+func NewApprovalCache() *ApprovalCache {
+	return &ApprovalCache{approvedDirs: make(map[string]bool)}
+}
+
+// AllApproved returns true when every path is inside a previously approved directory.
+func (c *ApprovalCache) AllApproved(paths []string) bool {
+	if len(paths) == 0 {
+		return false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, p := range paths {
+		if !c.approvedDirs[filepath.Dir(p)] {
+			return false
+		}
+	}
+	return true
+}
+
+// Remember marks the directory of every path as approved for this session.
+func (c *ApprovalCache) Remember(paths []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, p := range paths {
+		c.approvedDirs[filepath.Dir(p)] = true
+	}
+}
 
 // diffLines produces a compact diff between old and new content using LCS.
 // Returns empty string if the content is identical.
@@ -289,16 +327,36 @@ func collectAllChanges(response, root string) []pendingChange {
 }
 
 // writePendingChanges writes all pending changes to disk and returns WrittenFile records.
-func writePendingChanges(changes []pendingChange, root string) []WrittenFile {
+// If oplog is non-nil, each write is recorded (with prev content) under a shared batch ID
+// so /undo can atomically revert the entire set.
+func writePendingChanges(changes []pendingChange, root string, oplog *OperationLog) []WrittenFile {
+	var batchID int
+	if oplog != nil {
+		batchID = oplog.NextBatch()
+	}
 	var written []WrittenFile
 	for _, c := range changes {
 		dest := filepath.Join(root, c.path)
 		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 			continue
 		}
+		// Read existing content before overwriting so /undo can restore it.
+		var prevContent string
+		if !c.isNew {
+			if prev, err := os.ReadFile(dest); err == nil {
+				prevContent = string(prev)
+			}
+		}
 		if err := os.WriteFile(dest, []byte(c.content), 0o644); err != nil {
 			fmt.Printf("%s  ⚠ write %s: %v%s\n", colorDim, c.path, err, colorReset)
 			continue
+		}
+		if oplog != nil {
+			op := "write"
+			if c.isNew {
+				op = "create"
+			}
+			oplog.Record(batchID, dest, op, prevContent)
 		}
 		written = append(written, WrittenFile{Path: c.path, Created: c.isNew, Diff: c.diff})
 	}
@@ -306,10 +364,23 @@ func writePendingChanges(changes []pendingChange, root string) []WrittenFile {
 }
 
 // promptWriteApproval shows a diff preview and asks the user to confirm writing.
-// Returns true if the user approves, false on decline or error.
-func promptWriteApproval(changes []pendingChange, rl readliner) bool {
+// If cache is non-nil and all paths are in already-approved directories, skips
+// the prompt and auto-approves. Returns true if the user (or cache) approves.
+func promptWriteApproval(changes []pendingChange, rl readliner, cache *ApprovalCache) bool {
 	if len(changes) == 0 {
 		return false
+	}
+
+	// Permission caching: if every dir was previously approved this session, skip prompt.
+	if cache != nil {
+		paths := make([]string, len(changes))
+		for i, c := range changes {
+			paths[i] = c.path
+		}
+		if cache.AllApproved(paths) {
+			fmt.Printf("%s  (auto-approved — directories already approved this session)%s\n", colorDim, colorReset)
+			return true
+		}
 	}
 
 	fmt.Printf("\n%s┌─ Preview (%d file(s)) ──%s\n", colorDim, len(changes), colorReset)
@@ -344,16 +415,28 @@ type readliner interface {
 
 // extractAndWriteFilesWithApproval collects changes, shows a diff preview,
 // and writes only if the user approves. Returns nil if declined.
-func extractAndWriteFilesWithApproval(response, root string, rl readliner) []WrittenFile {
+// cache may be nil (disables permission caching). When provided, approved
+// directories are remembered so identical-pattern writes aren't re-prompted.
+// oplog may be nil (disables undo). When provided, every write is recorded.
+func extractAndWriteFilesWithApproval(response, root string, rl readliner, cache *ApprovalCache, oplog *OperationLog) []WrittenFile {
 	changes := collectAllChanges(response, root)
 	if len(changes) == 0 {
 		return nil
 	}
-	if !promptWriteApproval(changes, rl) {
+	if !promptWriteApproval(changes, rl, cache) {
 		fmt.Printf("%s  (write declined)%s\n", colorDim, colorReset)
 		return nil
 	}
-	return writePendingChanges(changes, root)
+	written := writePendingChanges(changes, root, oplog)
+	// Cache approved dirs so the next batch in this session can skip the prompt.
+	if cache != nil && len(written) > 0 {
+		paths := make([]string, len(written))
+		for i, w := range written {
+			paths[i] = w.Path
+		}
+		cache.Remember(paths)
+	}
+	return written
 }
 
 // extractAndWriteFiles scans the AI response for fenced code blocks tagged
@@ -364,12 +447,13 @@ func extractAndWriteFilesWithApproval(response, root string, rl readliner) []Wri
 // Edit blocks always take priority: two passes are made so that an edit block
 // wins even when the model emits a whole-file block for the same path first.
 // This variant writes immediately with no approval gate (for automated paths).
-func extractAndWriteFiles(response, root string) []WrittenFile {
+// oplog may be nil (disables undo recording).
+func extractAndWriteFiles(response, root string, oplog *OperationLog) []WrittenFile {
 	changes := collectAllChanges(response, root)
 	if len(changes) == 0 {
 		return nil
 	}
-	return writePendingChanges(changes, root)
+	return writePendingChanges(changes, root, oplog)
 }
 
 // applySearchReplacePatches reads the file at root/filePath, applies every

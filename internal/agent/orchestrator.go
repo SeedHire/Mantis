@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/seedhire/mantis/internal/intel"
 	"github.com/seedhire/mantis/internal/ollama"
@@ -92,6 +93,12 @@ func Run(
 		return "", fmt.Errorf("orchestrate: %w", err)
 	}
 
+	// ── Step 1b: Self-critique ────────────────────────────────────────────────
+	// Before spawning workers, ask the planner to review its own decomposition
+	// for circular dependencies, missing packages, or imbalanced sub-tasks.
+	// This is Phase 2 of the OPENDEV ReAct loop: evaluate before acting.
+	decomposition = critiqueDecomposition(ctx, client, planModel, systemPrompt, task, packages, decomposition)
+
 	// ── Step 2: Fan-out workers ───────────────────────────────────────────────
 	fmt.Printf("\033[38;5;244m  ◆ spawning %d worker(s) [%s]\033[0m\n",
 		len(decomposition), codeModel)
@@ -172,6 +179,72 @@ func orchestrate(
 		}
 	}
 	return result, nil
+}
+
+// ── Step 1b: Decomposition self-critique ──────────────────────────────────────
+
+// critiqueDecomposition is Phase 2 of the ReAct loop: the planner reviews its
+// own decomposition before workers are spawned. If the critique identifies a
+// concrete issue (missing package, circular dependency, imbalanced tasks), an
+// adjusted decomposition is requested and returned. Otherwise the original is
+// returned unchanged. The critique is best-effort — failures never block.
+func critiqueDecomposition(
+	ctx context.Context,
+	client *ollama.Client,
+	model, systemPrompt, task string,
+	packages []string,
+	decomposition map[string]string,
+) map[string]string {
+	// Render the decomposition as a readable list for the model.
+	var decompLines strings.Builder
+	for pkg, sub := range decomposition {
+		fmt.Fprintf(&decompLines, "  %s: %s\n", pkg, sub)
+	}
+
+	critiquePrompt := fmt.Sprintf(
+		"Review this task decomposition and identify any concrete issues.\n\n"+
+			"## Original task\n%s\n\n"+
+			"## Affected packages\n%s\n\n"+
+			"## Proposed decomposition\n%s\n"+
+			"Check for: (1) packages in the affected list that are missing from the decomposition, "+
+			"(2) sub-tasks that have implicit dependencies on each other that would cause parallel conflicts, "+
+			"(3) sub-tasks that are so broad they cover multiple packages.\n\n"+
+			"If the decomposition looks correct, respond with exactly: OK\n"+
+			"If there are issues, respond with: REVISED\n"+
+			"followed by a corrected JSON object in the same format as the original decomposition.\n"+
+			"Do not include any other text.",
+		task, strings.Join(packages, "\n"), decompLines.String(),
+	)
+
+	msgs := []interface{}{
+		ollama.Message{Role: "system", Content: systemPrompt},
+		ollama.Message{Role: "user", Content: critiquePrompt},
+	}
+
+	var sb strings.Builder
+	critiqueCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	_, _, err := client.StreamChat(critiqueCtx, model, msgs, nil, func(c string) { sb.WriteString(c) })
+	if err != nil {
+		return decomposition // critique failed — use original
+	}
+
+	resp := strings.TrimSpace(sb.String())
+	if strings.HasPrefix(resp, "OK") {
+		return decomposition // no issues found
+	}
+
+	// Model identified issues and provided a revised decomposition.
+	if strings.HasPrefix(resp, "REVISED") {
+		raw := extractJSON(resp[len("REVISED"):])
+		revised := map[string]string{}
+		if err := json.Unmarshal([]byte(raw), &revised); err == nil && len(revised) > 0 {
+			fmt.Printf("\033[38;5;244m  ◆ decomposition revised by self-critique\033[0m\n")
+			return revised
+		}
+	}
+
+	return decomposition // parse failed — keep original
 }
 
 // ── Step 2: Worker agent loop ─────────────────────────────────────────────────

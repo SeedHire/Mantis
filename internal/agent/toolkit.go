@@ -83,8 +83,10 @@ type AgentToolkit struct {
 	projectRoot string
 	querier     *graph.Querier
 	embStore    *embeddings.Store
-	fileMu      sync.Mutex   // guards WriteFile against parallel worker races
-	ApproveFunc ApprovalFunc // if set, git write ops require approval
+	fileMu      sync.Mutex            // guards WriteFile against parallel worker races
+	ApproveFunc ApprovalFunc          // if set, git write ops require approval
+	readTimes   map[string]time.Time  // stale-read detection: path → mtime at last read
+	staleMu     sync.Mutex            // guards readTimes
 }
 
 // NewToolkit creates a toolkit bound to the given project root.
@@ -99,6 +101,7 @@ func NewToolkit(projectRoot string, querier *graph.Querier, embStore *embeddings
 		projectRoot: projectRoot,
 		querier:     querier,
 		embStore:    embStore,
+		readTimes:   make(map[string]time.Time),
 	}
 }
 
@@ -116,6 +119,13 @@ func (t *AgentToolkit) ReadFile(path string, startLine, endLine int) (string, er
 		return "", err
 	}
 	defer f.Close()
+
+	// Record mtime for stale-read detection on subsequent writes.
+	if fi, statErr := f.Stat(); statErr == nil {
+		t.staleMu.Lock()
+		t.readTimes[abs] = fi.ModTime()
+		t.staleMu.Unlock()
+	}
 
 	var sb strings.Builder
 	scanner := bufio.NewScanner(f)
@@ -142,6 +152,9 @@ func (t *AgentToolkit) WriteFile(path, content string) error {
 	if err != nil {
 		return err
 	}
+	if err := t.checkStale(abs); err != nil {
+		return err
+	}
 	t.fileMu.Lock()
 	defer t.fileMu.Unlock()
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
@@ -150,15 +163,50 @@ func (t *AgentToolkit) WriteFile(path, content string) error {
 	return os.WriteFile(abs, []byte(content), 0o644)
 }
 
+// serverPatterns are command prefixes that indicate long-running server processes.
+// These are backgrounded automatically instead of blocking until timeout.
+var serverPatterns = []string{
+	"go run ", "npm start", "npm run dev", "npm run serve", "npm run watch",
+	"yarn start", "yarn dev", "pnpm start", "pnpm dev",
+	"python -m uvicorn", "python3 -m uvicorn",
+	"python manage.py runserver", "python3 manage.py runserver",
+	"python -m flask run", "python3 -m flask run",
+	"cargo run", "air ", // Go hot-reload tool
+}
+
+// isServerCmd returns true when cmd looks like a long-running server process.
+func isServerCmd(cmd string) bool {
+	trimmed := strings.TrimSpace(cmd)
+	for _, p := range serverPatterns {
+		if strings.HasPrefix(trimmed, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // RunBash executes cmd in projectRoot with a timeout.
 // Returns combined stdout+stderr (capped at maxBashOutput chars) and exit code.
 // Only commands matching allowedPrefixes are permitted.
+//
+// Background promotion: commands matching server patterns (npm start, go run,
+// uvicorn, etc.) are automatically backgrounded instead of blocking until timeout.
 func (t *AgentToolkit) RunBash(cmd string, timeoutSec int) (output string, exitCode int) {
 	if !isAllowedCmd(cmd) {
 		return fmt.Sprintf("error: command not in allowlist: %q", cmd), 1
 	}
 	if timeoutSec <= 0 {
 		timeoutSec = defaultTimeout
+	}
+
+	// Phase 6.10: background promotion — server commands never block the agent.
+	if isServerCmd(cmd) {
+		c := exec.Command("sh", "-c", cmd)
+		c.Dir = t.projectRoot
+		if err := c.Start(); err != nil {
+			return fmt.Sprintf("error: failed to start background process: %v", err), 1
+		}
+		return fmt.Sprintf("started in background (PID %d) — use 'ps' or logs to monitor", c.Process.Pid), 0
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
@@ -205,6 +253,9 @@ func (t *AgentToolkit) SearchCodebase(ctx context.Context, query string, limit i
 func (t *AgentToolkit) EditFile(path, oldString, newString string) error {
 	abs, err := t.safePath(path)
 	if err != nil {
+		return err
+	}
+	if err := t.checkStale(abs); err != nil {
 		return err
 	}
 	t.fileMu.Lock()
@@ -385,6 +436,28 @@ func (t *AgentToolkit) runGit(args ...string) (string, int) {
 	return strings.TrimSpace(string(out)), 0
 }
 
+// checkStale returns an error if the file at abs has been modified since the
+// agent last read it. This prevents multi-agent data loss (Worker A reads at
+// t=0, Worker B writes at t=1, Worker A overwrites at t=2 — now caught).
+// Files never read by this toolkit are always allowed through.
+func (t *AgentToolkit) checkStale(abs string) error {
+	t.staleMu.Lock()
+	readAt, ok := t.readTimes[abs]
+	t.staleMu.Unlock()
+	if !ok {
+		return nil // never read by this toolkit — allow write
+	}
+	fi, err := os.Stat(abs)
+	if err != nil {
+		return nil // file doesn't exist yet — allow create
+	}
+	if fi.ModTime().After(readAt) {
+		return fmt.Errorf("stale-read: %s was modified since last read (read at %s, mtime %s) — re-read before writing",
+			filepath.Base(abs), readAt.Format(time.RFC3339), fi.ModTime().Format(time.RFC3339))
+	}
+	return nil
+}
+
 // ── Ollama tool definitions ───────────────────────────────────────────────────
 
 // Tools returns the Ollama tool definitions for this toolkit.
@@ -539,6 +612,26 @@ func (t *AgentToolkit) Tools() []ollama.Tool {
 			},
 		},
 	}
+}
+
+// ReadOnlyTools returns a filtered subset of Tools() that excludes all write
+// operations. Used by the orchestrator's decompose phase so the planning model
+// is physically unable to write files — schema-level enforcement, not runtime.
+func (t *AgentToolkit) ReadOnlyTools() []ollama.Tool {
+	writeNames := map[string]bool{
+		"write_file": true,
+		"edit_file":  true,
+		"git_stage":  true,
+		"git_commit": true,
+		"git_branch": true,
+	}
+	var readOnly []ollama.Tool
+	for _, tool := range t.Tools() {
+		if !writeNames[tool.Function.Name] {
+			readOnly = append(readOnly, tool)
+		}
+	}
+	return readOnly
 }
 
 // Dispatch executes a tool call by name and returns its text output.

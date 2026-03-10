@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -129,15 +130,16 @@ type Result struct {
 
 // Task represents a single implementation task parsed from the plan.
 type Task struct {
-	ID        int
-	Title     string
-	Status    string // "pending", "running", "done", "failed"
-	Output    string // generated code for this task
-	FileCount int    // number of files written to disk for this task
-	StartTime time.Time
-	Elapsed   time.Duration
-	Tokens    int   // final token count (prompt + completion)
-	streamTok int64 // live streaming token counter (atomic)
+	ID                   int
+	Title                string
+	Status               string // "pending", "running", "done", "failed"
+	Output               string // generated code for this task
+	FileCount            int    // number of files written to disk for this task
+	StartTime            time.Time
+	Elapsed              time.Duration
+	Tokens               int      // final token count (prompt + completion)
+	streamTok            int64    // live streaming token counter (atomic)
+	VerificationCriteria []string // explicit "done" checks from ### Verification Criteria
 }
 
 // ShouldRun returns true when the message is complex enough to warrant the pipeline.
@@ -512,7 +514,46 @@ func parseTasks(planText string) []Task {
 			Status: "pending",
 		})
 	}
+	// Attach verification criteria parsed from the plan's dedicated section.
+	criteria := parseVerificationCriteria(planText)
+	for i := range tasks {
+		if c, ok := criteria[tasks[i].ID]; ok {
+			tasks[i].VerificationCriteria = c
+		}
+	}
 	return tasks
+}
+
+// parseVerificationCriteria extracts per-task verification checks from the plan's
+// "### Verification Criteria" section. Returns a map of task number → []check.
+// Expected format:
+//
+//	1.
+//	- `go build ./...` passes
+//	- .env.example has all required keys
+//	2.
+//	- All types exported, no import cycles
+func parseVerificationCriteria(planText string) map[int][]string {
+	section := extractSection(planText, "Verification Criteria")
+	if section == "" {
+		return nil
+	}
+	result := map[int][]string{}
+	var currentTask int
+	taskNumRe := regexp.MustCompile(`^(\d+)[.\):]?\s*$`)
+	bulletRe := regexp.MustCompile(`^\s*[-*•]\s+(.+)$`)
+	for _, line := range strings.Split(section, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if m := taskNumRe.FindStringSubmatch(trimmed); m != nil {
+			n, err := strconv.Atoi(m[1])
+			if err == nil {
+				currentTask = n
+			}
+		} else if m := bulletRe.FindStringSubmatch(trimmed); m != nil && currentTask > 0 {
+			result[currentTask] = append(result[currentTask], m[1])
+		}
+	}
+	return result
 }
 
 // taskIcon returns the display icon, icon color, and title color for a task status.
@@ -696,7 +737,7 @@ func runTaskBased(
 		taskCtx, taskCancel := context.WithTimeout(ctx, taskTimeout)
 		defer taskCancel()
 
-		taskPrompt := taskCodePrompt(userRequest, planText, tasks[i].Title, root, writtenFiles, sealedManifest)
+		taskPrompt := taskCodePrompt(userRequest, planText, tasks[i].Title, root, writtenFiles, sealedManifest, tasks[i].VerificationCriteria)
 		msgs := []interface{}{
 			ollama.Message{Role: "system", Content: systemPrompt + taskStageSuffix},
 			ollama.Message{Role: "user", Content: taskPrompt},
@@ -1133,7 +1174,7 @@ func extractSealedTypes(root string, writtenFiles []string) string {
 	return sb.String()
 }
 
-func taskCodePrompt(request, plan, taskTitle, root string, writtenFiles []string, sealedManifest string) string {
+func taskCodePrompt(request, plan, taskTitle, root string, writtenFiles []string, sealedManifest string, criteria []string) string {
 	var sb strings.Builder
 	sb.WriteString("## Original Request\n")
 	sb.WriteString(request)
@@ -1142,6 +1183,14 @@ func taskCodePrompt(request, plan, taskTitle, root string, writtenFiles []string
 	sb.WriteString("\n\n## YOUR CURRENT TASK\nImplement ONLY this task: **")
 	sb.WriteString(taskTitle)
 	sb.WriteString("**\n\nOutput only the files needed for this specific task.")
+
+	// Include explicit success criteria so the model knows exactly what "done" means.
+	if len(criteria) > 0 {
+		sb.WriteString("\n\n## Definition of Done\nThis task is complete ONLY when ALL of the following pass:\n")
+		for _, c := range criteria {
+			sb.WriteString("- " + c + "\n")
+		}
+	}
 
 	if sealedManifest != "" {
 		sb.WriteString(sealedManifest)
@@ -1616,6 +1665,20 @@ Maximum 10 tasks. If you need more, merge them.
 ### Framework rules:
 - TypeScript: tsconfig.json MUST NOT enable "noUnusedLocals" or "noUnusedParameters" (causes cascading errors in Express/middleware handlers).
 - Prisma: if using Prisma, all @relation fields with multiple references to the same model MUST have explicit relation names.
+
+### Verification Criteria
+
+For each numbered task above, list 1-3 CONCRETE and VERIFIABLE checks that confirm it is complete.
+Use the SAME task numbers as in "### Task Breakdown". Format each task number alone on a line, then bullets:
+
+1.
+- [concrete check for task 1, e.g. build passes]
+- [second check if needed]
+
+2.
+- [concrete check for task 2]
+
+(continue for all tasks)
 
 ### Risks & Edge Cases
 ### Assumptions

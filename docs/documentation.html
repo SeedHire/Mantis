@@ -1,0 +1,818 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mantis — Documentation</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <link rel="shortcut icon" href="favicon.svg" />
+  <meta name="description" content="Mantis documentation — installation, commands, pipeline, agent system, graph intelligence, and architecture rules." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --copper:      #C87941;
+      --copper-lt:   #E8A96A;
+      --copper-dk:   #7A3E10;
+      --copper-pale: #F5D9BB;
+      --gold:        #F0C040;
+      --bg:          #08090F;
+      --surface:     #0E1018;
+      --surface2:    #151820;
+      --surface3:    #1C2030;
+      --border:      #1E2230;
+      --border-hi:   #2E3448;
+      --fg:          #E8EAF2;
+      --fg-dim:      #8A90A8;
+      --fg-muted:    #5A5F7A;
+      --green:       #2DD4A0;
+      --red:         #F05060;
+      --blue:        #60A5FA;
+      --yellow:      #F0A030;
+      --radius:      10px;
+      --radius-lg:   14px;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--fg);
+      font-family: 'Space Grotesk', 'Inter', system-ui, sans-serif;
+      font-size: 16px;
+      line-height: 1.7;
+      overflow-x: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    body::after {
+      content: '';
+      position: fixed; inset: 0;
+      pointer-events: none; z-index: 9999;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23n)' opacity='0.028'/%3E%3C/svg%3E");
+      opacity: .5;
+    }
+
+    a { color: var(--copper-lt); text-decoration: none; }
+    a:hover { color: var(--gold); }
+    code { font-family: 'JetBrains Mono', monospace; }
+
+    .metallic {
+      background: linear-gradient(135deg, #C87941 0%, #F0C040 28%, #E8A96A 50%, #C87941 72%, #F5D9BB 100%);
+      background-size: 200% 200%;
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      animation: sheen 6s ease-in-out infinite;
+    }
+    @keyframes sheen { 0%,100% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } }
+
+    /* ── Nav ──────────────────────────────────────── */
+    nav {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      background: rgba(8,9,15,0.92);
+      backdrop-filter: blur(20px) saturate(180%);
+      -webkit-backdrop-filter: blur(20px) saturate(180%);
+      border-bottom: 1px solid var(--border);
+    }
+    nav::after {
+      content: '';
+      position: absolute;
+      bottom: 0; left: 0; right: 0; height: 1px;
+      background: linear-gradient(90deg, transparent, var(--copper-dk), var(--copper), var(--copper-dk), transparent);
+      opacity: .5;
+    }
+    .nav-inner {
+      max-width: 1200px; margin: 0 auto;
+      display: flex; align-items: center; justify-content: space-between;
+      height: 62px; padding: 0 28px;
+    }
+    .nav-brand {
+      display: flex; align-items: center; gap: 8px;
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 700; font-size: 15px; letter-spacing: .06em;
+      color: var(--copper); text-decoration: none;
+    }
+    .nav-mascot { color: var(--copper-lt); font-size: 13px; }
+    .nav-links { display: flex; align-items: center; gap: 24px; }
+    .nav-links a { color: var(--fg-dim); font-size: 14px; font-weight: 500; transition: color .2s; }
+    .nav-links a:hover { color: var(--fg); }
+    .nav-links a.active { color: var(--copper-lt); }
+
+    /* ── Layout: sidebar + content ───────────────── */
+    .doc-layout {
+      display: grid;
+      grid-template-columns: 260px 1fr;
+      max-width: 1200px;
+      margin: 0 auto;
+      min-height: 100vh;
+      padding-top: 62px;
+    }
+
+    /* Sidebar */
+    .sidebar {
+      position: sticky;
+      top: 62px;
+      height: calc(100vh - 62px);
+      overflow-y: auto;
+      padding: 2rem 1.5rem;
+      border-right: 1px solid var(--border);
+      scrollbar-width: thin;
+      scrollbar-color: var(--border-hi) transparent;
+    }
+    .sidebar::-webkit-scrollbar { width: 4px; }
+    .sidebar::-webkit-scrollbar-thumb { background: var(--border-hi); border-radius: 2px; }
+    .sidebar-group { margin-bottom: 2rem; }
+    .sidebar-group-title {
+      font-size: .7rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .12em; color: var(--copper);
+      margin-bottom: .75rem;
+      padding-bottom: .5rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .sidebar a {
+      display: block;
+      padding: 5px 10px;
+      font-size: .85rem;
+      color: var(--fg-dim);
+      border-radius: 6px;
+      transition: background .15s, color .15s;
+      margin-bottom: 2px;
+    }
+    .sidebar a:hover { background: var(--surface2); color: var(--fg); }
+    .sidebar a.active { background: rgba(200,121,65,.1); color: var(--copper-lt); }
+
+    /* Content */
+    .doc-content {
+      padding: 3rem 3rem 6rem;
+      max-width: 800px;
+    }
+    .doc-content h1 {
+      font-size: 2.2rem; font-weight: 800;
+      margin-bottom: .5rem;
+      line-height: 1.2;
+    }
+    .doc-content .subtitle {
+      font-size: 1rem; color: var(--fg-dim);
+      margin-bottom: 3rem;
+    }
+    .doc-content h2 {
+      font-size: 1.5rem; font-weight: 700;
+      margin-top: 4rem; margin-bottom: 1rem;
+      padding-top: 2rem;
+      border-top: 1px solid var(--border);
+    }
+    .doc-content h2:first-of-type { border-top: none; padding-top: 0; margin-top: 0; }
+    .doc-content h3 {
+      font-size: 1.1rem; font-weight: 700;
+      margin-top: 2.5rem; margin-bottom: .75rem;
+      color: var(--copper-lt);
+    }
+    .doc-content p {
+      margin-bottom: 1rem;
+      color: var(--fg-dim);
+    }
+    .doc-content ul, .doc-content ol {
+      margin-bottom: 1rem;
+      padding-left: 1.5rem;
+      color: var(--fg-dim);
+    }
+    .doc-content li { margin-bottom: .4rem; }
+    .doc-content li::marker { color: var(--copper); }
+
+    /* Code blocks */
+    .doc-content pre {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1rem 1.25rem;
+      overflow-x: auto;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .82rem;
+      line-height: 1.7;
+      color: var(--fg-dim);
+      margin-bottom: 1.5rem;
+    }
+    .doc-content code {
+      background: var(--surface2);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: .85em;
+      color: var(--copper-lt);
+    }
+    .doc-content pre code {
+      background: none;
+      padding: 0;
+      color: inherit;
+    }
+
+    /* Tables */
+    .doc-content table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      margin-bottom: 1.5rem;
+      font-size: .88rem;
+    }
+    .doc-content th, .doc-content td {
+      padding: .7rem 1rem;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+    .doc-content th {
+      background: var(--surface2);
+      font-weight: 700;
+      color: var(--fg);
+    }
+    .doc-content td { color: var(--fg-dim); }
+    .doc-content td code { font-size: .82em; }
+    .doc-content tr:last-child td { border-bottom: none; }
+
+    /* Callout boxes */
+    .callout {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--copper);
+      border-radius: var(--radius);
+      padding: 1rem 1.25rem;
+      margin-bottom: 1.5rem;
+      font-size: .9rem;
+    }
+    .callout.tip { border-left-color: var(--green); }
+    .callout.warn { border-left-color: var(--yellow); }
+    .callout strong { color: var(--fg); }
+
+    /* Section dividers */
+    .doc-section {
+      scroll-margin-top: 80px;
+    }
+
+    /* ── Footer ──────────────────────────────────── */
+    .doc-footer {
+      border-top: 1px solid var(--border);
+      padding: 2rem 28px;
+      text-align: center;
+      color: var(--fg-muted);
+      font-size: .85rem;
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    .doc-footer a { color: var(--fg-dim); }
+    .doc-footer a:hover { color: var(--copper-lt); }
+
+    /* ── Responsive ──────────────────────────────── */
+    @media (max-width: 900px) {
+      .doc-layout { grid-template-columns: 1fr; }
+      .sidebar {
+        position: relative; top: 0;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        padding: 1.5rem;
+      }
+      .doc-content { padding: 2rem 1.5rem 4rem; }
+    }
+    @media (max-width: 640px) {
+      .doc-content h1 { font-size: 1.6rem; }
+      .doc-content h2 { font-size: 1.25rem; }
+      .doc-content pre { font-size: .75rem; padding: .75rem 1rem; }
+    }
+  </style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-inner">
+    <a href="index.html" class="nav-brand">mantis <span class="nav-mascot">(o_o)</span></a>
+    <div class="nav-links">
+      <a href="index.html">Home</a>
+      <a href="documentation.html" class="active">Docs</a>
+      <a href="https://github.com/seedhire/mantis" target="_blank" rel="noopener">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<div class="doc-layout">
+
+  <!-- ── Sidebar ──────────────────────────────────── -->
+  <aside class="sidebar">
+    <div class="sidebar-group">
+      <div class="sidebar-group-title">Getting Started</div>
+      <a href="#installation">Installation</a>
+      <a href="#first-run">First Run</a>
+      <a href="#index-project">Index Your Project</a>
+    </div>
+    <div class="sidebar-group">
+      <div class="sidebar-group-title">AI Assistant</div>
+      <a href="#repl">Interactive REPL</a>
+      <a href="#model-routing">Model Routing</a>
+      <a href="#slash-commands">Slash Commands</a>
+      <a href="#diff-preview">Diff Preview</a>
+    </div>
+    <div class="sidebar-group">
+      <div class="sidebar-group-title">Code Generation</div>
+      <a href="#pipeline">Pipeline</a>
+      <a href="#agent-system">Agent System</a>
+      <a href="#test-loop">Test Loop</a>
+    </div>
+    <div class="sidebar-group">
+      <div class="sidebar-group-title">Intelligence</div>
+      <a href="#graph-commands">Graph Commands</a>
+      <a href="#temporal">Temporal Analysis</a>
+      <a href="#tui">TUI Dashboard</a>
+    </div>
+    <div class="sidebar-group">
+      <div class="sidebar-group-title">Memory</div>
+      <a href="#project-memory">Project Memory</a>
+      <a href="#conventions">Conventions</a>
+      <a href="#ground-truth">Ground Truth</a>
+    </div>
+    <div class="sidebar-group">
+      <div class="sidebar-group-title">Integration</div>
+      <a href="#lsp">LSP Server</a>
+      <a href="#mcp">MCP Server</a>
+      <a href="#ci">CI Integration</a>
+      <a href="#architecture-lint">Architecture Lint</a>
+    </div>
+  </aside>
+
+  <!-- ── Content ──────────────────────────────────── -->
+  <main class="doc-content">
+
+    <h1><span class="metallic">Mantis</span> Documentation</h1>
+    <p class="subtitle">v0.7.6 — Free AI coding assistant, local-first, Ollama-powered</p>
+
+    <!-- ── Installation ───────────────────────────── -->
+    <div class="doc-section" id="installation">
+      <h2>Installation</h2>
+
+      <h3>Prerequisites</h3>
+      <ul>
+        <li><strong>Go 1.21+</strong> — <code>go version</code></li>
+        <li><strong>Ollama</strong> — download from <a href="https://ollama.ai" target="_blank" rel="noopener">ollama.ai</a></li>
+      </ul>
+
+      <pre><code># Pull at least one model
+ollama pull llama3.1           # local fallback
+# OR use Ollama Cloud (free tier)
+export OLLAMA_API_KEY=your_key</code></pre>
+
+      <h3>Install Methods</h3>
+      <pre><code># Homebrew (macOS — recommended)
+brew install seedhire/tap/mantis
+
+# Go install
+go install github.com/seedhire/mantis/cmd/mantis@latest
+
+# Shell script
+curl -fsSL https://mantis.sh/install | sh
+
+# Build from source
+git clone https://github.com/seedhire/mantis
+cd Mantis && make build && make install</code></pre>
+
+      <pre><code>mantis --version   # mantis v0.7.6 (darwin/arm64)</code></pre>
+    </div>
+
+    <!-- ── First Run ──────────────────────────────── -->
+    <div class="doc-section" id="first-run">
+      <h2>First Run</h2>
+      <pre><code># With GitHub auth (enables cloud features)
+mantis
+
+# Without GitHub auth (fully local, no internet required)
+mantis --offline</code></pre>
+
+      <p>First interactive run triggers a one-time setup: GitHub login (optional) and Ollama connection check. If auth fails, use <code>--offline</code> to skip entirely.</p>
+
+      <div class="callout tip">
+        <strong>Tip:</strong> The <code>--offline</code> flag is perfect for air-gapped environments or when you just want local Ollama models.
+      </div>
+    </div>
+
+    <!-- ── Index Your Project ─────────────────────── -->
+    <div class="doc-section" id="index-project">
+      <h2>Index Your Project</h2>
+      <p>Run <code>mantis init</code> once in any project. This parses every file, builds a SQLite dependency graph (<code>.mantis/graph.db</code>), and creates project memory files.</p>
+
+      <pre><code>cd your-project/
+
+mantis init              # auto-detect language
+mantis init --lang go    # specify primary language
+mantis init --lang ts --watch   # index + watch for changes</code></pre>
+
+      <table>
+        <thead><tr><th>Flag</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><code>--lang</code></td><td>Primary language: <code>go</code>, <code>ts</code>, <code>py</code>, <code>rust</code>, <code>java</code></td></tr>
+          <tr><td><code>--watch</code></td><td>Start file watcher immediately after init</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>Note:</strong> <code>.mantis/</code> is auto-added to <code>.gitignore</code>. The graph DB never leaves your machine.
+      </div>
+    </div>
+
+    <!-- ── REPL ───────────────────────────────────── -->
+    <div class="doc-section" id="repl">
+      <h2>Interactive REPL</h2>
+      <p>The main <code>mantis</code> command opens an interactive session with 22 slash commands.</p>
+
+      <pre><code>mantis                    # interactive REPL
+mantis "why is checkout timing out?"    # one-shot question
+mantis --image screenshot.png "what is wrong?"   # multimodal
+mantis --plan "build a REST API"        # plan-first mode
+mantis --continue                       # resume last session
+mantis --model max                      # force model tier</code></pre>
+
+      <h3>How Each Message Is Processed</h3>
+      <ol>
+        <li><strong>Router</strong> classifies intent into 1 of 7 tiers, selects the best model</li>
+        <li><strong>Graph context</strong> auto-injects related files from the dependency graph</li>
+        <li><strong>Memory</strong> retrieves relevant past decisions via hybrid BM25+cosine search</li>
+        <li><strong>Model</strong> generates response (streamed live)</li>
+        <li><strong>Verify</strong> checks against GROUND_TRUTH.json (hallucination detection)</li>
+        <li><strong>Verify</strong> checks against CONVENTIONS.md (architecture convention gate)</li>
+        <li><strong>Diff preview</strong> shown before any file is written</li>
+      </ol>
+    </div>
+
+    <!-- ── Model Routing ──────────────────────────── -->
+    <div class="doc-section" id="model-routing">
+      <h2>Model Routing</h2>
+      <p>Mantis automatically routes each message to the optimal model tier (97.7% accuracy) based on intent classification.</p>
+
+      <table>
+        <thead><tr><th>Tier</th><th>Default Model</th><th>Best For</th></tr></thead>
+        <tbody>
+          <tr><td>Trivial</td><td><code>gemma3:4b</code></td><td>Definitions, yes/no questions</td></tr>
+          <tr><td>Fast</td><td><code>devstral-small-2:24b-cloud</code></td><td>Quick edits, simple fixes</td></tr>
+          <tr><td>Code</td><td><code>glm-5:cloud</code></td><td>Code generation, debugging</td></tr>
+          <tr><td>Reason</td><td><code>kimi-k2-thinking:cloud</code></td><td>Multi-step reasoning, architecture</td></tr>
+          <tr><td>Heavy</td><td><code>glm-4.7:cloud</code></td><td>Deep analysis, complex refactors</td></tr>
+          <tr><td>Max</td><td><code>glm-5:cloud</code></td><td>Most complex tasks</td></tr>
+          <tr><td>Vision</td><td><code>gemini-3-flash-preview:cloud</code></td><td>Images, screenshots</td></tr>
+        </tbody>
+      </table>
+
+      <pre><code>mantis --model reason   # force reasoning model for this session</code></pre>
+    </div>
+
+    <!-- ── Slash Commands ─────────────────────────── -->
+    <div class="doc-section" id="slash-commands">
+      <h2>Slash Commands</h2>
+
+      <table>
+        <thead><tr><th>Command</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><code>/file &lt;path&gt;</code></td><td>Inject file content into context (auto-suggests nearby files on error)</td></tr>
+          <tr><td><code>/vision &lt;path&gt;</code></td><td>Attach image for multimodal query</td></tr>
+          <tr><td><code>/fetch &lt;url&gt;</code></td><td>Fetch webpage into context</td></tr>
+          <tr><td><code>/search &lt;query&gt;</code></td><td>Web search (Tavily or DuckDuckGo fallback)</td></tr>
+          <tr><td><code>/plan</code></td><td>Toggle plan-before-code mode</td></tr>
+          <tr><td><code>/context</code></td><td>Show token budget breakdown + injected files</td></tr>
+          <tr><td><code>/brain</code></td><td>Show stored project memory</td></tr>
+          <tr><td><code>/save</code></td><td>Save current session to memory</td></tr>
+          <tr><td><code>/decision &lt;text&gt;</code></td><td>Log architecture decision to DECISIONS.log</td></tr>
+          <tr><td><code>/reject &lt;reason&gt;</code></td><td>Log rejected approach to REJECTED.md</td></tr>
+          <tr><td><code>/test [pkg]</code></td><td>Run iterative test-fix loop</td></tr>
+          <tr><td><code>/commit</code></td><td>AI-generated git commit message</td></tr>
+          <tr><td><code>/pr</code></td><td>Create GitHub PR from current branch</td></tr>
+          <tr><td><code>/cost</code></td><td>Show token usage</td></tr>
+          <tr><td><code>/stats</code></td><td>Session statistics</td></tr>
+          <tr><td><code>/models</code></td><td>List available models</td></tr>
+          <tr><td><code>/quit</code></td><td>Exit session</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- ── Diff Preview ───────────────────────────── -->
+    <div class="doc-section" id="diff-preview">
+      <h2>Diff Preview</h2>
+      <p>Every file change shows a colored diff with an approval prompt before anything is written to disk.</p>
+
+      <pre><code>┌─ Preview: internal/auth/service.go (existing) ─────────┐
+│   23   - func (s *Service) Login(email string) error {  │
+│   23   + func (s *Service) Login(ctx context.Context,   │
+│   24   +     email string) (*User, error) {             │
+└─────────────────────────────────────────────────────────┘
+Write this file? [Y/n]</code></pre>
+
+      <p><code>Y</code> or Enter to write. <code>n</code> to skip. Changes are never applied without explicit confirmation.</p>
+    </div>
+
+    <!-- ── Pipeline ───────────────────────────────── -->
+    <div class="doc-section" id="pipeline">
+      <h2>Code Generation Pipeline</h2>
+      <p>For complex build requests, a multi-stage pipeline activates automatically.</p>
+
+      <pre><code>mantis "build a REST API with express, typescript, JWT auth, and postgres"
+mantis --plan "build a todo app with react and node"   # review plan first</code></pre>
+
+      <h3>Stages</h3>
+      <table>
+        <thead><tr><th>Stage</th><th>What Happens</th></tr></thead>
+        <tbody>
+          <tr><td><strong>PLAN</strong></td><td>Reasoning model decomposes into 6-10 tasks with file assignments</td></tr>
+          <tr><td><strong>CODE</strong></td><td>Tasks execute with live progress. Tasks 0-1 sequential (setup + types), rest parallel. Build verification + up to 3 fix retries per task.</td></tr>
+          <tr><td><strong>TESTS</strong></td><td>Test files generated per task</td></tr>
+          <tr><td><strong>VERIFY</strong></td><td>TestLoop runs tests and iteratively fixes failures (up to 3 iterations)</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>Sealed Types:</strong> After sequential tasks generate shared types, a SEALED TYPES manifest is extracted and injected into parallel workers to prevent type redefinition.
+      </div>
+    </div>
+
+    <!-- ── Agent System ───────────────────────────── -->
+    <div class="doc-section" id="agent-system">
+      <h2>Agent System</h2>
+      <p>For high-impact changes (4+ files across 2+ packages), the multi-agent orchestrator activates automatically.</p>
+
+      <pre><code>mantis "add OAuth2 support to the auth package, update the middleware, and add integration tests"</code></pre>
+
+      <p>Workers run in parallel, each with access to 7 tools:</p>
+
+      <table>
+        <thead><tr><th>Tool</th><th>What It Does</th></tr></thead>
+        <tbody>
+          <tr><td><code>read_file</code></td><td>Read any file in the project</td></tr>
+          <tr><td><code>write_file</code></td><td>Write a new file</td></tr>
+          <tr><td><code>edit_file</code></td><td>Targeted SEARCH/REPLACE edit on existing file</td></tr>
+          <tr><td><code>run_bash</code></td><td>Run allowed shell commands (go/npm/cargo/pytest/git)</td></tr>
+          <tr><td><code>search_codebase</code></td><td>Semantic search across all files</td></tr>
+          <tr><td><code>find_symbol</code></td><td>Find a symbol in the dependency graph</td></tr>
+          <tr><td><code>run_tests</code></td><td>Run tests and get parsed results</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- ── Test Loop ──────────────────────────────── -->
+    <div class="doc-section" id="test-loop">
+      <h2>Iterative Test Loop</h2>
+      <p>Mantis can automatically run tests, parse failures, read relevant source code, and prompt the model to fix issues — iteratively.</p>
+
+      <pre><code># From the REPL
+/test                     # run all tests
+/test ./internal/auth/... # run specific package
+
+# Or just describe the problem
+> fix the failing tests in auth package</code></pre>
+
+      <p>Supports Go, Node/Jest, Python/pytest, Rust, with automatic runner detection. Stuck detection stops if the same failures persist after a fix attempt.</p>
+    </div>
+
+    <!-- ── Graph Commands ─────────────────────────── -->
+    <div class="doc-section" id="graph-commands">
+      <h2>Graph Commands</h2>
+      <p>All graph commands require <code>mantis init</code> to have been run first.</p>
+
+      <h3>mantis impact</h3>
+      <p>Show the full blast radius of a change before refactoring.</p>
+      <pre><code>mantis impact "src/services/auth.ts" --risk
+
+⚡ Impact Analysis: src/services/auth.ts
+──────────────────────────────────────
+Direct importers (depth 1):    8 files
+Indirect dependents (depth 2): 31 files
+Total affected: 47 files
+
+HIGH RISK:   src/routes/api.ts        (score: 9/10)
+MEDIUM RISK: src/controllers/User.ts  (score: 5/10)</code></pre>
+
+      <h3>mantis find</h3>
+      <p>Find all usages of a symbol across the codebase.</p>
+      <pre><code>mantis find "UserService" --format tree
+mantis find "processPayment" --format json</code></pre>
+
+      <h3>mantis dead</h3>
+      <p>Detect exported symbols with zero references.</p>
+      <pre><code>mantis dead --ignore "**/*.test.ts,**/*.d.ts"</code></pre>
+
+      <h3>mantis circular</h3>
+      <p>Find circular import chains with optional HTML visualization.</p>
+      <pre><code>mantis circular --html --fix</code></pre>
+
+      <h3>mantis graph</h3>
+      <p>Generate an interactive D3 dependency graph HTML file.</p>
+      <pre><code>mantis graph --module src/auth --depth 3</code></pre>
+
+      <h3>mantis context</h3>
+      <p>Bundle all files related to a symbol into a structured Markdown block optimized for LLM input.</p>
+      <pre><code>mantis context "AuthMiddleware" --tokens 16000 | pbcopy</code></pre>
+    </div>
+
+    <!-- ── Temporal Analysis ──────────────────────── -->
+    <div class="doc-section" id="temporal">
+      <h2>Temporal Analysis</h2>
+
+      <h3>mantis hotspots</h3>
+      <p>Files with highest churn. Splits into Refactor Candidates (single owner, many commits) and Watch List (multi-owner).</p>
+      <pre><code>mantis hotspots --days 90</code></pre>
+
+      <h3>mantis risky</h3>
+      <p>Files with high change frequency and many unique authors.</p>
+      <pre><code>mantis risky --days 90</code></pre>
+
+      <h3>mantis coupling</h3>
+      <p>Files that change together (hidden structural dependencies).</p>
+      <pre><code>mantis coupling src/checkout/service.ts</code></pre>
+
+      <h3>mantis intent</h3>
+      <p>Infer architectural intent from commit messages and comment patterns.</p>
+      <pre><code>mantis intent src/checkout/service.ts</code></pre>
+
+      <h3>mantis todos</h3>
+      <p>Extract all TODO, FIXME, HACK, NOTE comments with file + line.</p>
+      <pre><code>mantis todos</code></pre>
+    </div>
+
+    <!-- ── TUI Dashboard ──────────────────────────── -->
+    <div class="doc-section" id="tui">
+      <h2>TUI Dashboard</h2>
+      <pre><code>mantis tui</code></pre>
+
+      <table>
+        <thead><tr><th>Screen</th><th>What It Shows</th></tr></thead>
+        <tbody>
+          <tr><td><strong>1 · Dashboard</strong></td><td>File/symbol/edge counts, last indexed timestamp</td></tr>
+          <tr><td><strong>2 · Search</strong></td><td>Live symbol search with importer list</td></tr>
+          <tr><td><strong>3 · Impact</strong></td><td>Enter file/symbol for blast-radius with risk labels</td></tr>
+          <tr><td><strong>4 · Lint</strong></td><td>Architecture violations, <code>r</code> to re-run</td></tr>
+          <tr><td><strong>5 · Dead Code</strong></td><td>All unused exported symbols</td></tr>
+          <tr><td><strong>+ 7 more</strong></td><td>Hotspots, coupling, intent, traces, brain browser, spec-gaps, todos</td></tr>
+        </tbody>
+      </table>
+
+      <p>Keyboard: <code>1</code>–<code>5</code> jump to screen, <code>tab</code>/<code>shift+tab</code>, <code>j</code>/<code>k</code> navigate, <code>q</code> quit.</p>
+    </div>
+
+    <!-- ── Project Memory ─────────────────────────── -->
+    <div class="doc-section" id="project-memory">
+      <h2>Project Memory</h2>
+      <p>The <code>.mantis/</code> directory stores persistent project state:</p>
+
+      <table>
+        <thead><tr><th>File</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td><code>BRAIN.md</code></td><td>Rolling project summary, updated each session</td></tr>
+          <tr><td><code>CONVENTIONS.md</code></td><td>Architecture rules enforced on every AI response</td></tr>
+          <tr><td><code>DECISIONS.log</code></td><td>Timestamped architecture decisions</td></tr>
+          <tr><td><code>REJECTED.md</code></td><td>Failed approaches the AI won't repeat</td></tr>
+          <tr><td><code>GROUND_TRUTH.json</code></td><td>Live function signatures for hallucination detection</td></tr>
+          <tr><td><code>embeddings.db</code></td><td>SQLite cosine-distance semantic memory</td></tr>
+          <tr><td><code>graph.db</code></td><td>AST dependency graph</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- ── Conventions ────────────────────────────── -->
+    <div class="doc-section" id="conventions">
+      <h2>Conventions Enforcement</h2>
+      <p>Write your architecture rules in <code>.mantis/CONVENTIONS.md</code>. Every AI response is checked against these rules. If a response violates a convention, the AI is re-prompted automatically until it complies.</p>
+
+      <pre><code># .mantis/CONVENTIONS.md
+
+## Imports
+- Never import from `internal/legacy/`
+- Database access only through repository interfaces
+
+## Naming
+- All service constructors must be named `NewXxxService`
+- HTTP handlers must accept `(w http.ResponseWriter, r *http.Request)`
+
+## Architecture
+- No circular dependencies between packages
+- Business logic never in HTTP handlers</code></pre>
+    </div>
+
+    <!-- ── Ground Truth ───────────────────────────── -->
+    <div class="doc-section" id="ground-truth">
+      <h2>Ground Truth Guard</h2>
+      <p>Mantis builds <code>GROUND_TRUTH.json</code> from the live AST — a snapshot of every exported function signature in the codebase. When the AI references a function, the response is checked against ground truth. If the signature doesn't match, the response is flagged and re-prompted.</p>
+
+      <div class="callout">
+        <strong>Result:</strong> The AI cannot hallucinate function signatures that don't exist in your codebase.
+      </div>
+    </div>
+
+    <!-- ── LSP Server ─────────────────────────────── -->
+    <div class="doc-section" id="lsp">
+      <h2>LSP Server</h2>
+      <p>Mantis provides an LSP server for editor integration (VS Code, Neovim, etc.).</p>
+
+      <pre><code>mantis lsp</code></pre>
+
+      <p>Supported capabilities: hover (function docs + graph context), go-to-definition, document symbols, diagnostics (lint violations), code lens (impact analysis).</p>
+    </div>
+
+    <!-- ── MCP Server ─────────────────────────────── -->
+    <div class="doc-section" id="mcp">
+      <h2>MCP Server</h2>
+      <p>Mantis exposes an MCP (Model Context Protocol) server so other AI tools can access its graph intelligence.</p>
+
+      <pre><code>mantis mcp</code></pre>
+
+      <p>Exposes tools: <code>impact_analysis</code>, <code>find_symbol</code>, <code>dead_code</code>, <code>hotspots</code>, <code>context_bundle</code>.</p>
+    </div>
+
+    <!-- ── CI Integration ─────────────────────────── -->
+    <div class="doc-section" id="ci">
+      <h2>CI Integration</h2>
+      <p>Add Mantis to your CI pipeline for architecture rule enforcement.</p>
+
+      <pre><code># GitHub Actions example
+- name: Architecture lint
+  run: |
+    mantis init --lang go
+    mantis lint --strict --ci</code></pre>
+
+      <p>The <code>--ci</code> flag exits with code 1 on any violation, blocking the PR merge.</p>
+    </div>
+
+    <!-- ── Architecture Lint ──────────────────────── -->
+    <div class="doc-section" id="architecture-lint">
+      <h2>Architecture Lint</h2>
+      <p>Configure rules in <code>.mantisrc.yml</code> at the project root.</p>
+
+      <pre><code># .mantisrc.yml
+version: 1
+rules:
+  - name: no-circular-dependencies
+    type: built_in
+    severity: error
+
+  - name: max-file-dependencies
+    type: built_in
+    severity: warning
+    config:
+      max: 15
+
+  - name: no-direct-db-in-handlers
+    type: custom
+    pattern: "handlers/**"
+    forbidden_imports:
+      - "database/sql"
+      - "internal/db"
+    severity: error
+    message: "Handlers must not import database packages directly"</code></pre>
+
+      <pre><code>mantis lint              # check rules
+mantis lint --strict --ci   # CI gate (exit 1 on violation)</code></pre>
+    </div>
+
+    <!-- ── Global Flags ───────────────────────────── -->
+    <div class="doc-section" id="global-flags">
+      <h2>Global Flags</h2>
+      <table>
+        <thead><tr><th>Flag</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><code>--model &lt;tier&gt;</code></td><td>Force routing tier: <code>trivial|fast|code|reason|heavy|max|vision</code></td></tr>
+          <tr><td><code>--budget &lt;tokens&gt;</code></td><td>Max session token budget</td></tr>
+          <tr><td><code>--image &lt;path&gt;</code></td><td>Attach image to query (multimodal)</td></tr>
+          <tr><td><code>--plan</code></td><td>Pause after plan stage before implementation</td></tr>
+          <tr><td><code>--continue</code></td><td>Resume most recent session</td></tr>
+          <tr><td><code>--offline</code></td><td>Skip GitHub auth gate (local/air-gapped use)</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+  </main>
+</div>
+
+<div class="doc-footer">
+  Mantis — built by Sagar Darji
+  &nbsp;·&nbsp;
+  <a href="https://github.com/seedhire/mantis" target="_blank" rel="noopener">GitHub</a>
+  &nbsp;·&nbsp;
+  <a href="https://github.com/seedhire/mantis/issues" target="_blank" rel="noopener">Issues</a>
+</div>
+
+<script>
+  // Highlight active sidebar link on scroll
+  const sections = document.querySelectorAll('.doc-section');
+  const sidebarLinks = document.querySelectorAll('.sidebar a');
+
+  const sidebarObserver = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        sidebarLinks.forEach(link => link.classList.remove('active'));
+        const activeLink = document.querySelector(`.sidebar a[href="#${entry.target.id}"]`);
+        if (activeLink) activeLink.classList.add('active');
+      }
+    });
+  }, { rootMargin: '-80px 0px -60% 0px', threshold: 0 });
+
+  sections.forEach(s => sidebarObserver.observe(s));
+</script>
+
+</body>
+</html>

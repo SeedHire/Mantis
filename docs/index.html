@@ -6,9 +6,9 @@
   <title>Mantis — AI that actually knows your codebase</title>
   <link rel="icon" type="image/svg+xml" href="favicon.svg" />
   <link rel="shortcut icon" href="favicon.svg" />
-  <meta name="description" content="Free AI coding assistant with multi-stage code generation pipeline, multi-agent orchestration, persistent project memory, 7-tier model routing, LSP/MCP servers, impact analysis, runtime traces, and architecture lint. Runs on Ollama Cloud or local." />
+  <meta name="description" content="Free AI coding assistant with full-stack code generation pipeline, persistent project memory, AST dependency graph, and diff preview. Runs on Ollama Cloud or fully local. $0/month." />
   <meta property="og:title" content="Mantis — AI that actually knows your codebase" />
-  <meta property="og:description" content="23,800+ LOC AI coding assistant with agentic pipeline, build verification, LSP server, persistent memory, dependency graph, cross-repo analysis, and hallucination guard. $0/month." />
+  <meta property="og:description" content="29,800+ LOC AI coding assistant with agentic pipeline, diff preview, persistent memory, dependency graph, and iterative test fixing. $0/month forever." />
   <meta property="og:type" content="website" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -29,14 +29,16 @@
       --border:      #1E2230;
       --border-hi:   #2E3448;
       --fg:          #E8EAF2;
+      --fg-dim:      #8A90A8;
       --fg-muted:    #5A5F7A;
-      --fg-soft:     #8890A8;
-      --success:     #2DD4A0;
-      --warning:     #F0A030;
-      --error:       #F05060;
+      --green:       #2DD4A0;
+      --red:         #F05060;
+      --blue:        #60A5FA;
+      --yellow:      #F0A030;
       --radius:      10px;
-      --glow-copper: 0 0 60px rgba(200,121,65,.18), 0 0 120px rgba(200,121,65,.07);
-      --glow-sm:     0 0 24px rgba(200,121,65,.22);
+      --radius-lg:   14px;
+      --glow-copper: 0 0 40px rgba(200,121,65,.1), 0 0 80px rgba(200,121,65,.04);
+      --glow-sm:     0 0 14px rgba(200,121,65,.12);
       --shadow-card: 0 4px 24px rgba(0,0,0,.45), 0 1px 4px rgba(0,0,0,.3);
     }
 
@@ -52,7 +54,7 @@
       -webkit-font-smoothing: antialiased;
     }
 
-    /* Subtle grain */
+    /* Subtle grain overlay */
     body::after {
       content: '';
       position: fixed; inset: 0;
@@ -64,10 +66,9 @@
     a { color: var(--copper-lt); text-decoration: none; }
     a:hover { color: var(--gold); }
     code, pre, .mono { font-family: 'JetBrains Mono', 'Fira Code', monospace; }
-
     .container { max-width: 1100px; margin: 0 auto; padding: 0 28px; }
 
-    /* ── Metallic text ─────────────────────────────────────────────────── */
+    /* ── Metallic gradient text ─────────────────────── */
     .metallic {
       background: linear-gradient(135deg, #C87941 0%, #F0C040 28%, #E8A96A 50%, #C87941 72%, #F5D9BB 100%);
       background-size: 200% 200%;
@@ -81,21 +82,24 @@
       50%      { background-position: 100% 50%; }
     }
 
-    /* ── Fade-up animations ────────────────────────────────────────────── */
+    /* ── Fade-up animations ─────────────────────────── */
     .fade-up { opacity: 0; transform: translateY(22px); animation: fadeUp .7s ease forwards; }
     .d1 { animation-delay: .1s; }
     .d2 { animation-delay: .22s; }
     .d3 { animation-delay: .34s; }
     .d4 { animation-delay: .46s; }
-    @keyframes fadeUp {
-      to { opacity: 1; transform: none; }
-    }
+    @keyframes fadeUp { to { opacity: 1; transform: none; } }
 
-    /* ── Nav ───────────────────────────────────────────────────────────── */
+    /* IntersectionObserver fade-in for below-fold */
+    .fade-in { opacity: 0; transform: translateY(24px); transition: opacity .6s ease, transform .6s ease; }
+    .fade-in.visible { opacity: 1; transform: translateY(0); }
+
+    /* ── Nav ─────────────────────────────────────────── */
     nav {
       position: fixed; top: 0; left: 0; right: 0; z-index: 100;
       background: rgba(8,9,15,0.88);
       backdrop-filter: blur(20px) saturate(180%);
+      -webkit-backdrop-filter: blur(20px) saturate(180%);
       border-bottom: 1px solid var(--border);
     }
     nav::after {
@@ -115,16 +119,10 @@
       font-weight: 700; font-size: 15px; letter-spacing: .06em;
       color: var(--copper);
     }
-    .nav-mascot {
-      color: var(--copper-lt);
-      font-size: 13px;
-      letter-spacing: 0;
-    }
-    .nav-links {
-      display: flex; align-items: center; gap: 28px; list-style: none;
-    }
+    .nav-mascot { color: var(--copper-lt); font-size: 13px; letter-spacing: 0; }
+    .nav-links { display: flex; align-items: center; gap: 24px; list-style: none; }
     .nav-links a {
-      color: var(--fg-soft); font-size: 14px; font-weight: 500;
+      color: var(--fg-dim); font-size: 14px; font-weight: 500;
       transition: color .2s;
     }
     .nav-links a:hover { color: var(--fg); }
@@ -141,30 +139,24 @@
       color: #fff;
       box-shadow: 0 4px 20px rgba(200,121,65,.35);
     }
-    .btn-primary:hover {
-      box-shadow: 0 8px 36px rgba(200,121,65,.5);
-      color: #fff;
-    }
+    .btn-primary:hover { box-shadow: 0 8px 36px rgba(200,121,65,.5); color: #fff; }
     .btn-ghost {
-      background: transparent; color: var(--fg-soft);
+      background: transparent; color: var(--fg-dim);
       border: 1px solid var(--border-hi);
     }
     .btn-ghost:hover { border-color: var(--copper); color: var(--copper-lt); }
-    .nav-cta {
-      padding: 7px 18px !important; font-size: 13px !important;
-    }
-
-    /* Fix nav specificity: .nav-links a overrides .btn-primary color */
+    .nav-cta { padding: 7px 18px !important; font-size: 13px !important; }
     .nav-links a.btn-primary { color: #fff; }
     .nav-links a.btn-primary:hover { color: #fff; }
+
+    /* ── Hero ────────────────────────────────────────── */
     .hero {
       padding: 110px 0 80px;
       text-align: center;
       position: relative;
       overflow: hidden;
     }
-
-    /* Dot grid */
+    /* Dot grid background */
     .hero::before {
       content: '';
       position: absolute; inset: 0;
@@ -175,19 +167,15 @@
       animation: gridPulse 8s ease-in-out infinite;
       pointer-events: none;
     }
-    /* Copper bloom */
     .hero-bloom {
       position: absolute; top: -200px; left: 50%;
       transform: translateX(-50%);
       width: 900px; height: 700px;
       background: radial-gradient(ellipse at 50% 30%,
-        rgba(200,121,65,.15) 0%, rgba(200,121,65,.06) 35%, transparent 70%);
+        rgba(200,121,65,.08) 0%, rgba(200,121,65,.03) 35%, transparent 70%);
       pointer-events: none;
     }
-    @keyframes gridPulse {
-      0%,100% { opacity: .4; }
-      50%      { opacity: .75; }
-    }
+    @keyframes gridPulse { 0%,100% { opacity: .4; } 50% { opacity: .75; } }
 
     /* ASCII banner + mascot */
     .hero-logo-wrap {
@@ -198,7 +186,7 @@
     .hero-logo-wrap::before {
       content: '';
       position: absolute; inset: -20px;
-      background: radial-gradient(ellipse 80% 60% at 50% 50%, rgba(200,121,65,.18) 0%, transparent 70%);
+      background: radial-gradient(ellipse 80% 60% at 50% 50%, rgba(200,121,65,.08) 0%, transparent 70%);
       pointer-events: none; border-radius: 20px;
     }
     .hero-logo {
@@ -208,10 +196,6 @@
       color: var(--copper);
       white-space: pre;
       display: inline-block;
-      text-shadow:
-        0 0 30px rgba(200,121,65,.55),
-        0 0 60px rgba(200,121,65,.25),
-        0 0 100px rgba(200,121,65,.10);
       letter-spacing: 0;
       filter: brightness(1.1);
     }
@@ -222,59 +206,40 @@
       color: var(--copper-lt);
       white-space: pre;
       display: inline-block;
-      text-shadow: 0 0 20px rgba(232,169,106,.4);
+      text-shadow: 0 0 12px rgba(232,169,106,.2);
       margin-bottom: 36px;
     }
-
-    /* Version pill */
-    .hero-version {
-      display: inline-flex; align-items: center; gap: 8px;
-      background: rgba(200,121,65,.08);
-      border: 1px solid rgba(200,121,65,.25);
-      border-radius: 100px; padding: 4px 14px;
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 11px; color: var(--copper-lt);
-      letter-spacing: .06em; margin-bottom: 24px;
-    }
-    .hero-version-dot {
-      width: 6px; height: 6px;
-      background: var(--success); border-radius: 50%;
-      box-shadow: 0 0 8px var(--success);
-      animation: blink 2s ease-in-out infinite;
-    }
-    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
-
     .hero h1 {
       font-size: clamp(2.2rem, 5vw, 3.8rem);
       font-weight: 700; line-height: 1.12;
       letter-spacing: -0.03em; margin-bottom: 1.1rem;
     }
-    .hero p {
+    .hero-sub {
       font-size: clamp(1rem, 1.8vw, 1.15rem);
-      color: var(--fg-soft); max-width: 540px;
-      margin: 0 auto 2.5rem;
+      color: var(--fg-dim); max-width: 540px;
+      margin: 0 auto 2.5rem; line-height: 1.75;
     }
     .hero-ctas {
       display: flex; gap: 12px;
       justify-content: center; flex-wrap: wrap;
-      margin-bottom: 3.5rem;
+      margin-bottom: 3rem;
     }
 
-    /* ── Hero terminal ─────────────────────────────────────────────────── */
+    /* ── Terminal (fixed height + scroll) ────────────── */
     .terminal-wrap {
-      max-width: 700px; margin: 0 auto;
-      border-radius: 14px; overflow: hidden;
-      border: 1px solid rgba(200,121,65,.3);
+      max-width: 720px; margin: 0 auto;
+      border-radius: var(--radius-lg); overflow: hidden;
+      border: 1px solid rgba(200,121,65,.2);
       box-shadow:
-        0 0 0 1px rgba(200,121,65,.08),
-        0 0 40px rgba(200,121,65,.18),
-        0 0 80px rgba(200,121,65,.08),
-        0 32px 80px rgba(0,0,0,.65);
+        0 0 0 1px rgba(200,121,65,.05),
+        0 0 24px rgba(200,121,65,.08),
+        0 24px 60px rgba(0,0,0,.5);
     }
     .terminal-bar {
       background: var(--surface2);
       padding: 11px 16px;
       display: flex; align-items: center; gap: 7px;
+      border-bottom: 1px solid var(--border);
     }
     .dot { width: 13px; height: 13px; border-radius: 50%; }
     .dot-red    { background: #FF5F57; box-shadow: 0 0 6px rgba(255,95,87,.4); }
@@ -287,18 +252,24 @@
     }
     .terminal-body {
       background: #070910;
-      padding: 22px 26px;
+      padding: 20px 24px;
       font-family: 'JetBrains Mono', monospace;
-      font-size: 13px; line-height: 1.85;
-      min-height: 300px;
+      font-size: 12.5px; line-height: 1.85;
+      height: 380px;
+      overflow-y: auto;
       text-align: left;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border-hi) transparent;
     }
+    .terminal-body::-webkit-scrollbar { width: 6px; }
+    .terminal-body::-webkit-scrollbar-track { background: transparent; }
+    .terminal-body::-webkit-scrollbar-thumb { background: var(--border-hi); border-radius: 3px; }
     .t-dim    { color: var(--fg-muted); }
     .t-fg     { color: var(--fg); }
     .t-copper { color: var(--copper-lt); }
     .t-gold   { color: var(--gold); }
-    .t-green  { color: var(--success); }
-    .t-red    { color: var(--error); }
+    .t-green  { color: var(--green); }
+    .t-red    { color: var(--red); }
     .t-bold   { font-weight: 600; }
     .t-prompt { color: var(--copper); font-weight: 600; }
     .cursor {
@@ -306,8 +277,11 @@
       background: var(--copper); vertical-align: text-bottom;
       animation: blink 1.1s step-end infinite; margin-left: 2px;
     }
+    @keyframes blink { 50% { opacity: 0; } }
+    .term-line { opacity: 0; transition: opacity .15s; }
+    .term-line.visible { opacity: 1; }
 
-    /* ── Install strip ─────────────────────────────────────────────────── */
+    /* ── Install strip ──────────────────────────────── */
     .install-strip {
       background: var(--surface);
       border-top: 1px solid var(--border);
@@ -334,7 +308,8 @@
       border-radius: 8px; padding: 9px 16px; transition: border-color .2s;
     }
     .install-cmd:hover { border-color: var(--copper-dk); }
-    .install-cmd code { color: var(--success); font-size: 12.5px; }
+    .install-cmd code { color: var(--green); font-size: 12.5px; }
+    .install-sep { color: var(--fg-dim); font-size: 14px; padding: 3px 8px; }
     .copy-btn {
       background: none; border: none; cursor: pointer;
       color: var(--fg-muted); font-size: 12px; padding: 3px 8px;
@@ -342,12 +317,71 @@
       font-family: 'Space Grotesk', system-ui, sans-serif;
     }
     .copy-btn:hover { color: var(--copper); background: rgba(200,121,65,.1); }
-    .install-sep { color: var(--fg-soft); font-size: 14px; padding: 3px 8px; }
+    .copy-btn.copied { color: var(--green); }
 
-    .t-warn { color: var(--warning); }
+    /* ── Stats bar (user-centric KPIs) ──────────────── */
+    .stat-bar {
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+      padding: 22px 0;
+      position: relative;
+    }
+    .stat-bar::before {
+      content: '';
+      position: absolute; bottom: 0; left: 0; right: 0; height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(200,121,65,.25), transparent);
+    }
+    .stat-bar .container {
+      display: flex; justify-content: center; gap: 56px; flex-wrap: wrap;
+    }
+    .stat-item { text-align: center; }
+    .stat-num {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 1.4rem; font-weight: 700;
+      display: block;
+      background: linear-gradient(135deg, var(--copper-lt), var(--gold));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .stat-label {
+      font-size: .75rem; color: var(--fg-muted);
+      text-transform: uppercase; letter-spacing: .08em;
+    }
 
-    /* ── Sections ──────────────────────────────────────────────────────── */
-    section { padding: 96px 0; }
+    /* ── Keyword cloud ──────────────────────────────── */
+    .keyword-strip {
+      padding: 32px 0;
+      border-bottom: 1px solid var(--border);
+      position: relative;
+    }
+    .keyword-strip::after {
+      content: '';
+      position: absolute; bottom: 0; left: 0; right: 0; height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(200,121,65,.2), transparent);
+    }
+    .keyword-cloud {
+      display: flex; flex-wrap: wrap; gap: 8px;
+      justify-content: center;
+    }
+    .keyword-chip {
+      padding: 5px 14px;
+      border: 1px solid var(--border-hi);
+      border-radius: 999px;
+      background: var(--surface);
+      color: var(--fg-dim);
+      font-size: .78rem;
+      letter-spacing: .02em;
+      transition: border-color .2s, color .2s;
+    }
+    .keyword-chip:hover {
+      border-color: var(--copper-dk);
+      color: var(--copper-lt);
+    }
+
+    /* ── Sections ────────────────────────────────────── */
+    section { padding: 72px 0; }
     .section-label {
       font-size: 11px; font-weight: 700; text-transform: uppercase;
       letter-spacing: .14em; color: var(--copper); margin-bottom: 14px;
@@ -358,56 +392,238 @@
       letter-spacing: -.025em; margin-bottom: 16px;
     }
     .section-sub {
-      font-size: 1rem; color: var(--fg-soft);
-      max-width: 520px; line-height: 1.75; margin-bottom: 3rem;
+      font-size: 1rem; color: var(--fg-dim);
+      max-width: 520px; line-height: 1.75; margin-bottom: 1.75rem;
     }
 
-    /* ── Feature grid ──────────────────────────────────────────────────── */
-    .feature-grid {
+    /* ── How it works — horizontal flowing timeline ───── */
+    .h-timeline {
+      position: relative;
+      padding: 0 20px;
+      margin-top: 1rem;
+    }
+    /* The flowing SVG path is inline in HTML */
+    .h-timeline svg.flow-line {
+      position: absolute;
+      left: 0; right: 0;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 100%;
+      height: 80px;
+      pointer-events: none;
+      z-index: 0;
+    }
+    .h-timeline-nodes {
+      display: flex;
+      justify-content: space-between;
+      position: relative;
+      z-index: 1;
+    }
+    .h-node {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      position: relative;
+    }
+    /* Alternate: odd above, even below */
+    .h-node:nth-child(odd) { padding-top: 0; padding-bottom: 120px; }
+    .h-node:nth-child(even) { padding-top: 120px; padding-bottom: 0; }
+
+    /* Glowing circle node */
+    .h-dot {
+      width: 44px; height: 44px;
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 800; font-size: 1rem;
+      position: relative;
+      z-index: 2;
+      flex-shrink: 0;
+      transition: transform .25s;
+    }
+    .h-node:hover .h-dot { transform: scale(1.12); }
+    .h-dot-1 {
+      background: var(--copper);
+      color: #fff;
+      box-shadow: 0 0 12px rgba(200,121,65,.25);
+    }
+    .h-dot-2 {
+      background: linear-gradient(135deg, var(--copper), var(--gold));
+      color: #fff;
+      box-shadow: 0 0 12px rgba(240,192,64,.2);
+    }
+    .h-dot-3 {
+      background: linear-gradient(135deg, var(--gold), var(--green));
+      color: #fff;
+      box-shadow: 0 0 12px rgba(45,212,160,.18);
+    }
+    .h-dot-4 {
+      background: var(--green);
+      color: #fff;
+      box-shadow: 0 0 12px rgba(45,212,160,.25);
+    }
+
+    /* Connector stem from dot to card */
+    .h-stem {
+      width: 2px; height: 24px;
+      flex-shrink: 0;
+    }
+    .h-node:nth-child(1) .h-stem { background: linear-gradient(180deg, transparent, var(--copper)); }
+    .h-node:nth-child(2) .h-stem { background: linear-gradient(0deg, transparent, var(--gold)); }
+    .h-node:nth-child(3) .h-stem { background: linear-gradient(180deg, transparent, var(--green)); }
+    .h-node:nth-child(4) .h-stem { background: linear-gradient(0deg, transparent, var(--green)); }
+
+    /* Content card */
+    .h-card {
+      width: 210px;
+      text-align: center;
+    }
+    .h-card h3 {
+      font-size: .9rem; font-weight: 700;
+      margin-bottom: .3rem;
+      display: flex; align-items: center; justify-content: center; gap: 6px;
+    }
+    .h-card h3 .badge {
+      font-size: .55rem; font-weight: 600;
+      padding: 2px 6px; border-radius: 999px;
+      text-transform: uppercase; letter-spacing: .04em;
+    }
+    .badge-auto { background: rgba(45,212,160,.12); color: var(--green); border: 1px solid rgba(45,212,160,.25); }
+    .badge-parallel { background: rgba(96,165,250,.12); color: var(--blue); border: 1px solid rgba(96,165,250,.25); }
+    .badge-safe { background: rgba(240,192,64,.1); color: var(--gold); border: 1px solid rgba(240,192,64,.25); }
+    .h-card p {
+      font-size: .75rem; color: var(--fg-dim); line-height: 1.5;
+      margin-bottom: .5rem;
+    }
+    .h-card .mini-term {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: .35rem .6rem;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .58rem; line-height: 1.55;
+      color: var(--fg-muted);
+      text-align: left;
+    }
+
+    /* Order: odd = card-stem-dot (top), even = dot-stem-card (bottom) */
+    .h-node:nth-child(odd) .h-card { order: 0; }
+    .h-node:nth-child(odd) .h-stem { order: 1; }
+    .h-node:nth-child(odd) .h-dot  { order: 2; }
+    .h-node:nth-child(even) .h-dot  { order: 0; }
+    .h-node:nth-child(even) .h-stem { order: 1; }
+    .h-node:nth-child(even) .h-card { order: 2; }
+
+    /* ── Diff Preview showcase ──────────────────────── */
+    .diff-layout {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-      gap: 1px; background: var(--border);
-      border: 1px solid var(--border); border-radius: 14px; overflow: hidden;
+      grid-template-columns: 1fr 1fr;
+      gap: 3rem;
+      align-items: center;
     }
-    .feature-card {
-      background: var(--surface); padding: 1.75rem;
-      transition: background .2s;
+    .diff-text h3 {
+      font-size: 1.5rem; font-weight: 700;
+      line-height: 1.2; margin-bottom: 1rem;
     }
-    .feature-card:hover { background: var(--surface2); }
-    .feature-icon { font-size: 1.5rem; margin-bottom: .75rem; }
-    .feature-card h3 { font-size: .95rem; font-weight: 700; margin-bottom: .4rem; }
-    .feature-card p { font-size: .875rem; color: var(--fg-soft); line-height: 1.6; }
+    .diff-text p {
+      font-size: .95rem; color: var(--fg-dim); line-height: 1.7;
+      margin-bottom: 1.5rem;
+    }
+    .diff-terminal {
+      border-radius: var(--radius-lg); overflow: hidden;
+      border: 1px solid rgba(200,121,65,.3);
+      box-shadow:
+        0 0 40px rgba(200,121,65,.12),
+        0 16px 48px rgba(0,0,0,.5);
+    }
+    .diff-body {
+      background: #070910;
+      padding: 20px 24px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px; line-height: 1.9;
+    }
+    .diff-body .line-added { color: var(--green); }
+    .diff-body .line-removed { color: var(--red); }
+    .diff-body .line-file { color: var(--copper-lt); }
+    .diff-body .line-border { color: var(--fg-muted); }
+    .diff-body .line-prompt { color: var(--gold); }
 
-    /* ── How it works ──────────────────────────────────────────────────── */
-    .steps { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 1.5rem; }
-    .step {
-      position: relative; padding: 1.5rem;
-      background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    /* ── Bento grid ──────────────────────────────────── */
+    .bento {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      grid-auto-rows: auto;
+      gap: 10px;
     }
-    .step-num {
-      display: inline-flex; align-items: center; justify-content: center;
-      width: 32px; height: 32px; border-radius: 8px;
-      background: rgba(200,121,65,.15); color: var(--copper);
-      font-weight: 700; font-size: .9rem; margin-bottom: .75rem;
+    .bento-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.25rem;
+      position: relative;
+      overflow: hidden;
+      transition: border-color .3s, transform .25s;
     }
-    .step h3 { font-size: .95rem; font-weight: 700; margin-bottom: .4rem; }
-    .step p { font-size: .85rem; color: var(--fg-soft); }
-    .step code { font-family: 'JetBrains Mono', monospace; color: var(--copper-lt); font-size: .8rem; background: var(--surface2); padding: .15rem .35rem; border-radius: 4px; }
+    .bento-card:hover {
+      border-color: rgba(200,121,65,.35);
+      transform: translateY(-2px);
+    }
+    .bento-card::after {
+      content: '';
+      position: absolute; inset: 0;
+      background: radial-gradient(ellipse at 50% 0%, rgba(200,121,65,.06), transparent 70%);
+      opacity: 0; transition: opacity .3s; pointer-events: none;
+    }
+    .bento-card:hover::after { opacity: 1; }
 
-    /* ── Memory section ────────────────────────────────────────────────── */
-    .memory-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 3rem; align-items: center; }
-    @media (max-width: 700px) { .memory-layout { grid-template-columns: 1fr; } }
-    .file-tree {
-      background: var(--surface); border: 1px solid var(--border);
-      border-radius: 10px; padding: 1.25rem 1.5rem;
-      font-family: 'JetBrains Mono', monospace; font-size: .82rem; line-height: 2;
-    }
-    .file-tree .dir  { color: var(--copper); }
-    .file-tree .file { color: var(--fg-soft); }
+    .bento-2 { grid-column: span 2; }
+    .bento-3 { grid-column: span 3; }
 
-    /* ── CTA ───────────────────────────────────────────────────────────── */
+    .bento-card .bento-label {
+      font-size: .62rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .1em;
+      color: var(--copper); margin-bottom: .4rem;
+    }
+    .bento-card h3 {
+      font-size: .95rem; font-weight: 700;
+      margin-bottom: .35rem; line-height: 1.3;
+    }
+    .bento-card p {
+      font-size: .78rem; color: var(--fg-dim); line-height: 1.55;
+    }
+    .bento-card .bento-visual {
+      margin-top: .6rem;
+      background: #070910;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: .5rem .7rem;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .62rem; line-height: 1.6;
+      color: var(--fg-muted); overflow: hidden;
+    }
+    .bento-card .bento-big-num {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 2.4rem; font-weight: 800; line-height: 1;
+      background: linear-gradient(135deg, var(--copper-lt), var(--gold));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      margin-bottom: .3rem;
+    }
+    .bento-card .bento-file-tree {
+      margin-top: .5rem;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .65rem; line-height: 1.7;
+      color: var(--fg-muted);
+    }
+    .bento-file-tree .dir { color: var(--copper); }
+    .bento-file-tree .file { color: var(--fg-dim); }
+
+    /* ── CTA section ────────────────────────────────── */
     .cta-section {
-      text-align: center; padding: 80px 0 100px;
+      text-align: center;
+      padding: 80px 0 100px;
       position: relative;
     }
     .cta-section::before {
@@ -416,237 +632,79 @@
       background: radial-gradient(ellipse 50% 60% at 50% 100%, rgba(200,121,65,.1), transparent 70%);
       pointer-events: none;
     }
-    .cta-section h2 { font-size: clamp(1.8rem, 4vw, 2.8rem); font-weight: 700; margin-bottom: 1rem; }
-    .cta-section p { color: var(--fg-soft); max-width: 480px; margin: 0 auto 2rem; }
-    .cta-section .btn { font-size: 1rem; padding: .75rem 2rem; }
+    .cta-section h2 {
+      font-size: clamp(1.8rem, 4vw, 2.8rem);
+      font-weight: 700; margin-bottom: 1rem;
+    }
+    .cta-section p {
+      color: var(--fg-dim); max-width: 480px;
+      margin: 0 auto 2rem;
+    }
 
-    /* ── Footer ────────────────────────────────────────────────────────── */
+    /* ── Footer ──────────────────────────────────────── */
     footer {
       border-top: 1px solid var(--border);
       padding: 2rem 28px;
       display: flex; justify-content: space-between; align-items: center;
       flex-wrap: wrap; gap: 1rem;
       max-width: 1100px; margin: 0 auto;
-      color: var(--fg-soft); font-size: .85rem;
+      color: var(--fg-muted); font-size: .85rem;
     }
-    footer a { color: var(--fg-soft); }
+    footer a { color: var(--fg-dim); }
     footer a:hover { color: var(--copper-lt); }
     .footer-links { display: flex; gap: 1.5rem; }
 
-    /* ── Responsive ────────────────────────────────────────────────────── */
+    /* ── Responsive ──────────────────────────────────── */
+    @media (max-width: 768px) {
+      .diff-layout { grid-template-columns: 1fr; }
+      .bento { grid-template-columns: 1fr 1fr; }
+      .bento-2, .bento-3 { grid-column: span 1; }
+      .h-timeline svg.flow-line { display: none; }
+      .h-timeline-nodes { flex-direction: column; gap: 24px; align-items: center; }
+      .h-node, .h-node:nth-child(odd), .h-node:nth-child(even) {
+        padding: 0; flex-direction: row; gap: 14px;
+      }
+      .h-node:nth-child(odd) .h-card,
+      .h-node:nth-child(even) .h-card { order: 2; text-align: left; }
+      .h-node:nth-child(odd) .h-dot,
+      .h-node:nth-child(even) .h-dot { order: 0; }
+      .h-stem { display: none; }
+      .h-dot { width: 36px; height: 36px; font-size: .85rem; }
+      .h-card { width: auto; }
+      .stat-bar .container { gap: 28px; }
+      .terminal-body { height: 320px; font-size: 11px; padding: 16px 18px; }
+      .keyword-cloud { gap: 6px; }
+      .keyword-chip { font-size: .72rem; padding: 4px 10px; }
+    }
     @media (max-width: 640px) {
       .nav-links .hide-mobile { display: none; }
       .hero { padding: 90px 1rem 60px; }
       .hero-logo { font-size: 7px; }
       section { padding: 60px 0; }
-    }
-
-    /* ── Stat bar ───────────────────────────────────────────────────────── */
-    .stat-bar {
-      border-top: 1px solid var(--border);
-      border-bottom: 1px solid var(--border);
-      background: var(--surface);
-      padding: 18px 0;
-    }
-    .stat-bar .container {
-      display: flex; justify-content: center; gap: 48px; flex-wrap: wrap;
-    }
-    .stat-item { text-align: center; }
-    .stat-num {
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 1.4rem; font-weight: 700;
-      color: var(--copper-lt);
-      display: block;
-    }
-    .stat-label {
-      font-size: .75rem; color: var(--fg-soft);
-      text-transform: uppercase; letter-spacing: .08em;
-    }
-
-    /* ── Command grid ───────────────────────────────────────────────────── */
-    .cmd-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-      gap: 10px;
-    }
-    .cmd-row {
-      display: flex; align-items: baseline; gap: 12px;
-      background: var(--surface); border: 1px solid var(--border);
-      border-radius: 8px; padding: .65rem 1rem;
-      font-family: 'JetBrains Mono', monospace; font-size: .82rem;
-    }
-    .cmd-row:hover { border-color: var(--border-hi); }
-    .cmd-name { color: var(--copper-lt); flex-shrink: 0; }
-    .cmd-desc { color: var(--fg-soft); font-size: .78rem; }
-
-    /* ── Feature groups ─────────────────────────────────────────────────── */
-    .feature-group { margin-bottom: 2.5rem; }
-    .feature-group-label {
-      font-size: .72rem; font-weight: 700; text-transform: uppercase;
-      letter-spacing: .12em; color: var(--copper);
-      margin-bottom: .9rem; display: flex; align-items: center; gap: 8px;
-    }
-    .feature-group-label::after {
-      content: ''; flex: 1; height: 1px; background: var(--border);
-    }
-
-    /* ── Compact feature + compare blocks ─────────────────────────────── */
-    .keyword-cloud {
-      display: flex; flex-wrap: wrap; gap: 10px;
-      margin-bottom: 24px;
-    }
-    .keyword-chip {
-      padding: 6px 12px;
-      border: 1px solid var(--border-hi);
-      border-radius: 999px;
-      background: var(--surface);
-      color: var(--fg-soft);
-      font-size: .78rem;
-      letter-spacing: .02em;
-    }
-    .expand-list {
-      display: grid;
-      gap: 10px;
-    }
-    .expand-item {
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      background: var(--surface);
-      overflow: hidden;
-    }
-    .expand-item summary {
-      cursor: pointer;
-      list-style: none;
-      padding: 14px 16px;
-      font-weight: 600;
-      color: var(--fg);
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-    }
-    .expand-head {
-      display: inline-flex;
-      align-items: center;
-      gap: 10px;
-    }
-    .expand-icon {
-      width: 20px;
-      height: 20px;
-      border-radius: 999px;
-      border: 1px solid var(--border-hi);
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      color: var(--copper-lt);
-      font-size: .8rem;
-      transition: transform .18s ease;
-      flex-shrink: 0;
-    }
-    .expand-item[open] .expand-icon {
-      transform: rotate(45deg);
-    }
-    .expand-item summary::-webkit-details-marker { display: none; }
-    .expand-item[open] summary {
-      border-bottom: 1px solid var(--border);
-      background: var(--surface2);
-    }
-    .expand-content {
-      padding: 14px 16px;
-      color: var(--fg-soft);
-      font-size: .9rem;
-      line-height: 1.7;
-    }
-    .info-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-      gap: 10px;
-    }
-    .info-card {
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      background: #111523;
-      padding: 12px;
-    }
-    .info-title {
-      color: var(--fg);
-      font-size: .82rem;
-      text-transform: uppercase;
-      letter-spacing: .06em;
-      margin-bottom: 8px;
-    }
-    .info-list {
-      list-style: none;
-      display: grid;
-      gap: 6px;
-      margin: 0;
-      padding: 0;
-      font-size: .84rem;
-      line-height: 1.55;
-      color: var(--fg-soft);
-    }
-    .info-list li::before {
-      content: '• ';
-      color: var(--copper-lt);
-    }
-    .compare-snap {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 14px;
-      padding: 22px;
-    }
-    .snap-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-      gap: 12px;
-      margin-bottom: 14px;
-    }
-    .snap-card {
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      background: var(--surface2);
-      padding: 14px;
-    }
-    .snap-card h3 {
-      font-size: .88rem;
-      margin-bottom: 8px;
-      color: var(--fg);
-    }
-    .pill-row {
-      display: flex; flex-wrap: wrap; gap: 8px;
-      margin-top: 8px;
-    }
-    .pill {
-      font-size: .72rem;
-      padding: 4px 8px;
-      border-radius: 999px;
-      border: 1px solid var(--border-hi);
-      color: var(--fg-soft);
-    }
-    .pill.good {
-      border-color: rgba(45,212,160,.35);
-      color: var(--success);
-      background: rgba(45,212,160,.08);
+      .stat-bar .container { gap: 20px; }
+      .bento { grid-template-columns: 1fr; }
+      .bento-2, .bento-3 { grid-column: span 1; }
+      .h-card { width: 180px; }
+      .h-card p { font-size: .7rem; }
+      .h-card .mini-term { font-size: .55rem; }
     }
   </style>
 </head>
 <body>
 
-<!-- ── Nav ───────────────────────────────────────────────────────────────── -->
+<!-- ── Nav ─────────────────────────────────────────────── -->
 <nav>
   <div class="nav-inner container">
-    <div class="nav-brand"> mantis <span class="nav-mascot">(o_o)</span></div>
+    <div class="nav-brand">mantis <span class="nav-mascot">(o_o)</span></div>
     <div class="nav-links">
-      <a href="#features" class="hide-mobile">Platform</a>
-      <a href="#commands" class="hide-mobile">CLI</a>
-      <a href="#install" class="hide-mobile">Install</a>
-      <a href="https://github.com/SeedHire/Mantis" target="_blank" class="hide-mobile">GitHub</a>
-      <a href="https://github.com/SeedHire/Mantis" target="_blank" class="btn btn-ghost nav-cta">★ Star</a>
-      <a href="#install" class="btn btn-primary nav-cta">Get started</a>
+      <a href="documentation.html" class="hide-mobile">Docs</a>
+      <a href="https://github.com/seedhire/mantis" target="_blank" rel="noopener" class="hide-mobile">GitHub</a>
+      <a href="#install" class="btn btn-primary nav-cta">Get Started</a>
     </div>
   </div>
 </nav>
 
-<!-- ── Hero ──────────────────────────────────────────────────────────────── -->
+<!-- ── Hero ────────────────────────────────────────────── -->
 <div class="hero">
   <div class="hero-bloom"></div>
   <div class="container">
@@ -658,29 +716,27 @@
 ██║╚██╔╝██║██╔══██║██║╚██╗██║   ██║   ██║╚════██║
 ██║ ╚═╝ ██║██║  ██║██║ ╚████║   ██║   ██║███████║
 ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝   ╚═╝   ╚═╝╚══════╝</pre>
-<pre class="hero-mascot fade-up d1">    \   /
+      <pre class="hero-mascot fade-up d1">    \   /
     \_/
     (o_o)
    |===[|||]==|</pre>
     </div>
-    
 
     <h1 class="fade-up d2">
-      Free AI coding assistant<br/>
-      <span class="metallic">that actually knows your codebase.</span>
+      AI coding assistant.<br>
+      <span class="metallic">Zero cost. Full stack.</span>
     </h1>
-    <p class="fade-up d3">
-      Ask, build, and ship with confidence using agentic code generation,
-      iterative build verification, persistent project memory, and graph-aware context.
-      No API bill. Ollama Cloud free tier or fully local.
+    <p class="hero-sub fade-up d3">
+      Plan, code, test, and verify in one command.<br>
+      Runs on Ollama Cloud (free) or fully local.
     </p>
 
     <div class="hero-ctas fade-up d4">
-      <a href="#install" class="btn btn-primary">↓ Install in 10 seconds</a>
-      <a href="https://github.com/SeedHire/Mantis" target="_blank" class="btn btn-ghost">View on GitHub →</a>
+      <a href="#install" class="btn btn-primary">Install</a>
+      <a href="https://github.com/seedhire/mantis" target="_blank" rel="noopener" class="btn btn-ghost">View on GitHub →</a>
     </div>
 
-    <!-- Hero terminal -->
+    <!-- Terminal Demo — fixed height, scrolls as lines fill -->
     <div class="terminal-wrap fade-up d4">
       <div class="terminal-bar">
         <span class="dot dot-red"></span>
@@ -688,48 +744,21 @@
         <span class="dot dot-green"></span>
         <span class="terminal-title">mantis — ~/my-project</span>
       </div>
-      <div class="terminal-body">
-        <div><span class="t-green">● Sagar-Darji</span> &nbsp;<span class="t-dim">via GitHub · session resumed (12 turns, yesterday)</span></div>
-        <div><span class="t-gold">● BRAIN.md loaded · 14 decisions · 6 rejections</span></div>
-        <div><span class="t-gold">● 187 files indexed · graph.db up to date</span></div>
-        <div>&nbsp;</div>
-        <div><span class="t-dim">────────────────────────────────────────────────────────</span></div>
-        <div><span class="t-prompt">❯ </span>build a todo app with express, typescript, and postgres</div>
-        <div>&nbsp;</div>
-        <div><span class="t-dim">  ◆ planning   [qwen2.5:14b]</span></div>
-        <div><span class="t-gold">  ✓ plan ready  </span><span class="t-dim">(4.2s · 1,847 tokens)</span></div>
-        <div><span class="t-dim">  ◆ coding   [qwen2.5-coder:7b] — 7 tasks</span></div>
-        <div>&nbsp;</div>
-        <div><span class="t-dim">  ── tasks ──</span></div>
-        <div>&nbsp; <span class="t-green">✓</span> <span class="t-dim">Project setup and configuration</span> <span class="t-dim">(3 files · 892 tokens · 3.1s)</span></div>
-        <div>&nbsp; <span class="t-green">✓</span> <span class="t-dim">Data models and TypeScript interfaces</span> <span class="t-dim">(2 files · 634 tokens · 2.8s)</span></div>
-        <div>&nbsp; <span class="t-dim">  ◆ installing dependencies...</span></div>
-        <div>&nbsp; <span class="t-green">✓</span> <span class="t-dim">Database migrations and schema</span> <span class="t-dim">(2 files · 1,203 tokens · 4.1s)</span></div>
-        <div>&nbsp; <span class="t-green">✓</span> <span class="t-dim">Repository layer (data access)</span> <span class="t-dim">(2 files · 1,456 tokens · 5.2s)</span></div>
-        <div>&nbsp; <span class="t-gold">⠹</span> <span class="t-fg">Service layer (business logic)</span> <span class="t-dim">1,102 tokens · 3.8s</span></div>
-        <div>&nbsp; <span class="t-gold">⠹</span> <span class="t-fg">API controllers and routes</span> <span class="t-dim">847 tokens · 2.9s</span></div>
-        <div>&nbsp; ○ <span class="t-dim">Middleware, validation, error handling</span></div>
-        <div>&nbsp;</div>
-        <div><span class="t-dim">  [task 5: fixing issues — attempt 1/3]</span></div>
-        <div><span class="t-gold">  ✓ code ready  </span><span class="t-dim">(6/7 tasks · 18.4s · 8,291 tokens)</span></div>
-        <div><span class="t-green">  ✓ tests verified  </span><span class="t-dim">(2 iterations)</span></div>
-        <div>&nbsp;</div>
-        <div><span class="t-dim">  ✻ Engineered in 32.1s</span></div>
-        <div><span class="t-dim">────────────────────────────────────────────────────────</span></div>
-        <div><span class="t-prompt">❯ </span><span class="cursor"></span></div>
+      <div class="terminal-body" id="terminal-demo">
+        <!-- Lines injected by JS -->
       </div>
     </div>
 
   </div>
 </div>
 
-<!-- ── Install strip ─────────────────────────────────────────────────────── -->
+<!-- ── Install strip ──────────────────────────────────── -->
 <div class="install-strip" id="install">
   <div class="container">
     <span class="install-label">Quick install</span>
     <div class="install-cmd">
-      <code id="cmd-curl">curl -fsSL https://raw.githubusercontent.com/SeedHire/Mantis/main/install.sh | sh</code>
-      <button class="copy-btn" onclick="copy('cmd-curl', this)">copy</button>
+      <code id="cmd-brew">brew install seedhire/tap/mantis</code>
+      <button class="copy-btn" onclick="copy('cmd-brew', this)">copy</button>
     </div>
     <span class="install-sep">or</span>
     <div class="install-cmd">
@@ -738,437 +767,340 @@
     </div>
     <span class="install-sep">or</span>
     <div class="install-cmd">
-      <code id="cmd-brew">brew install seedhire/tap/mantis</code>
-      <button class="copy-btn" onclick="copy('cmd-brew', this)">copy</button>
+      <code id="cmd-curl">curl -fsSL https://mantis.sh/install | sh</code>
+      <button class="copy-btn" onclick="copy('cmd-curl', this)">copy</button>
     </div>
   </div>
 </div>
 
-<!-- ── Stat bar ──────────────────────────────────────────────────────────── -->
-<div class="stat-bar">
+<!-- ── Stats bar — user-centric KPIs ──────────────────── -->
+<div class="stat-bar fade-in">
   <div class="container">
-    <div class="stat-item"><span class="stat-num">23,800+</span><span class="stat-label">lines of Go</span></div>
-    <div class="stat-item"><span class="stat-num">243</span><span class="stat-label">tests</span></div>
+    <div class="stat-item"><span class="stat-num">$0</span><span class="stat-label">forever</span></div>
+    <div class="stat-item"><span class="stat-num">7</span><span class="stat-label">model tiers, auto-routed</span></div>
+    <div class="stat-item"><span class="stat-num">22</span><span class="stat-label">slash commands</span></div>
     <div class="stat-item"><span class="stat-num">30</span><span class="stat-label">CLI commands</span></div>
-    <div class="stat-item"><span class="stat-num">27</span><span class="stat-label">packages</span></div>
-    <div class="stat-item"><span class="stat-num">$0</span><span class="stat-label">monthly cost</span></div>
+    <div class="stat-item"><span class="stat-num">0</span><span class="stat-label">API keys needed</span></div>
   </div>
 </div>
 
-<section id="features">
+<!-- ── Keyword cloud ──────────────────────────────────── -->
+<div class="keyword-strip fade-in">
   <div class="container">
-    <p class="section-label">Platform Overview</p>
-    <h2 class="section-title">What you get, quickly.</h2>
-    <p class="section-sub">Keyword-first summary below. Expand only what you want to read.</p>
-
     <div class="keyword-cloud">
       <span class="keyword-chip">Multi-Stage Pipeline</span>
-      <span class="keyword-chip">Agentic Code Generation</span>
-      <span class="keyword-chip">Build Verification Loop</span>
+      <span class="keyword-chip">Multi-Agent Orchestration</span>
+      <span class="keyword-chip">Diff Preview + Approval</span>
       <span class="keyword-chip">Iterative Test Fixing</span>
-      <span class="keyword-chip">LSP Server</span>
-      <span class="keyword-chip">MCP Server</span>
       <span class="keyword-chip">Persistent Memory</span>
       <span class="keyword-chip">Ground Truth Guard</span>
-      <span class="keyword-chip">7-Tier Router + Vision</span>
+      <span class="keyword-chip">7-Tier Model Router</span>
+      <span class="keyword-chip">AST Dependency Graph</span>
       <span class="keyword-chip">Impact Analysis</span>
-      <span class="keyword-chip">Cross-Repo Workspace</span>
-      <span class="keyword-chip">Runtime Trace Analysis</span>
+      <span class="keyword-chip">Convention Enforcement</span>
+      <span class="keyword-chip">LSP Server</span>
+      <span class="keyword-chip">MCP Server</span>
       <span class="keyword-chip">Architecture Lint</span>
+      <span class="keyword-chip">Dead Code Detection</span>
       <span class="keyword-chip">Web Search</span>
+      <span class="keyword-chip">Vision / Multimodal</span>
+      <span class="keyword-chip">Offline Mode</span>
+      <span class="keyword-chip">Operation Undo</span>
     </div>
-
-    <div class="expand-list">
-      <details class="expand-item">
-        <summary><span class="expand-head">Code Generation Pipeline</span><span class="expand-icon">+</span></summary>
-        <div class="expand-content">
-          <div class="info-grid">
-            <div class="info-card">
-              <div class="info-title">Multi-Stage Pipeline</div>
-              <ul class="info-list">
-                <li>PLAN → CODE → TESTS stages with tier-optimized models</li>
-                <li>Plan decomposes into 6-10 focused tasks</li>
-                <li>First 2 tasks sequential (setup + types), rest parallel</li>
-                <li>Auto dependency install after setup task</li>
-              </ul>
-            </div>
-            <div class="info-card">
-              <div class="info-title">Build Verification</div>
-              <ul class="info-list">
-                <li>Build check after every task with up to 3 fix retries</li>
-                <li>Stuck detection: same error twice = move on</li>
-                <li>Content validation rejects TODOs, stubs, placeholders</li>
-                <li>Downstream tasks receive actual file content (types, interfaces)</li>
-              </ul>
-            </div>
-          </div>
-        </div>
-      </details>
-      <details class="expand-item">
-        <summary><span class="expand-head">Multi-Agent Orchestration</span><span class="expand-icon">+</span></summary>
-        <div class="expand-content">
-          <div class="info-grid">
-            <div class="info-card">
-              <div class="info-title">Agent System</div>
-              <ul class="info-list">
-                <li>Auto-activates for high-impact changes (4+ files, 2+ packages)</li>
-                <li>Orchestrator decomposes task into per-package sub-tasks</li>
-                <li>Workers execute in parallel with 7 tools</li>
-                <li>Synthesizer combines worker outputs into coherent result</li>
-              </ul>
-            </div>
-            <div class="info-card">
-              <div class="info-title">Agent Tools</div>
-              <ul class="info-list">
-                <li><code>read_file</code>, <code>write_file</code>, <code>edit_file</code> with path traversal guard</li>
-                <li><code>run_bash</code> with allowlist (go/npm/cargo/pytest/git)</li>
-                <li><code>search_codebase</code>, <code>find_symbol</code>, <code>run_tests</code></li>
-              </ul>
-            </div>
-          </div>
-        </div>
-      </details>
-      <details class="expand-item">
-        <summary><span class="expand-head">Ask, Build, and See</span><span class="expand-icon">+</span></summary>
-        <div class="expand-content">
-          <div class="info-grid">
-            <div class="info-card">
-              <div class="info-title">Interaction</div>
-              <ul class="info-list">
-                <li><code>mantis</code> interactive workflow with dynamic file reading</li>
-                <li>One-shot CLI queries with graph context auto-injection</li>
-                <li>Image analysis via <code>--image</code> and <code>/vision</code></li>
-                <li>Web search via <code>/search</code> (Tavily or DuckDuckGo)</li>
-              </ul>
-            </div>
-            <div class="info-card">
-              <div class="info-title">Speed Controls</div>
-              <ul class="info-list">
-                <li><code>/file</code> to inject source, <code>/fetch</code> for web pages</li>
-                <li><code>/test</code> iterative test-fix loop</li>
-                <li><code>/commit</code> and <code>/pr</code> for git workflow</li>
-                <li><code>/brain</code>, <code>/decision</code>, <code>/reject</code> for memory</li>
-              </ul>
-            </div>
-          </div>
-        </div>
-      </details>
-      <details class="expand-item">
-        <summary><span class="expand-head">Memory + Skills</span><span class="expand-icon">+</span></summary>
-        <div class="expand-content">
-          <div class="info-grid">
-            <div class="info-card">
-              <div class="info-title">Persistent Brain</div>
-              <ul class="info-list">
-                <li><code>BRAIN.md</code> and <code>DECISIONS.log</code> track context</li>
-                <li><code>REJECTED.md</code> prevents repeat bad paths</li>
-                <li><code>embeddings.db</code> provides semantic recall</li>
-              </ul>
-            </div>
-            <div class="info-card">
-              <div class="info-title">Skill Layer</div>
-              <ul class="info-list">
-                <li>25 built-in specialist skills included</li>
-                <li>Add markdown skills in <code>.mantis/skills/</code></li>
-                <li>Relevant skills load automatically per task</li>
-              </ul>
-            </div>
-          </div>
-        </div>
-      </details>
-      <details class="expand-item">
-        <summary><span class="expand-head">Codebase Intelligence</span><span class="expand-icon">+</span></summary>
-        <div class="expand-content">
-          <div class="info-grid">
-            <div class="info-card">
-              <div class="info-title">Graph Engine</div>
-              <ul class="info-list">
-                <li>AST dependency graph across Go, TS, and Python</li>
-                <li>Symbol discovery with <code>find</code></li>
-                <li>Interactive exploration with <code>graph</code></li>
-              </ul>
-            </div>
-            <div class="info-card">
-              <div class="info-title">Change Safety</div>
-              <ul class="info-list">
-                <li>Blast-radius checks with <code>impact</code></li>
-                <li>Dead code and circular dependency detection</li>
-                <li>Cross-repo impact via <code>workspace</code></li>
-              </ul>
-            </div>
-          </div>
-        </div>
-      </details>
-      <details class="expand-item">
-        <summary><span class="expand-head">Risk + Runtime Visibility</span><span class="expand-icon">+</span></summary>
-        <div class="expand-content">
-          <div class="info-grid">
-            <div class="info-card">
-              <div class="info-title">History Signals</div>
-              <ul class="info-list">
-                <li><code>hotspots</code> and <code>risky</code> expose churn risk</li>
-                <li><code>coupling</code> reveals co-change patterns</li>
-                <li><code>intent</code> and <code>spec-gaps</code> show quality drift</li>
-              </ul>
-            </div>
-            <div class="info-card">
-              <div class="info-title">Runtime Signals</div>
-              <ul class="info-list">
-                <li>Trace ingest for OTLP, pprof, and custom formats</li>
-                <li><code>hotpaths</code> and <code>cold</code> highlight runtime reality</li>
-                <li><code>weight</code> ranks impact by runtime significance</li>
-              </ul>
-            </div>
-          </div>
-        </div>
-      </details>
-      <details class="expand-item">
-        <summary><span class="expand-head">Guardrails + IDE Integration</span><span class="expand-icon">+</span></summary>
-        <div class="expand-content">
-          <div class="info-grid">
-            <div class="info-card">
-              <div class="info-title">Reliability Guardrails</div>
-              <ul class="info-list">
-                <li><code>GROUND_TRUTH.json</code> catches invented symbols</li>
-                <li><code>mantis lint</code> enforces architecture boundaries</li>
-                <li>7-tier router with 97.7% classification accuracy</li>
-                <li>Iterative test loop auto-detects Go/Node/Python/Rust</li>
-              </ul>
-            </div>
-            <div class="info-card">
-              <div class="info-title">IDE + Tool Integration</div>
-              <ul class="info-list">
-                <li><code>mantis lsp</code> — LSP server with hover, symbols, diagnostics</li>
-                <li><code>mantis mcp</code> — MCP server for AI tool integration</li>
-                <li>Free-tier + local-first workflow by default</li>
-                <li>Per-turn token tracking and session cost reports</li>
-              </ul>
-            </div>
-          </div>
-        </div>
-      </details>
-    </div>
-
   </div>
-</section>
+</div>
 
-<!-- ── Comparison ─────────────────────────────────────────────────────────── -->
-<section style="background:var(--surface); padding: 96px 0;">
+<!-- ── How it works — Horizontal flowing timeline ──────── -->
+<section class="fade-in" style="padding:72px 0;">
   <div class="container">
-    <p class="section-label">Comparison</p>
-    <h2 class="section-title">What Mantis includes at $0.</h2>
-    <p class="section-sub">Compared with typical Codex CLI, Claude Code, and Copilot workflows.</p>
-    <div class="compare-snap">
-      <div class="snap-grid">
-        <div class="snap-card">
-          <h3>Mantis</h3>
-          <div class="pill-row">
-            <span class="pill good">Agentic Pipeline</span>
-            <span class="pill good">Build Verification</span>
-            <span class="pill good">Persistent Memory</span>
-            <span class="pill good">Cross-Repo Graph</span>
-            <span class="pill good">LSP + MCP</span>
-            <span class="pill good">$0 + Local Ollama</span>
-          </div>
-        </div>
-        <div class="snap-card">
-          <h3>Codex CLI Workflows</h3>
-          <div class="pill-row">
-            <span class="pill">Strong coding agent</span>
-            <span class="pill">Memory usually external</span>
-            <span class="pill">Graph/trace tools separate</span>
-          </div>
-        </div>
-        <div class="snap-card">
-          <h3>Claude Code Workflows</h3>
-          <div class="pill-row">
-            <span class="pill">Strong reasoning</span>
-            <span class="pill">Project memory not native</span>
-            <span class="pill">Runtime intel not native</span>
-          </div>
-        </div>
-        <div class="snap-card">
-          <h3>Copilot Workflows</h3>
-          <div class="pill-row">
-            <span class="pill">IDE completion strength</span>
-            <span class="pill">Cross-repo impact limited</span>
-            <span class="pill">Team memory external</span>
-          </div>
-        </div>
-      </div>
-      <details class="expand-item">
-        <summary><span class="expand-head">Open detailed capability matrix</span><span class="expand-icon">+</span></summary>
-        <div class="expand-content">
-          <div class="info-grid">
-            <div class="info-card">
-              <div class="info-title">Mantis-Native Stack</div>
-              <ul class="info-list">
-                <li>Persistent team memory + decision/rejection log</li>
-                <li>AST + cross-repo impact graph</li>
-                <li>Runtime trace ingestion + architecture lint</li>
-                <li>Hallucination guard + local-first operation</li>
-              </ul>
+    <p class="section-label">How it works</p>
+    <h2 class="section-title">One prompt. <span class="metallic">Ship-ready code.</span></h2>
+
+    <div class="h-timeline">
+      <!-- SVG curved flow line -->
+      <svg class="flow-line" viewBox="0 0 1100 80" preserveAspectRatio="none" fill="none">
+        <defs>
+          <linearGradient id="flowGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stop-color="#C87941"/>
+            <stop offset="35%" stop-color="#F0C040"/>
+            <stop offset="70%" stop-color="#2DD4A0"/>
+            <stop offset="100%" stop-color="#2DD4A0"/>
+          </linearGradient>
+        </defs>
+        <path d="M 50 55 C 200 55, 220 25, 330 25 C 440 25, 460 55, 550 55 C 640 55, 660 25, 770 25 C 880 25, 900 55, 1050 55"
+              stroke="url(#flowGrad)" stroke-width="2.5" stroke-linecap="round" opacity=".4"/>
+        <path d="M 50 55 C 200 55, 220 25, 330 25 C 440 25, 460 55, 550 55 C 640 55, 660 25, 770 25 C 880 25, 900 55, 1050 55"
+              stroke="url(#flowGrad)" stroke-width="6" stroke-linecap="round" opacity=".04" filter="blur(4px)"/>
+      </svg>
+
+      <div class="h-timeline-nodes">
+        <!-- 1. Plan — above -->
+        <div class="h-node">
+          <div class="h-card">
+            <h3>Plan <span class="badge badge-auto">auto</span></h3>
+            <p>Reasoning model decomposes into tasks with dependency ordering and verification criteria.</p>
+            <div class="mini-term">
+              <span class="t-dim">◆ planning [kimi-k2]</span><br>
+              <span class="t-gold">✓ plan ready</span> <span class="t-dim">— 7 tasks</span>
             </div>
-            <div class="info-card">
-              <div class="info-title">Typical Alternative Stack</div>
-              <ul class="info-list">
-                <li>Agent workflow often strong for coding tasks</li>
-                <li>Memory, graph, and runtime visibility split across tools</li>
-                <li>Capability depth usually tied to paid tiers</li>
-                <li>Extra integration/setup overhead for teams</li>
-              </ul>
+          </div>
+          <div class="h-stem"></div>
+          <div class="h-dot h-dot-1">1</div>
+        </div>
+
+        <!-- 2. Code — below -->
+        <div class="h-node">
+          <div class="h-dot h-dot-2">2</div>
+          <div class="h-stem"></div>
+          <div class="h-card">
+            <h3>Code <span class="badge badge-parallel">parallel</span></h3>
+            <p>Sequential setup → parallel agents. Build check per task, 3 retries. Sealed types prevent conflicts.</p>
+            <div class="mini-term">
+              <span class="t-green">✓</span> <span class="t-dim">setup · models</span> <span class="t-gold">SEALED</span><br>
+              <span class="t-green">✓✓✓</span> <span class="t-dim">routes · auth · validation</span>
             </div>
           </div>
         </div>
-      </details>
+
+        <!-- 3. Test — above -->
+        <div class="h-node">
+          <div class="h-card">
+            <h3>Test <span class="badge badge-auto">auto-fix</span></h3>
+            <p>Parses failures (Go/Node/Python/Rust), reads source, fixes iteratively. Stuck detection.</p>
+            <div class="mini-term">
+              <span class="t-red">✗ 2 fail</span> <span class="t-dim">→ fix → rerun</span><br>
+              <span class="t-green">✓ passed</span> <span class="t-dim">(iter 2)</span>
+            </div>
+          </div>
+          <div class="h-stem"></div>
+          <div class="h-dot h-dot-3">3</div>
+        </div>
+
+        <!-- 4. Verify — below -->
+        <div class="h-node">
+          <div class="h-dot h-dot-4">4</div>
+          <div class="h-stem"></div>
+          <div class="h-card">
+            <h3>Verify <span class="badge badge-safe">safe</span></h3>
+            <p>Ground truth + conventions check. Auto re-prompts. Diff preview before writing.</p>
+            <div class="mini-term">
+              <span class="t-green">✓ truth · ✓ conventions</span><br>
+              <span class="t-gold">Write 7 file(s)?</span> <span class="t-green">y</span>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </section>
 
-<!-- ── How it works ───────────────────────────────────────────────────────── -->
-<section>
+<!-- ── Diff Preview showcase ──────────────────────────── -->
+<section class="fade-in">
   <div class="container">
-    <p class="section-label">Get started</p>
-    <h2 class="section-title">Up and running in 3 steps.</h2>
-    <div class="steps">
-      <div class="step">
-        <div class="step-num">1</div>
-        <h3>Install</h3>
-        <p>Run <code>brew install seedhire/tap/mantis</code> or <code>curl -fsSL .../install.sh | sh</code>. One binary, no dependencies.</p>
+    <div class="diff-layout">
+      <div class="diff-text">
+        <p class="section-label">You stay in control</p>
+        <h3>Review every change <span class="metallic">before it lands.</span></h3>
+        <p>Every file Mantis writes shows a colored diff with an approval prompt. New files, modifications, deletions — you see it all and decide what gets written.</p>
+        <p style="color:var(--fg-muted); font-size:.85rem;">No silent overwrites. No surprises. Accept, reject, or ask for changes.</p>
       </div>
-      <div class="step">
-        <div class="step-num">2</div>
-        <h3>Sign in with GitHub</h3>
-        <p>Mantis opens a browser tab on first run. One click to authorize — no extra account, no billing setup.</p>
-      </div>
-      <div class="step">
-        <div class="step-num">3</div>
-        <h3>Index + start</h3>
-        <p>Run <code>mantis init</code> once, then use <code>mantis</code> (or <code>--image</code>) to start with full graph-aware context.</p>
+      <div class="diff-terminal">
+        <div class="terminal-bar">
+          <span class="dot dot-red"></span>
+          <span class="dot dot-yellow"></span>
+          <span class="dot dot-green"></span>
+          <span class="terminal-title">diff preview</span>
+        </div>
+        <div class="diff-body">
+          <span class="line-border">┌─ Preview (3 file(s)) ──</span><br>
+          <span class="line-border">│</span> <span class="line-added">✚ new</span>  <span class="line-file">src/models/user.ts</span><br>
+          <span class="line-border">│</span> <span class="line-file">✎ mod</span>  <span class="line-file">src/routes/api.ts</span><br>
+          <span class="line-border">│</span>   <span class="line-removed">-  app.get('/users', ...)</span><br>
+          <span class="line-border">│</span>   <span class="line-added">+  app.get('/users', authenticate, ...)</span><br>
+          <span class="line-border">│</span> <span class="line-added">✚ new</span>  <span class="line-file">src/middleware/auth.ts</span><br>
+          <span class="line-border">└──</span><br><br>
+          <span class="line-prompt">Write 3 file(s)? [Y/n]:</span> <span class="cursor"></span>
+        </div>
       </div>
     </div>
   </div>
 </section>
 
-<!-- ── Memory ─────────────────────────────────────────────────────────────── -->
-<section style="background:var(--surface); padding: 96px 0;">
+<!-- ── Strengths — Bento grid ──────────────────────────── -->
+<section class="fade-in" style="padding:72px 0;">
   <div class="container">
-    <div class="memory-layout">
-      <div>
-        <p class="section-label">Project Memory</p>
-        <h2 class="section-title">Persistent memory with verification built in.</h2>
-        <p class="section-sub">Mantis stores human-readable project memory, session context, semantic embeddings, and a live ground-truth signature index. On startup, it reloads this state so answers stay consistent with your actual codebase and previous decisions.</p>
+    <p class="section-label">Why Mantis</p>
+    <h2 class="section-title">Built different. <span class="metallic">Ships different.</span></h2>
+
+    <div class="bento">
+      <!-- Row 1: $0 (1col) + Graph (3col wide) -->
+      <div class="bento-card">
+        <div class="bento-big-num">$0</div>
+        <h3>Forever.</h3>
+        <p>No API keys. No subscriptions. No caps. Ollama Cloud free tier or local.</p>
       </div>
-      <div class="file-tree">
-        <div><span class="dir">.mantis/</span></div>
-        <div>&nbsp; <span class="file">BRAIN.md</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← rolling project summary</span></div>
-        <div>&nbsp; <span class="file">CONVENTIONS.md</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← architecture rules</span></div>
-        <div>&nbsp; <span class="file">DECISIONS.log</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← timestamped decisions</span></div>
-        <div>&nbsp; <span class="file">REJECTED.md</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← approaches that failed</span></div>
-        <div>&nbsp; <span class="file">GROUND_TRUTH.json</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← real function signatures</span></div>
-        <div>&nbsp; <span class="file">embeddings.db</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← semantic memory (BM25 + cosine hybrid)</span></div>
-        <div>&nbsp; <span class="file">graph.db</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← AST dependency graph</span></div>
-        <div>&nbsp; <span class="file">AGENT_SCRATCH.json</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← multi-agent communication</span></div>
-        <div>&nbsp; <span class="file">last-pipeline.md</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← full pipeline output</span></div>
-        <div>&nbsp; <span class="dir">sessions/</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← persisted chat history</span></div>
-        <div>&nbsp; <span class="dir">skills/</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← built-in + custom skill files</span></div>
-        <div style="margin-top:.5rem"><span class="dir">.mantisrc.yml</span> &nbsp;<span style="color:var(--fg-muted);font-size:.75rem">← CI lint rules</span></div>
+      <div class="bento-card bento-3">
+        <div class="bento-label">Codebase Intelligence</div>
+        <h3>Sees your entire codebase, not just one file.</h3>
+        <p>AST dependency graph via tree-sitter. Impact analysis, dead code, hotspots, coupling. Go, TypeScript, Python.</p>
+        <div class="bento-visual">
+          <span class="t-dim">$</span> <span class="t-copper">mantis impact</span> auth/login.go --risk<br>
+          <span class="t-gold">Blast radius:</span> <span class="t-dim">47 files</span> · <span class="t-red">HIGH</span> <span class="t-dim">routes/api.ts (9/10)</span> · <span class="t-red">HIGH</span> <span class="t-dim">middleware/auth.ts (8/10)</span>
+        </div>
+      </div>
+
+      <!-- Row 2: Memory (2col) + Offline (1col) + Router (1col) -->
+      <div class="bento-card bento-2">
+        <div class="bento-label">Memory</div>
+        <h3>Never forgets.</h3>
+        <p>Decisions, rejections, conventions persist across sessions. Hybrid BM25 + cosine search.</p>
+        <div class="bento-file-tree">
+          <span class="dir">.mantis/</span> <span class="dir">├─</span> <span class="file">BRAIN.md</span> <span class="dir">├─</span> <span class="file">CONVENTIONS.md</span> <span class="dir">├─</span> <span class="file">DECISIONS.log</span> <span class="dir">├─</span> <span class="file">REJECTED.md</span> <span class="dir">├─</span> <span class="file">GROUND_TRUTH.json</span> <span class="dir">└─</span> <span class="file">embeddings.db</span>
+        </div>
+      </div>
+      <div class="bento-card">
+        <div class="bento-label">Privacy</div>
+        <h3>100% offline.</h3>
+        <p>Code never leaves your machine. Air-gapped environments. <code style="color:var(--copper-lt);background:var(--surface2);padding:1px 5px;border-radius:3px;font-size:.75rem;">--offline</code></p>
+      </div>
+      <div class="bento-card">
+        <div class="bento-label">Routing</div>
+        <h3>7 model tiers.</h3>
+        <p>Auto-routed from 4B to 32B+ by intent. 97.7% classification accuracy.</p>
+      </div>
+
+      <!-- Row 3: Diff (2col) + Pipeline summary (2col) -->
+      <div class="bento-card bento-2">
+        <div class="bento-label">Safety</div>
+        <h3>Diff preview + undo.</h3>
+        <p>Colored per-file diff before every write. Accept or reject. Roll back with <code style="color:var(--copper-lt);background:var(--surface2);padding:1px 5px;border-radius:3px;font-size:.75rem;">/undo</code>. Ground truth guard catches hallucinated signatures.</p>
+      </div>
+      <div class="bento-card bento-2">
+        <div class="bento-label">Pipeline</div>
+        <h3>One prompt builds your entire app.</h3>
+        <p>Parallel agents, build verification, iterative test fixing, sealed types. Convention enforcement on every response.</p>
+        <div class="bento-visual">
+          <span class="t-green">✓</span> <span class="t-dim">setup</span> · <span class="t-green">✓</span> <span class="t-dim">models</span> · <span class="t-green">✓</span> <span class="t-dim">routes</span> · <span class="t-green">✓</span> <span class="t-dim">auth</span> · <span class="t-green">✓</span> <span class="t-dim">tests</span> · <span class="t-gold">Write 7 file(s)?</span> <span class="t-green">y</span>
+        </div>
       </div>
     </div>
   </div>
 </section>
 
-<!-- ── Command reference ──────────────────────────────────────────────────── -->
-<section id="commands">
+<!-- ── CTA ─────────────────────────────────────────────── -->
+<div class="cta-section fade-in">
   <div class="container">
-    <p class="section-label">CLI Map</p>
-    <h2 class="section-title">Command surface, organized by workflow.</h2>
-    <p class="section-sub">No hidden features. This is the practical command map for daily use.</p>
-
-    <div class="feature-group">
-      <div class="feature-group-label">Core Assistant</div>
-      <div class="cmd-grid">
-        <div class="cmd-row"><span class="cmd-name">mantis</span><span class="cmd-desc">interactive AI session with memory and routing</span></div>
-        <div class="cmd-row"><span class="cmd-name">mantis "question"</span><span class="cmd-desc">one-shot answer from the terminal</span></div>
-        <div class="cmd-row"><span class="cmd-name">mantis --plan "build X"</span><span class="cmd-desc">plan-then-code pipeline with approval step</span></div>
-        <div class="cmd-row"><span class="cmd-name">mantis --image screenshot.png</span><span class="cmd-desc">multimodal analysis from an image</span></div>
-        <div class="cmd-row"><span class="cmd-name">mantis lsp</span><span class="cmd-desc">Language Server Protocol server for IDE integration</span></div>
-        <div class="cmd-row"><span class="cmd-name">mantis mcp</span><span class="cmd-desc">Model Context Protocol server for AI tools</span></div>
-        <div class="cmd-row"><span class="cmd-name">mantis handoff</span><span class="cmd-desc">generate HANDOFF.md for async collaboration</span></div>
-      </div>
-    </div>
-
-    <div class="feature-group">
-      <div class="feature-group-label">Graph + Structural Analysis</div>
-      <div class="cmd-grid">
-        <div class="cmd-row"><span class="cmd-name">mantis init</span><span class="cmd-desc">build dependency graph for the current repo</span></div>
-        <div class="cmd-row"><span class="cmd-name">mantis watch</span><span class="cmd-desc">keep graph updated as files change</span></div>
-        <div class="cmd-row"><span class="cmd-name">mantis find &lt;symbol&gt;</span><span class="cmd-desc">locate symbols and importers</span></div>
-        <div class="cmd-row"><span class="cmd-name">mantis impact &lt;symbol&gt;</span><span class="cmd-desc">blast-radius analysis before edits</span></div>
-        <div class="cmd-row"><span class="cmd-name">mantis context &lt;symbol&gt;</span><span class="cmd-desc">bundle relevant context for AI prompts</span></div>
-        <div class="cmd-row"><span class="cmd-name">mantis dead</span><span class="cmd-desc">detect unreachable or unreferenced code</span></div>
-        <div class="cmd-row"><span class="cmd-name">mantis circular</span><span class="cmd-desc">find circular dependency cycles</span></div>
-        <div class="cmd-row"><span class="cmd-name">mantis graph</span><span class="cmd-desc">open dependency graph visualization</span></div>
-        <div class="cmd-row"><span class="cmd-name">mantis lint</span><span class="cmd-desc">enforce architecture rules from .mantisrc.yml</span></div>
-        <div class="cmd-row"><span class="cmd-name">mantis tui</span><span class="cmd-desc">full-screen intelligence dashboard</span></div>
-      </div>
-    </div>
-
-    <div class="feature-group">
-      <div class="feature-group-label">Temporal + Quality Intelligence</div>
-      <div class="cmd-grid">
-        <div class="cmd-row"><span class="cmd-name">mantis hotspots</span><span class="cmd-desc">highest-churn files in git history</span></div>
-        <div class="cmd-row"><span class="cmd-name">mantis risky</span><span class="cmd-desc">risk score from churn and bus factor</span></div>
-        <div class="cmd-row"><span class="cmd-name">mantis coupling [path]</span><span class="cmd-desc">files that frequently change together</span></div>
-        <div class="cmd-row"><span class="cmd-name">mantis intent &lt;path&gt;</span><span class="cmd-desc">commit intent timeline (feat/fix/refactor)</span></div>
-        <div class="cmd-row"><span class="cmd-name">mantis todos</span><span class="cmd-desc">scan TODO / FIXME / HACK markers</span></div>
-        <div class="cmd-row"><span class="cmd-name">mantis spec-gaps</span><span class="cmd-desc">intent-vs-code mismatch detection</span></div>
-      </div>
-    </div>
-
-    <div class="feature-group">
-      <div class="feature-group-label">Workspace + Runtime Traces</div>
-      <div class="cmd-grid">
-        <div class="cmd-row"><span class="cmd-name">mantis workspace init &lt;repos...&gt;</span><span class="cmd-desc">create a cross-repo workspace graph</span></div>
-        <div class="cmd-row"><span class="cmd-name">mantis workspace find &lt;symbol&gt;</span><span class="cmd-desc">search symbols across repositories</span></div>
-        <div class="cmd-row"><span class="cmd-name">mantis workspace impact &lt;symbol&gt;</span><span class="cmd-desc">cross-repo change impact analysis</span></div>
-        <div class="cmd-row"><span class="cmd-name">mantis workspace stats</span><span class="cmd-desc">workspace-level graph statistics</span></div>
-        <div class="cmd-row"><span class="cmd-name">mantis trace ingest &lt;file&gt;</span><span class="cmd-desc">ingest OTLP JSON, pprof text, or custom traces</span></div>
-        <div class="cmd-row"><span class="cmd-name">mantis trace hotpaths</span><span class="cmd-desc">top functions by runtime activity</span></div>
-        <div class="cmd-row"><span class="cmd-name">mantis trace cold</span><span class="cmd-desc">important paths never hit at runtime</span></div>
-        <div class="cmd-row"><span class="cmd-name">mantis trace weight &lt;symbol&gt;</span><span class="cmd-desc">runtime-weighted impact score</span></div>
-      </div>
+    <h2><span class="metallic">Start building.</span> Zero setup.</h2>
+    <p>Install Mantis, run <code style="color:var(--copper-lt)">mantis init</code> in any project, and start coding. Full documentation covers every command and workflow.</p>
+    <div style="display:flex; gap:12px; justify-content:center; flex-wrap:wrap;">
+      <a href="#install" class="btn btn-primary">Install Mantis</a>
+      <a href="documentation.html" class="btn btn-ghost">Read the Docs →</a>
     </div>
   </div>
-</section>
+</div>
 
-<!-- ── CTA ────────────────────────────────────────────────────────────────── -->
-<section class="cta-section">
-  <div class="container">
-    <h2><span class="metallic">One install. Full AI engineering stack.</span></h2>
-    <p>Agentic code generation, build verification, LSP/MCP servers, persistent memory, graph intelligence, and runtime traces at zero monthly cost.</p>
-    <a href="#install" class="btn btn-primary">↓ Install Mantis</a>
-  </div>
-</section>
-
-<!-- ── Footer ────────────────────────────────────────────────────────────── -->
+<!-- ── Footer ─────────────────────────────────────────── -->
 <footer>
-  <span>◈ Mantis · built by <a href="https://github.com/Sagar-Darji" target="_blank">Sagar Darji</a></span>
+  <div>Mantis — built by Sagar Darji</div>
   <div class="footer-links">
-    <a href="https://github.com/SeedHire/Mantis" target="_blank">GitHub</a>
-    <a href="https://github.com/SeedHire/Mantis/issues" target="_blank">Issues</a>
-    <a href="https://github.com/SeedHire/Mantis/blob/main/README.md" target="_blank">Docs</a>
+    <a href="documentation.html">Docs</a>
+    <a href="https://github.com/seedhire/mantis" target="_blank" rel="noopener">GitHub</a>
+    <a href="https://github.com/seedhire/mantis/issues" target="_blank" rel="noopener">Issues</a>
   </div>
 </footer>
 
 <script>
+  // ── Copy to clipboard ──
   function copy(id, btn) {
-    navigator.clipboard.writeText(document.getElementById(id).textContent);
-    const orig = btn.textContent;
-    btn.textContent = 'copied!';
-    setTimeout(() => btn.textContent = orig, 1800);
+    const text = document.getElementById(id).textContent;
+    navigator.clipboard.writeText(text).then(() => {
+      btn.classList.add('copied');
+      const orig = btn.textContent;
+      btn.textContent = 'copied!';
+      setTimeout(() => { btn.classList.remove('copied'); btn.textContent = orig; }, 2000);
+    });
   }
 
+  // ── IntersectionObserver for fade-in ──
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(e => { if (e.isIntersecting) e.target.classList.add('visible'); });
+  }, { threshold: 0.15 });
+  document.querySelectorAll('.fade-in').forEach(el => observer.observe(el));
+
+  // ── Terminal typing animation (fixed height, auto-scrolls) ──
+  const termLines = [
+    { text: '<span class="t-green">● Sagar-Darji</span> <span class="t-dim">via GitHub · session resumed</span>', delay: 500 },
+    { text: '<span class="t-gold">● BRAIN.md loaded · 14 decisions · 6 rejections</span>', delay: 400 },
+    { text: '<span class="t-gold">● 187 files indexed · graph.db up to date</span>', delay: 400 },
+    { text: '', delay: 200 },
+    { text: '<span class="t-dim">────────────────────────────────────────────────────</span>', delay: 200 },
+    { text: '<span class="t-prompt">❯ </span><span class="t-fg">build a todo app with express, typescript, and postgres</span>', delay: 1200 },
+    { text: '', delay: 400 },
+    { text: '<span class="t-dim">  ◆ planning   [qwen2.5:14b]</span>', delay: 600 },
+    { text: '<span class="t-gold">  ✓ plan ready</span>  <span class="t-dim">(4.2s · 1,847 tokens)</span>', delay: 800 },
+    { text: '<span class="t-dim">  ◆ coding   [qwen2.5-coder:7b] — 7 tasks</span>', delay: 500 },
+    { text: '', delay: 200 },
+    { text: '<span class="t-dim">  ── tasks ──</span>', delay: 300 },
+    { text: '  <span class="t-green">✓</span> <span class="t-dim">Project setup and configuration</span> <span class="t-dim">(3 files · 892 tok · 3.1s)</span>', delay: 500 },
+    { text: '  <span class="t-green">✓</span> <span class="t-dim">Data models and TypeScript interfaces</span> <span class="t-dim">(2 files · 634 tok · 2.8s)</span>', delay: 450 },
+    { text: '  <span class="t-dim">  ◆ installing dependencies...</span>', delay: 400 },
+    { text: '  <span class="t-green">✓</span> <span class="t-dim">Database migrations and schema</span> <span class="t-dim">(2 files · 1,203 tok · 4.1s)</span>', delay: 500 },
+    { text: '  <span class="t-green">✓</span> <span class="t-dim">Repository layer (data access)</span> <span class="t-dim">(2 files · 1,456 tok · 5.2s)</span>', delay: 500 },
+    { text: '  <span class="t-green">✓</span> <span class="t-dim">Service layer (business logic)</span> <span class="t-dim">(1 file · 1,102 tok · 3.8s)</span>', delay: 450 },
+    { text: '  <span class="t-green">✓</span> <span class="t-dim">API controllers and routes</span> <span class="t-dim">(2 files · 847 tok · 2.9s)</span>', delay: 450 },
+    { text: '  <span class="t-green">✓</span> <span class="t-dim">Middleware, validation, error handling</span> <span class="t-dim">(2 files · 928 tok · 3.4s)</span>', delay: 500 },
+    { text: '', delay: 300 },
+    { text: '<span class="t-dim">  [verifying — build check]</span>', delay: 500 },
+    { text: '<span class="t-green">  ✓ build passed</span>', delay: 400 },
+    { text: '<span class="t-green">  ✓ tests verified</span>  <span class="t-dim">(2 iterations)</span>', delay: 500 },
+    { text: '', delay: 200 },
+    { text: '<span class="t-gold">┌─ Preview (7 file(s)) ──</span>', delay: 600 },
+    { text: '<span class="t-gold">│</span> <span class="t-green">✚ new</span>  src/db/schema.sql', delay: 200 },
+    { text: '<span class="t-gold">│</span> <span class="t-green">✚ new</span>  src/models/todo.ts', delay: 180 },
+    { text: '<span class="t-gold">│</span> <span class="t-green">✚ new</span>  src/routes/todos.ts', delay: 180 },
+    { text: '<span class="t-gold">│</span> <span class="t-green">✚ new</span>  src/routes/auth.ts', delay: 180 },
+    { text: '<span class="t-gold">│</span> <span class="t-green">✚ new</span>  src/middleware/jwt.ts', delay: 160 },
+    { text: '<span class="t-gold">│</span> <span class="t-green">✚ new</span>  src/index.ts', delay: 160 },
+    { text: '<span class="t-gold">│</span> <span class="t-green">✚ new</span>  tests/todos.test.ts', delay: 160 },
+    { text: '<span class="t-gold">└──</span>', delay: 200 },
+    { text: '', delay: 200 },
+    { text: '<span class="t-gold">Write 7 file(s)? [Y/n]:</span> <span class="t-green">y</span>', delay: 1000 },
+    { text: '', delay: 300 },
+    { text: '<span class="t-dim">  ✻</span> <span class="t-green">Engineered in 32.1s</span> <span class="t-dim">· 7 files · 6,062 tokens</span>', delay: 800 },
+    { text: '<span class="t-dim">────────────────────────────────────────────────────</span>', delay: 300 },
+    { text: '<span class="t-prompt">❯ </span><span class="cursor"></span>', delay: 200 },
+  ];
+
+  function runTerminal() {
+    const container = document.getElementById('terminal-demo');
+    container.innerHTML = '';
+    let totalDelay = 0;
+
+    termLines.forEach((line) => {
+      totalDelay += line.delay;
+      setTimeout(() => {
+        const div = document.createElement('div');
+        div.className = 'term-line';
+        div.innerHTML = line.text || '&nbsp;';
+        container.appendChild(div);
+        requestAnimationFrame(() => div.classList.add('visible'));
+        container.scrollTop = container.scrollHeight;
+      }, totalDelay);
+    });
+
+    // Restart loop after all lines + pause
+    setTimeout(runTerminal, totalDelay + 5000);
+  }
+
+  // Start when hero is visible
+  const heroObs = new IntersectionObserver((entries) => {
+    if (entries[0].isIntersecting) {
+      heroObs.disconnect();
+      setTimeout(runTerminal, 600);
+    }
+  }, { threshold: 0.3 });
+  heroObs.observe(document.querySelector('.hero'));
 </script>
+
 </body>
 </html>
