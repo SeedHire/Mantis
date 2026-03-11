@@ -266,12 +266,11 @@ func applyEdits(edits []EditBlock, root string) (modified []string, skipCount in
 // extractAndApplyChanges handles both ```edit:filepath (diff) and ```lang:filepath (whole file)
 // blocks from model output. Edit blocks are applied as SEARCH/REPLACE patches; whole-file blocks
 // overwrite the file entirely (used for new files or when the model ignores edit format).
-// Returns all file paths written/modified.
-//
-// Terminal output is kept minimal: a single batched summary line is printed when
-// edit blocks are skipped, instead of one ⚠ line per skipped edit.
-func extractAndApplyChanges(text, root string) []string {
+// Returns (writtenPaths, warnings). Warnings are collected instead of printed directly,
+// so the caller can route them through a coordinated renderer.
+func extractAndApplyChanges(text, root string) ([]string, []string) {
 	var allPaths []string
+	var warnings []string
 	seen := map[string]bool{}
 
 	// 1. Apply edit blocks first (surgical changes to existing files).
@@ -279,9 +278,7 @@ func extractAndApplyChanges(text, root string) []string {
 	if len(edits) > 0 {
 		modified, skipped := applyEdits(edits, root)
 		if skipped > 0 {
-			// Single batched warning — not one per skipped edit.
-			fmt.Printf("%s  ⚠ %d edit block(s) skipped (SEARCH mismatch — see .mantis/last-pipeline.md)%s\n",
-				pColorDim, skipped, pColorReset)
+			warnings = append(warnings, fmt.Sprintf("%d edit block(s) skipped (SEARCH mismatch — see .mantis/last-pipeline.md)", skipped))
 		}
 		for _, p := range modified {
 			if !seen[p] {
@@ -330,10 +327,9 @@ func extractAndApplyChanges(text, root string) []string {
 	if len(allPaths) == 0 {
 		fences := countCodeFences(text)
 		if fences > 0 {
-			fmt.Printf("%s  ⚠ 0 files written (%d code fence(s) found but none had valid file paths)%s\n",
-				pColorDim, fences, pColorReset)
+			warnings = append(warnings, fmt.Sprintf("0 files written (%d code fence(s) found but none had valid file paths)", fences))
 		}
 	}
 
-	return allPaths
+	return allPaths, warnings
 }

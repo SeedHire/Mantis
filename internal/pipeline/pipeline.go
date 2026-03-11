@@ -160,6 +160,8 @@ type Task struct {
 	ID                   int
 	Title                string
 	Status               string // "pending", "running", "done", "failed"
+	SubMessage           string // indented sub-line (e.g. "fixing issues — attempt 2/3")
+	Skipped              bool   // true if skipped due to prerequisite failure
 	Output               string // generated code for this task
 	FileCount            int    // number of files written to disk for this task
 	StartTime            time.Time
@@ -264,7 +266,10 @@ func Run(
 			res.ComplTok += ct
 			fmt.Printf("%s  ✓ tdd-tests ready  %s(%.1fs · %d tokens)%s\n", pColorGold, pColorDim, tddElapsed.Seconds(), pt+ct, pColorReset)
 			if opts.Root != "" {
-				written := extractAndApplyChanges(res.TestText, opts.Root)
+				written, eacWarns := extractAndApplyChanges(res.TestText, opts.Root)
+				for _, w := range eacWarns {
+					fmt.Printf("%s  ⚠ %s%s\n", pColorDim, w, pColorReset)
+				}
 				if len(written) == 0 {
 					fmt.Printf("%s  ⚠ tdd-tests: no test files could be written to disk%s\n", pColorDim, pColorReset)
 				}
@@ -349,7 +354,10 @@ func Run(
 			if opts.Root == "" || attempt == maxRetries {
 				break
 			}
-			written := extractAndApplyChanges(res.CodeText, opts.Root)
+			written, eacWarns := extractAndApplyChanges(res.CodeText, opts.Root)
+			for _, ew := range eacWarns {
+				fmt.Printf("%s  ⚠ %s%s\n", pColorDim, ew, pColorReset)
+			}
 			// Fix 6: accumulate all written files, deduped.
 			for _, w := range written {
 				if !writtenSeen[w] {
@@ -409,7 +417,10 @@ func Run(
 		res.CodeText = editorValidate(ctx, client, editorModel, res.CodeText)
 		// Re-apply validated code to disk.
 		if opts.Root != "" {
-			extractAndApplyChanges(res.CodeText, opts.Root)
+			_, eacWarns := extractAndApplyChanges(res.CodeText, opts.Root)
+			for _, ew := range eacWarns {
+				fmt.Printf("%s  ⚠ %s%s\n", pColorDim, ew, pColorReset)
+			}
 		}
 	}
 
@@ -539,7 +550,10 @@ func ContinuePlan(
 		if opts.Root == "" || attempt == maxRetries {
 			break
 		}
-		written := extractAndApplyChanges(res.CodeText, opts.Root)
+		written, eacWarns := extractAndApplyChanges(res.CodeText, opts.Root)
+		for _, ew := range eacWarns {
+			fmt.Printf("%s  ⚠ %s%s\n", pColorDim, ew, pColorReset)
+		}
 		// Fix 6: accumulate all written files, deduped.
 		for _, w := range written {
 			if !writtenSeen[w] {
@@ -710,135 +724,7 @@ func parseVerificationCriteria(planText string) map[int][]string {
 	return result
 }
 
-// taskIcon returns the display icon, icon color, and title color for a task status.
-func taskIcon(status string, spinFrame int) (string, string, string) {
-	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-	switch status {
-	case "running":
-		return frames[spinFrame%len(frames)], pColorGold, "\033[37m" // white title
-	case "done":
-		return "✓", "\033[38;5;70m", pColorDim // green check, gray title
-	case "failed":
-		return "✗", "\033[38;5;196m", "\033[38;5;196m" // red
-	default:
-		return "○", pColorDim, pColorDim // gray
-	}
-}
-
-// taskSuffix builds the trailing info string (tokens, time, files) for a task line.
-func taskSuffix(t *Task) string {
-	switch t.Status {
-	case "running":
-		tok := atomic.LoadInt64(&t.streamTok)
-		elapsed := time.Since(t.StartTime).Seconds()
-		if tok > 0 {
-			return fmt.Sprintf("  %s%d tokens · %.1fs%s", pColorDim, tok, elapsed, pColorReset)
-		}
-		return fmt.Sprintf("  %s%.1fs%s", pColorDim, elapsed, pColorReset)
-	case "done":
-		parts := []string{}
-		if t.FileCount > 0 {
-			parts = append(parts, fmt.Sprintf("%d files", t.FileCount))
-		}
-		if t.Tokens > 0 {
-			parts = append(parts, fmt.Sprintf("%d tokens", t.Tokens))
-		}
-		if t.Elapsed > 0 {
-			parts = append(parts, fmt.Sprintf("%.1fs", t.Elapsed.Seconds()))
-		}
-		if len(parts) > 0 {
-			return fmt.Sprintf("  %s(%s)%s", pColorDim, strings.Join(parts, " · "), pColorReset)
-		}
-		return ""
-	case "failed":
-		if t.Elapsed > 0 {
-			return fmt.Sprintf("  %s(%.1fs)%s", pColorDim, t.Elapsed.Seconds(), pColorReset)
-		}
-		return ""
-	default:
-		return ""
-	}
-}
-
-// termWidth returns the current terminal width, defaulting to 80.
-func termWidth() int {
-	w, _, err := term.GetSize(int(os.Stdout.Fd()))
-	if err != nil || w <= 0 {
-		return 80
-	}
-	return w
-}
-
-// truncateTitle shortens a task title so the full line fits in one terminal row.
-// overhead accounts for "  X " prefix (4 chars) + suffix (up to ~30 chars).
-func truncateTitle(title string, maxWidth int) string {
-	// Reserve space for: "  X " prefix (4) + suffix stats (~35) + safety margin
-	available := maxWidth - 40
-	if available < 20 {
-		available = 20
-	}
-	if len(title) <= available {
-		return title
-	}
-	return title[:available-1] + "…"
-}
-
-// printTaskList renders the current task status to the terminal.
-func printTaskList(tasks []Task) {
-	w := termWidth()
-	for i := range tasks {
-		icon, iconColor, titleColor := taskIcon(tasks[i].Status, 0)
-		title := truncateTitle(tasks[i].Title, w)
-		fmt.Printf("  %s%s %s%s%s%s\n", iconColor, icon, titleColor, title, pColorReset, taskSuffix(&tasks[i]))
-	}
-}
-
-// updateTaskLine reprints a single task line in-place using ANSI cursor movement.
-// Cursor sits after the blank line below the task list, so we need +2:
-// +1 for the target line itself, +1 for the blank line separator.
-func updateTaskLine(tasks []Task, idx, totalTasks, spinFrame int) {
-	if idx < 0 || idx >= len(tasks) || totalTasks <= 0 {
-		return
-	}
-	t := &tasks[idx]
-	icon, iconColor, titleColor := taskIcon(t.Status, spinFrame)
-	title := truncateTitle(t.Title, termWidth())
-	linesUp := totalTasks - t.ID + 2 // +2: blank line + 1-based ID offset
-	fmt.Printf("\033[%dA\r\033[K  %s%s %s%s%s%s\033[%dB\r",
-		linesUp, iconColor, icon, titleColor, title, pColorReset, taskSuffix(t), linesUp)
-}
-
-// taskSpinner starts a background goroutine that animates spinner icons
-// on all "running" tasks. Returns a stop function.
-// outMu protects stdout writes so ANSI escape sequences don't interleave
-// between the spinner goroutine and the main task goroutines.
-func taskSpinner(tasks []Task, totalTasks int, mu *sync.Mutex, outMu *sync.Mutex) func() {
-	done := make(chan struct{})
-	go func() {
-		frame := 0
-		ticker := time.NewTicker(120 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				frame++
-				mu.Lock()
-				outMu.Lock()
-				for i := range tasks {
-					if tasks[i].Status == "running" {
-						updateTaskLine(tasks, i, totalTasks, frame)
-					}
-				}
-				outMu.Unlock()
-				mu.Unlock()
-			}
-		}
-	}()
-	var once sync.Once
-	return func() { once.Do(func() { close(done) }) }
-}
+// taskIcon, taskSuffix, termWidth, truncateTitle — moved to renderer.go
 
 // runTaskBased executes the code stage as individual task-by-task prompts
 // instead of one monolithic generation. The first task (usually setup/config)
@@ -857,12 +743,13 @@ func runTaskBased(
 	taskTimeout time.Duration,
 	codeOpts *ollama.ModelOptions,
 ) {
-	fmt.Printf("\n%s  ── tasks ──%s\n", pColorDim, pColorReset)
-	printTaskList(tasks)
-	fmt.Println() // blank line below task list for cursor math
+	// Atomic renderer owns all stdout for the task region.
+	r := newTaskRenderer(tasks)
+	r.initialRender()
+	stopSpinner := r.startSpinner()
+	defer stopSpinner()
 
 	var mu sync.Mutex
-	var outMu sync.Mutex  // protects stdout ANSI writes from interleaving
 	var writeMu sync.Mutex // protects file writes from parallel task races
 	var allCode strings.Builder
 	var totalPT, totalCT int
@@ -871,33 +758,30 @@ func runTaskBased(
 	var sealedManifest string    // populated after sequential tasks, injected into parallel workers
 	failedTaskTitles := map[string]bool{} // P9.5: track failed tasks to skip dependents
 
-	// Start the spinner animation for running tasks.
-	stopSpinner := taskSpinner(tasks, len(tasks), &mu, &outMu)
-	defer stopSpinner()
-
 	// defaultTaskTimeout is 8 minutes per task — generous but bounded.
 	if taskTimeout <= 0 {
 		taskTimeout = 8 * time.Minute
 	}
 
 	// safeWrite wraps extractAndApplyChanges with a mutex to prevent parallel tasks
-	// from racing on the same files (Fix 2).
+	// from racing on the same files (Fix 2). Warnings are routed through the renderer.
 	safeWrite := func(code, root string) []string {
 		writeMu.Lock()
 		defer writeMu.Unlock()
-		return extractAndApplyChanges(code, root)
+		paths, warnings := extractAndApplyChanges(code, root)
+		for _, w := range warnings {
+			r.addWarning(w)
+		}
+		return paths
 	}
 
 	// runOneTask executes a single task and updates its status.
 	runOneTask := func(i int, writtenFiles []string) {
 		mu.Lock()
-		tasks[i].Status = "running"
 		tasks[i].StartTime = time.Now()
 		atomic.StoreInt64(&tasks[i].streamTok, 0)
-		outMu.Lock()
-		updateTaskLine(tasks, i, len(tasks), 0)
-		outMu.Unlock()
 		mu.Unlock()
+		r.setStatus(i, "running")
 
 		// Each task gets its own deadline so a slow task doesn't starve siblings.
 		taskCtx, taskCancel := context.WithTimeout(ctx, taskTimeout)
@@ -932,10 +816,7 @@ func runTaskBased(
 					allWrittenFiles = append(allWrittenFiles, written...)
 				}
 			}
-			tasks[i].Status = "failed"
-			outMu.Lock()
-			updateTaskLine(tasks, i, len(tasks), 0)
-			outMu.Unlock()
+			r.setStatus(i, "failed")
 			return
 		}
 
@@ -955,8 +836,6 @@ func runTaskBased(
 		}
 
 		// Iterative fix loop: build check + content validation, up to 3 retries.
-		// Mirrors the monolithic path: retry with error context, stuck detection
-		// (same error twice = stop), always try to fix rather than fail.
 		if root != "" && len(written) > 0 {
 			const maxTaskRetries = 3
 			var lastBuildErr string
@@ -981,16 +860,7 @@ func runTaskBased(
 					buildErrStr := buildResult.Output
 					// Stuck detection: same build error twice means model can't fix it.
 					if buildErrStr == lastBuildErr {
-						errPreview := buildErrStr
-						if len(errPreview) > 200 {
-							errPreview = errPreview[:200] + "…"
-						}
-						taskLabel := tasks[i].Title
-			if len(taskLabel) > 40 {
-				taskLabel = taskLabel[:40] + "…"
-			}
-			fmt.Printf("%s  [%s: stuck on same error — moving on]%s\n", pColorDim, taskLabel, pColorReset)
-						fmt.Printf("%s  %s%s\n", pColorDim, errPreview, pColorReset)
+						r.setSubMessage(i, "stuck on same error — moving on")
 						break
 					}
 					lastBuildErr = buildErrStr
@@ -1004,12 +874,7 @@ func runTaskBased(
 					retryReason.WriteString("\nReplace ALL placeholders and stubs with real implementations.\n")
 				}
 
-				fixLabel := tasks[i].Title
-			if len(fixLabel) > 40 {
-				fixLabel = fixLabel[:40] + "…"
-			}
-			fmt.Printf("%s  [%s: fixing issues — attempt %d/%d]%s\n",
-					pColorDim, fixLabel, attempt+1, maxTaskRetries, pColorReset)
+				r.setSubMessage(i, fmt.Sprintf("fixing issues — attempt %d/%d", attempt+1, maxTaskRetries))
 
 				retryMsgs := []interface{}{
 					msgs[0], msgs[1], // system + original user prompt
@@ -1046,33 +911,17 @@ func runTaskBased(
 			}
 		}
 
-		tasks[i].Status = "done"
-		// UX-2: show progress after each task.
-		done := 0
-		for j := range tasks {
-			if tasks[j].Status == "done" {
-				done++
-			}
-		}
-		outMu.Lock()
-		updateTaskLine(tasks, i, len(tasks), 0)
-		fmt.Printf("%s  [%d/%d tasks done]%s\n", pColorDim, done, len(tasks), pColorReset)
-		outMu.Unlock()
+		r.clearSubMessage(i)
+		r.setStatus(i, "done")
 	}
 
 	// skipTask marks a task as failed/skipped due to a prerequisite failure.
 	skipTask := func(i int, reason string) {
 		mu.Lock()
-		tasks[i].Status = "failed"
+		tasks[i].Skipped = true
 		mu.Unlock()
-		outMu.Lock()
-		updateTaskLine(tasks, i, len(tasks), 0)
-		outMu.Unlock()
-		label := tasks[i].Title
-		if len(label) > 40 {
-			label = label[:40] + "\u2026"
-		}
-		fmt.Printf("%s  \u26a0 %s: skipped (%s)%s\n", pColorDim, label, reason, pColorReset)
+		r.setSubMessage(i, "skipped ("+reason+")")
+		r.setStatus(i, "failed")
 	}
 
 	// Phase 1: Run first two tasks sequentially.
@@ -1118,7 +967,6 @@ func runTaskBased(
 
 	if len(tasks) > seqCount {
 		// Phase 2: Run remaining tasks in parallel batches.
-		// Batch size limited to avoid overwhelming the API.
 		const maxParallel = 3
 		remaining := tasks[seqCount:]
 		for batchStart := 0; batchStart < len(remaining); batchStart += maxParallel {
@@ -1169,6 +1017,9 @@ func runTaskBased(
 			wg.Wait()
 		}
 	}
+
+	stopSpinner()
+	r.printSummary()
 
 	res.PromptTok += totalPT
 	res.ComplTok += totalCT
@@ -2024,6 +1875,8 @@ Write the complete implementation based on the plan. Requirements:
 - Use explicit file extensions in Node.js ESM imports (.js not .ts at runtime)
 - NEVER use path aliases (@/...) unless tsconfig.json paths AND bundler are confirmed configured
 - NEVER use deprecated APIs: use Buffer.from() not new Buffer(), useEffect not componentWillMount
+- tsconfig.json: NEVER enable "noUnusedLocals" or "noUnusedParameters" — they cause cascading errors in Express middleware/route handlers where unused next/req params are standard
+- When you define a helper (asyncHandler), USE it — NEVER also import a different version and leave the import unused
 
 ### Async and concurrency rules:
 - NEVER use sequential await when calls are independent — use Promise.all([a(), b()])
@@ -2100,6 +1953,7 @@ Write the complete implementation based on the plan. Requirements:
 - Only import REAL, well-known packages — NEVER invent package names
 - Check package.json "type" field for ESM vs CJS
 - NEVER use deprecated APIs: Buffer.from() not new Buffer(), useEffect not componentWillMount
+- tsconfig.json: NEVER enable "noUnusedLocals" or "noUnusedParameters" — causes cascading errors in Express middleware handlers
 
 ### Async rules:
 - Use Promise.all for independent parallel calls, not sequential await

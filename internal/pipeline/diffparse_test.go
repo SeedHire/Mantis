@@ -147,7 +147,7 @@ func TestExtractAndApplyChanges_MixedFormats(t *testing.T) {
 		"```edit:existing.go\n<<<SEARCH\nfunc old() {}\n===\nfunc updated() {}\n>>>SEARCH\n```\n\n" +
 		"```go:newfile.go\npackage main\n\nfunc brand() {}\n```"
 
-	paths := extractAndApplyChanges(text, root)
+	paths, _ := extractAndApplyChanges(text, root)
 
 	if len(paths) != 2 {
 		t.Fatalf("expected 2 paths, got %d: %v", len(paths), paths)
@@ -169,7 +169,7 @@ func TestExtractAndApplyChanges_MixedFormats(t *testing.T) {
 func TestExtractAndApplyChanges_WholeFileOnly(t *testing.T) {
 	root := t.TempDir()
 	text := "```go:app.go\npackage main\n\nfunc main() {}\n```"
-	paths := extractAndApplyChanges(text, root)
+	paths, _ := extractAndApplyChanges(text, root)
 
 	if len(paths) != 1 {
 		t.Fatalf("expected 1 path, got %d", len(paths))
@@ -189,7 +189,7 @@ func TestExtractAndApplyChanges_EditBlockSkipsDuplicate(t *testing.T) {
 	text := "```edit:f.go\n<<<SEARCH\nvar x = 1\n===\nvar x = 42\n>>>SEARCH\n```\n\n" +
 		"```go:f.go\npackage main\nvar x = 999\n```"
 
-	paths := extractAndApplyChanges(text, root)
+	paths, _ := extractAndApplyChanges(text, root)
 
 	if len(paths) != 1 {
 		t.Fatalf("expected 1 path (deduped), got %d", len(paths))
@@ -209,7 +209,7 @@ func TestExtractAndApplyChanges_EditOnly(t *testing.T) {
 	os.WriteFile(filepath.Join(root, "svc.go"), []byte("package svc\n\nfunc Run() { panic(\"todo\") }\n"), 0o644)
 
 	text := "```edit:svc.go\n<<<SEARCH\nfunc Run() { panic(\"todo\") }\n===\nfunc Run() error { return nil }\n>>>SEARCH\n```"
-	paths := extractAndApplyChanges(text, root)
+	paths, _ := extractAndApplyChanges(text, root)
 
 	if len(paths) != 1 {
 		t.Fatalf("expected 1 path, got %d", len(paths))
@@ -304,7 +304,7 @@ func TestExtractAndApplyChanges_NestedBackticks(t *testing.T) {
 		"export default sql;\n" +
 		"```\n"
 
-	paths := extractAndApplyChanges(text, root)
+	paths, _ := extractAndApplyChanges(text, root)
 	if len(paths) != 1 {
 		t.Fatalf("expected 1 path, got %d", len(paths))
 	}
