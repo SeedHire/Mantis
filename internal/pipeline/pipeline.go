@@ -55,10 +55,11 @@ func optsFor(model string, temperature float64) *ollama.ModelOptions {
 	return opts
 }
 
-// planOpts and codeOpts are package-level defaults; Run() overrides them per-model.
+// defaultPlanOpts and defaultCodeOpts are fallback values when model-specific
+// options cannot be resolved. Run() and ContinuePlan() create local copies.
 var (
-	planOpts = &ollama.ModelOptions{Temperature: 0.3, NumCtx: 32768}
-	codeOpts = &ollama.ModelOptions{Temperature: 0.15, NumCtx: 32768}
+	defaultPlanOpts = &ollama.ModelOptions{Temperature: 0.3, NumCtx: 32768}
+	defaultCodeOpts = &ollama.ModelOptions{Temperature: 0.15, NumCtx: 32768}
 )
 
 // doneVerbs is a pool of fun completion words, shown at the end of a pipeline run.
@@ -91,6 +92,14 @@ func progressTicker(stage string) (incr func(), stop func() time.Duration) {
 	var count int64
 	done := make(chan struct{})
 	start := time.Now()
+
+	// Suppress spinner when stdout is not a terminal.
+	if !term.IsTerminal(int(os.Stdout.Fd())) {
+		incr = func() { atomic.AddInt64(&count, 1) }
+		stop = func() time.Duration { return time.Since(start) }
+		return
+	}
+
 	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 	incr = func() { atomic.AddInt64(&count, 1) }
@@ -143,6 +152,7 @@ type Result struct {
 	ComplTok     int
 	Tasks        []Task   // parsed tasks with status (for TUI display)
 	WrittenFiles []string // absolute paths of all files written during task execution
+	TestsRan     bool     // UX-5: true if pipeline already ran test verification
 }
 
 // Task represents a single implementation task parsed from the plan.
@@ -188,9 +198,9 @@ func Run(
 	if editorModel == "" {
 		editorModel = router.ModelFor(router.TierFast)
 	}
-	// Override package-level defaults with per-model dynamic context windows.
-	planOpts = optsFor(planModel, 0.3)
-	codeOpts = optsFor(codeModel, 0.15)
+	// BUG-1: local options — no package-level mutation.
+	planOpts := optsFor(planModel, 0.3)
+	codeOpts := optsFor(codeModel, 0.15)
 	res := &Result{}
 
 	// 7.9: Model-aware edit format selection.
@@ -277,7 +287,7 @@ func Run(
 		// Task-based execution: each task gets its own focused prompt.
 		fmt.Printf("%s  ◆ coding   [%s] — %d tasks%s\n", pColorDim, codeModel, len(tasks), pColorReset)
 		codeStart := time.Now()
-		runTaskBased(ctx, client, codeModel, systemPrompt, userRequest, res.PlanText, tasks, res, opts.Root, opts.TaskTimeout)
+		runTaskBased(ctx, client, codeModel, systemPrompt, userRequest, res.PlanText, tasks, res, opts.Root, opts.TaskTimeout, codeOpts)
 		codeElapsed := time.Since(codeStart)
 
 		done := 0
@@ -310,6 +320,8 @@ func Run(
 		var lastBuildErr string
 		codeStart := time.Now()
 		var codeTokTotal int
+		var allWritten []string       // Fix 6: accumulate across retries
+		writtenSeen := map[string]bool{}
 		for attempt := 0; attempt <= maxRetries; attempt++ {
 			var codeBuf strings.Builder
 			codeIncr, codeStop := progressTicker("coding")
@@ -338,12 +350,19 @@ func Run(
 				break
 			}
 			written := extractAndApplyChanges(res.CodeText, opts.Root)
+			// Fix 6: accumulate all written files, deduped.
+			for _, w := range written {
+				if !writtenSeen[w] {
+					allWritten = append(allWritten, w)
+					writtenSeen[w] = true
+				}
+			}
 			if len(written) == 0 {
 				break
 			}
 			buildResult := autofix.Check(opts.Root, written)
 			if buildResult == nil || buildResult.Passed {
-				autoCommitWrites(opts.Root, written, res.PlanText)
+				res.WrittenFiles = allWritten
 				break
 			}
 
@@ -362,7 +381,7 @@ func Run(
 
 			retryMsg := fmt.Sprintf(
 				"Build failed with the following error:\n\n```\n%s\n```\n\n"+
-					"Fix only the affected function(s). Use ```edit:filepath blocks with <<<SEARCH/===/ >>>SEARCH markers "+
+					"Fix only the affected function(s). Use ```edit:filepath blocks with <<<SEARCH/===/>>>SEARCH markers "+
 					"to patch existing files. Only use ```lang:filepath for brand new files.",
 				buildErrStr)
 			if len(codeMsgs) > 2 {
@@ -372,6 +391,10 @@ func Run(
 				ollama.Message{Role: "assistant", Content: res.CodeText},
 				ollama.Message{Role: "user", Content: retryMsg},
 			)
+		}
+		// Fix 6: always set WrittenFiles from accumulated list.
+		if len(allWritten) > 0 && len(res.WrittenFiles) == 0 {
+			res.WrittenFiles = allWritten
 		}
 		codeElapsed := time.Since(codeStart)
 		fmt.Printf("%s  ✓ code ready  %s(%.1fs · %d tokens)%s\n", pColorGold, pColorDim, codeElapsed.Seconds(), codeTokTotal, pColorReset)
@@ -399,6 +422,8 @@ func Run(
 	}
 	testCh := make(chan stageOut, 1)
 
+	// BUG-6: capture planText before goroutine to avoid concurrent access to res.
+	capturedPlanText := res.PlanText
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -412,7 +437,7 @@ func Run(
 		fmt.Printf("%s  ◆ testing   [%s]%s\n", pColorDim, codeModel, pColorReset)
 		msgs := []interface{}{
 			ollama.Message{Role: "system", Content: systemPrompt + strings.ReplaceAll(testStageSuffix, "{TEST_NAMING}", effTestNaming)},
-			ollama.Message{Role: "user", Content: testUserPrompt(userRequest, res.PlanText)},
+			ollama.Message{Role: "user", Content: testUserPrompt(userRequest, capturedPlanText)},
 		}
 		var buf strings.Builder
 		testIncr, testStop := progressTicker("testing")
@@ -421,7 +446,13 @@ func Run(
 		testCh <- stageOut{buf.String(), pt, ct, testElapsed, err}
 	}()
 
-	testOut := <-testCh
+	// UX-4: select with ctx.Done() to avoid deadlock on Ctrl+C.
+	var testOut stageOut
+	select {
+	case testOut = <-testCh:
+	case <-ctx.Done():
+		testOut = stageOut{err: ctx.Err()}
+	}
 
 	if testOut.err == nil && strings.TrimSpace(testOut.text) != "" {
 		res.TestText = testOut.text
@@ -435,6 +466,11 @@ func Run(
 	// failures. Only runs when root is set and a test runner is detected.
 	if opts.Root != "" && !opts.SkipTests {
 		runPipelineTestLoop(ctx, client, opts.Root, res)
+	}
+
+	// BUG-3: commit only after tests pass (or test loop completes).
+	if opts.Root != "" && len(res.WrittenFiles) > 0 {
+		autoCommitWrites(opts.Root, res.WrittenFiles, res.PlanText)
 	}
 
 	res.Combined = assemble(res.PlanText, res.CodeText, res.TestText)
@@ -454,6 +490,7 @@ func ContinuePlan(
 	pipelineStart := time.Now()
 	res := &Result{PlanText: planText}
 	codeModel := router.ModelFor(router.TierCode)
+	codeOpts := optsFor(codeModel, 0.15) // BUG-1: local opts, no package-level mutation
 	effTestNaming := langTestNaming(detectLang(opts.Root))
 	effCodeSuffix := codeStageSuffixFor(router.EditFormatForTier(router.TierCode))
 
@@ -473,6 +510,8 @@ func ContinuePlan(
 	var lastBuildErr string
 	codeStart := time.Now()
 	var codeTokTotal int
+	var allWritten []string       // Fix 6: accumulate across retries
+	writtenSeen := map[string]bool{}
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		var codeBuf strings.Builder
 		codeIncr, codeStop := progressTicker("coding")
@@ -501,12 +540,19 @@ func ContinuePlan(
 			break
 		}
 		written := extractAndApplyChanges(res.CodeText, opts.Root)
+		// Fix 6: accumulate all written files, deduped.
+		for _, w := range written {
+			if !writtenSeen[w] {
+				allWritten = append(allWritten, w)
+				writtenSeen[w] = true
+			}
+		}
 		if len(written) == 0 {
 			break
 		}
 		buildResult := autofix.Check(opts.Root, written)
 		if buildResult == nil || buildResult.Passed {
-			autoCommitWrites(opts.Root, written, res.PlanText)
+			res.WrittenFiles = allWritten
 			break
 		}
 		buildErrStr := buildResult.Output
@@ -523,7 +569,7 @@ func ContinuePlan(
 		fmt.Printf("%s  [build error — retry %d/%d]%s\n", pColorDim, attempt+1, maxRetries, pColorReset)
 		retryMsg := fmt.Sprintf(
 			"Build failed with the following error:\n\n```\n%s\n```\n\n"+
-				"Fix only the affected function(s). Use ```edit:filepath blocks with <<<SEARCH/===/ >>>SEARCH markers.",
+				"Fix only the affected function(s). Use ```edit:filepath blocks with <<<SEARCH/===/>>>SEARCH markers.",
 			buildErrStr)
 		if len(codeMsgs) > 2 {
 			codeMsgs = codeMsgs[:2]
@@ -532,6 +578,10 @@ func ContinuePlan(
 			ollama.Message{Role: "assistant", Content: res.CodeText},
 			ollama.Message{Role: "user", Content: retryMsg},
 		)
+	}
+	// Fix 6: always set WrittenFiles from accumulated list.
+	if len(allWritten) > 0 && len(res.WrittenFiles) == 0 {
+		res.WrittenFiles = allWritten
 	}
 	codeElapsed := time.Since(codeStart)
 	fmt.Printf("%s  ✓ code ready  %s(%.1fs · %d tokens)%s\n", pColorGold, pColorDim, codeElapsed.Seconds(), codeTokTotal, pColorReset)
@@ -560,7 +610,13 @@ func ContinuePlan(
 		testElapsed := testStop()
 		testCh <- stageOut{buf.String(), pt, ct, testElapsed, err}
 	}()
-	testOut := <-testCh
+	// UX-4: select with ctx.Done() to avoid deadlock on Ctrl+C.
+	var testOut stageOut
+	select {
+	case testOut = <-testCh:
+	case <-ctx.Done():
+		testOut = stageOut{err: ctx.Err()}
+	}
 	if testOut.err == nil && strings.TrimSpace(testOut.text) != "" {
 		res.TestText = testOut.text
 		res.PromptTok += testOut.pt
@@ -571,6 +627,11 @@ func ContinuePlan(
 	// ── Stage 4: TEST VERIFICATION (optional) ────────────────────────────────
 	if opts.Root != "" && !opts.SkipTests {
 		runPipelineTestLoop(ctx, client, opts.Root, res)
+	}
+
+	// BUG-3: commit only after tests pass.
+	if opts.Root != "" && len(res.WrittenFiles) > 0 {
+		autoCommitWrites(opts.Root, res.WrittenFiles, res.PlanText)
 	}
 
 	res.Combined = assemble(res.PlanText, res.CodeText, res.TestText)
@@ -632,7 +693,8 @@ func parseVerificationCriteria(planText string) map[int][]string {
 	}
 	result := map[int][]string{}
 	var currentTask int
-	taskNumRe := regexp.MustCompile(`^(\d+)[.\):]?\s*$`)
+	// UX-3: match both bare "1." and "1. Task Name" patterns.
+	taskNumRe := regexp.MustCompile(`^(?:#+\s*)?(\d+)[.\):]?\s*`)
 	bulletRe := regexp.MustCompile(`^\s*[-*•]\s+(.+)$`)
 	for _, line := range strings.Split(section, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -793,16 +855,19 @@ func runTaskBased(
 	res *Result,
 	root string,
 	taskTimeout time.Duration,
+	codeOpts *ollama.ModelOptions,
 ) {
 	fmt.Printf("\n%s  ── tasks ──%s\n", pColorDim, pColorReset)
 	printTaskList(tasks)
 	fmt.Println() // blank line below task list for cursor math
 
 	var mu sync.Mutex
-	var outMu sync.Mutex // protects stdout ANSI writes from interleaving
+	var outMu sync.Mutex  // protects stdout ANSI writes from interleaving
+	var writeMu sync.Mutex // protects file writes from parallel task races
 	var allCode strings.Builder
 	var totalPT, totalCT int
 	var allWrittenFiles []string // tracks all files written across tasks
+	buildCheckRoot := root           // used for autofix.Check; cleared if dep install fails
 	var sealedManifest string    // populated after sequential tasks, injected into parallel workers
 	failedTaskTitles := map[string]bool{} // P9.5: track failed tasks to skip dependents
 
@@ -813,6 +878,14 @@ func runTaskBased(
 	// defaultTaskTimeout is 8 minutes per task — generous but bounded.
 	if taskTimeout <= 0 {
 		taskTimeout = 8 * time.Minute
+	}
+
+	// safeWrite wraps extractAndApplyChanges with a mutex to prevent parallel tasks
+	// from racing on the same files (Fix 2).
+	safeWrite := func(code, root string) []string {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return extractAndApplyChanges(code, root)
 	}
 
 	// runOneTask executes a single task and updates its status.
@@ -854,7 +927,7 @@ func runTaskBased(
 				allCode.WriteString(partial)
 				allCode.WriteString("\n\n")
 				if root != "" {
-					written := extractAndApplyChanges(partial, root)
+					written := safeWrite(partial, root)
 					tasks[i].FileCount = len(written)
 					allWrittenFiles = append(allWrittenFiles, written...)
 				}
@@ -876,7 +949,7 @@ func runTaskBased(
 		// Write files to disk immediately so user sees progress.
 		var written []string
 		if root != "" {
-			written = extractAndApplyChanges(code, root)
+			written = safeWrite(code, root)
 			tasks[i].FileCount = len(written)
 			allWrittenFiles = append(allWrittenFiles, written...)
 		}
@@ -891,7 +964,7 @@ func runTaskBased(
 
 			for attempt := 0; attempt < maxTaskRetries; attempt++ {
 				// Check build.
-				buildResult := autofix.Check(root, written)
+				buildResult := autofix.Check(buildCheckRoot, written)
 				buildPassed := buildResult == nil || buildResult.Passed
 
 				// Check content quality.
@@ -956,7 +1029,7 @@ func runTaskBased(
 				}
 
 				retryCode := retryBuf.String()
-				retryWritten := extractAndApplyChanges(retryCode, root)
+				retryWritten := safeWrite(retryCode, root)
 				allWrittenFiles = append(allWrittenFiles, retryWritten...)
 				tasks[i].FileCount += len(retryWritten)
 				allCode.WriteString(retryCode)
@@ -974,8 +1047,16 @@ func runTaskBased(
 		}
 
 		tasks[i].Status = "done"
+		// UX-2: show progress after each task.
+		done := 0
+		for j := range tasks {
+			if tasks[j].Status == "done" {
+				done++
+			}
+		}
 		outMu.Lock()
 		updateTaskLine(tasks, i, len(tasks), 0)
+		fmt.Printf("%s  [%d/%d tasks done]%s\n", pColorDim, done, len(tasks), pColorReset)
 		outMu.Unlock()
 	}
 
@@ -1019,7 +1100,9 @@ func runTaskBased(
 
 		// Install dependencies after the first task (setup/config task).
 		if i == 0 && root != "" {
-			installDeps(ctx, root)
+			if !installDeps(ctx, root) {
+				buildCheckRoot = "" // Fix 4: disable build checks when deps failed
+			}
 		}
 	}
 
@@ -1122,13 +1205,21 @@ CRITICAL RULES to avoid breaking parallel tasks:
 
 ABSOLUTE RULES — violation means the code is REJECTED:
 1. Every function body MUST have real logic — never return nil/undefined as a stub.
-2. Every import MUST match exact exports shown in "Already implemented files" below.
+2. Every import MUST match exact exports shown in "Already implemented files" below. NEVER invent package names that do not exist.
 3. If referencing a type from a prior file, use the EXACT name and field names shown.
 4. NEVER write "// TODO", "// FIXME", "throw new Error('not implemented')", or any placeholder.
 5. If you cannot fully implement something, OMIT it entirely rather than stubbing it.
 6. Route files MUST wire to actual controller methods — NEVER use res.status(501) or "not implemented" placeholders.
 7. When prior files show 'export default new ClassName()', import the DEFAULT EXPORT (the instance), do NOT call static methods on the class.
 8. Use the EXACT property names, constructor parameters, and method signatures shown in the "Exports" summary — do NOT invent alternatives.
+9. Express validation middleware: validate req.body directly — NEVER wrap {body, query, params} around it.
+10. Wrap async Express handlers to forward errors: asyncHandler = (fn) => (req, res, next) => fn(req, res, next).catch(next). Place error-handling middleware AFTER all routes.
+11. NEVER use string concatenation for SQL. Use parameterized queries or ORM methods.
+12. NEVER hardcode secrets (API keys, passwords, JWT secrets). Use environment variables.
+13. Use correct HTTP status codes: 201 creation, 204 deletion, 400 bad input, 404 not found, 422 validation errors.
+14. NEVER do N+1 queries — use include (Prisma), select_related (Django), joinedload (SQLAlchemy).
+15. Every catch block must re-throw, return an error response, or handle the failure — NEVER catch (e) { console.log(e) }.
+16. Use Promise.all for independent parallel async calls — NEVER sequential await for independent operations.
 
 CRITICAL: Begin IMMEDIATELY with code blocks. No preamble.
 `
@@ -1168,7 +1259,7 @@ func readPriorContext(root string, writtenFiles []string, maxChars int) string {
 	var sb strings.Builder
 	sb.WriteString("\n\n## Already implemented files (import from these, don't recreate):\n")
 	totalChars := 0
-	const maxLinesPerFile = 60
+	const maxLinesPerFile = 150 // Fix 5: was 60 — type defs past line 60 were invisible
 
 	for _, e := range entries {
 		if totalChars >= maxChars {
@@ -1196,12 +1287,17 @@ func readPriorContext(root string, writtenFiles []string, maxChars int) string {
 			continue
 		}
 
-		// Take first N lines.
-		lines := strings.SplitN(content, "\n", maxLinesPerFile+1)
-		if len(lines) > maxLinesPerFile {
-			lines = lines[:maxLinesPerFile]
+		// Fix 5: For type/model files (priority=1), read full content so type defs are visible.
+		var snippet string
+		if e.priority == 1 {
+			snippet = content
+		} else {
+			lines := strings.SplitN(content, "\n", maxLinesPerFile+1)
+			if len(lines) > maxLinesPerFile {
+				lines = lines[:maxLinesPerFile]
+			}
+			snippet = strings.Join(lines, "\n")
 		}
-		snippet := strings.Join(lines, "\n")
 
 		// Determine relative path for display.
 		relPath := e.path
@@ -1344,7 +1440,7 @@ func taskCodePrompt(request, plan, taskTitle, root string, writtenFiles []string
 		sb.WriteString(sealedManifest)
 	}
 
-	priorCtx := readPriorContext(root, writtenFiles, 12000)
+	priorCtx := readPriorContext(root, writtenFiles, 24000)
 	if priorCtx != "" {
 		sb.WriteString(priorCtx)
 	}
@@ -1506,9 +1602,12 @@ func CompactSummary(res *Result) string {
 }
 
 // extractSection pulls the content of a ### Section from plan text.
+// BUG-5: case-insensitive match so "Task Breakdown" / "Task breakdown" / "TASK BREAKDOWN" all work.
 func extractSection(plan, heading string) string {
 	marker := "### " + heading
-	idx := strings.Index(plan, marker)
+	lowerPlan := strings.ToLower(plan)
+	lowerMarker := strings.ToLower(marker)
+	idx := strings.Index(lowerPlan, lowerMarker)
 	if idx < 0 {
 		return ""
 	}
@@ -1523,8 +1622,7 @@ func extractSection(plan, heading string) string {
 
 // countCodeFences counts ```lang:filepath fenced blocks in text.
 func countCodeFences(text string) int {
-	re := regexp.MustCompile("(?m)^```[a-zA-Z0-9_+-]*[:/ ][^\\s`]+")
-	return len(re.FindAllString(text, -1))
+	return len(parseCodeBlocks(text))
 }
 
 // stripStagePreamble removes any chain-of-thought preamble the model writes before
@@ -1558,6 +1656,7 @@ func runPipelineTestLoop(ctx context.Context, client *ollama.Client, root string
 		return // no test runner detected — skip silently
 	}
 
+	res.TestsRan = true // UX-5: mark so repl skips redundant verifyAndFix
 	fmt.Printf("%s  ◆ verifying   [test loop]%s\n", pColorDim, pColorReset)
 
 	toolkit := agent.NewToolkit(root, nil, nil)
@@ -1654,15 +1753,14 @@ var codeComponents = []string{
 // them to disk under root. Returns the list of file paths written.
 // Used by the agentic retry loop to verify a build after each CODE iteration.
 func writeCodeFiles(text, root string) []string {
-	re := regexp.MustCompile("(?m)^```[a-zA-Z0-9_+-]*[:/ ]([^\\s`]+)\\n([\\s\\S]*?)\\n```")
 	var paths []string
 	seen := map[string]bool{}
-	for _, m := range re.FindAllStringSubmatch(text, -1) {
-		if len(m) < 3 {
+	for _, block := range parseCodeBlocks(text) {
+		if block.isEdit {
 			continue
 		}
-		relPath := strings.TrimSpace(m[1])
-		content := m[2]
+		relPath := strings.TrimSpace(block.path)
+		content := block.body
 		if relPath == "" || seen[relPath] {
 			continue
 		}
@@ -1674,7 +1772,11 @@ func writeCodeFiles(text, root string) []string {
 		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 			continue
 		}
-		if err := os.WriteFile(dest, []byte(content+"\n"), 0o644); err != nil {
+		// Fix 3: conditional newline.
+		if !strings.HasSuffix(content, "\n") {
+			content += "\n"
+		}
+		if err := os.WriteFile(dest, []byte(content), 0o644); err != nil {
 			continue
 		}
 		paths = append(paths, dest)
@@ -1753,8 +1855,8 @@ func validateContent(files []string) (warnings []string, stubRatio float64) {
 }
 
 // installDeps runs dependency installation after the setup task completes.
-// Best effort — logs but doesn't fail the pipeline on install error.
-func installDeps(ctx context.Context, root string) {
+// Returns true if deps installed successfully (or no installer needed), false on failure.
+func installDeps(ctx context.Context, root string) bool {
 	type depCmd struct {
 		check   string // file that must exist
 		noDir   string // directory that must NOT exist (skip if present)
@@ -1767,9 +1869,10 @@ func installDeps(ctx context.Context, root string) {
 		{"package.json", "node_modules", "npm", []string{"install", "--prefer-offline"}, 60 * time.Second},
 		{"go.mod", "", "go", []string{"mod", "tidy"}, 30 * time.Second},
 		{"requirements.txt", "", "pip", []string{"install", "-r", "requirements.txt"}, 60 * time.Second},
-		{"pyproject.toml", "", "pip", []string{"install", "-e", "."}, 60 * time.Second},
+		// UX-1: skip "pip install -e ." — executes arbitrary setup.py code without consent.
 	}
 
+	depsOK := true
 	for _, dc := range cmds {
 		checkPath := filepath.Join(root, dc.check)
 		if _, err := os.Stat(checkPath); err != nil {
@@ -1792,7 +1895,9 @@ func installDeps(ctx context.Context, root string) {
 			if len(preview) > 200 {
 				preview = preview[:200] + "…"
 			}
-			fmt.Printf("%s  ⚠ install warning: %s%s\n", pColorDim, preview, pColorReset)
+			fmt.Printf("%s  ⚠ install failed: %s%s\n", pColorDim, preview, pColorReset)
+			fmt.Printf("%s  ⚠ build checks disabled for this run (dependency install failed)%s\n", pColorDim, pColorReset)
+			depsOK = false
 		}
 		break // run first matching installer, then check post-install hooks
 	}
@@ -1828,6 +1933,7 @@ func installDeps(ctx context.Context, root string) {
 			fmt.Printf("%s  ⚠ prisma generate warning: %s%s\n", pColorDim, preview, pColorReset)
 		}
 	}
+	return depsOK
 }
 
 // execCommand wraps exec.CommandContext so tests can stub it.
@@ -1856,12 +1962,12 @@ Keep task count LOW — group related files into one task (e.g. "all models", "a
 NEVER create separate tasks for each individual file — that causes parallel conflicts.
 
 The first tasks MUST follow dependency order (each task imports only from prior tasks):
-1. Project setup (config, package.json, tsconfig, env, docker)
-2. Database schema and migrations (defines the shape of all data — nothing else imports this)
-3. Data models and types (all shared interfaces, enums, type definitions — reflect the schema from task 2)
-4. All repositories (data access layer — imports types from task 3)
-5. All services (business logic — imports repos from task 4, types from task 3)
-6. API controllers and routes (imports services from task 5)
+1. Project setup (config files, dependency manifest, env, build config)
+2. Database schema and migrations (defines the shape of all data)
+3. Data models and types (all shared types, interfaces, enums — reflect the schema from task 2)
+4. Data access / repository layer (imports types from task 3)
+5. Business logic / services (imports data access from task 4, types from task 3)
+6. API controllers, routes, handlers (imports services from task 5)
 7. Middleware, validation, error handling
 8. Tests and documentation
 
@@ -1890,11 +1996,61 @@ const codeStageSuffix = `
 ## Your role: IMPLEMENTER
 Write the complete implementation based on the plan. Requirements:
 - Every function body has real logic — no stubs, no TODOs, no placeholder returns
-- Inputs validated at system boundaries (HTTP handlers, CLI args, file reads)
-- Errors surfaced to callers — no silent swallowing
+- Errors surfaced to callers — no silent swallowing. Every catch block must re-throw, return an error response, or explicitly handle the failure. NEVER catch (e) { console.log(e) }.
 - No debugging prints (console.log / fmt.Println / print) left in
 - Config via environment variables, not hardcoded strings
 - No unimplemented paths left in place
+
+### Input validation rules:
+- Validate inputs at system boundaries (HTTP handlers, CLI args, file reads) using a schema validator (Zod, Joi, class-validator)
+- Express/Koa validation middleware: validate req.body directly — NEVER wrap in {body: req.body, query, params}
+- Zod/Joi schemas must match the shape of the DATA being validated (e.g. {title: z.string()}), not the Express Request object
+- Always use express.json() middleware BEFORE route handlers
+- Place validation middleware BEFORE route handlers. Place error-handling middleware (err, req, res, next) AFTER all routes.
+- Wrap async route handlers to forward errors: const asyncHandler = (fn) => (req, res, next) => fn(req, res, next).catch(next)
+- Always validate on the server side — never rely on client-side validation alone
+
+### Security rules (OWASP):
+- NEVER use string concatenation for SQL — always use parameterized queries / ORM methods
+- NEVER use innerHTML or dangerouslySetInnerHTML with user data — use framework auto-escaping
+- NEVER hardcode secrets (API keys, DB passwords, JWT secrets) — use environment variables
+- Use bcrypt/scrypt/argon2 for password hashing — NEVER MD5/SHA1/plain text
+- Use child_process.execFile() not exec() when running OS commands — prevents command injection
+- Return generic error messages to clients, log details server-side only — never expose stack traces in API responses
+
+### Import and module rules:
+- NEVER invent packages that do not exist. Only import REAL, well-known packages (e.g. express, zod, prisma, cors, helmet — NOT made-up names)
+- Check package.json "type" field: use import/export for ESM ("type":"module"), require() for CJS
+- Use explicit file extensions in Node.js ESM imports (.js not .ts at runtime)
+- NEVER use path aliases (@/...) unless tsconfig.json paths AND bundler are confirmed configured
+- NEVER use deprecated APIs: use Buffer.from() not new Buffer(), useEffect not componentWillMount
+
+### Async and concurrency rules:
+- NEVER use sequential await when calls are independent — use Promise.all([a(), b()])
+- Use Promise.allSettled when one failure should NOT cancel others
+- Every promise must have error handling — no floating promises
+- Always set timeouts on outbound HTTP calls (axios/fetch timeout option)
+- Go: every goroutine MUST have an exit path (context cancel, done channel, or WaitGroup)
+- Go: NEVER use time.Sleep for synchronization — use channels or sync.WaitGroup
+- Python async: NEVER call blocking I/O inside async def — use asyncio.to_thread()
+
+### API design rules:
+- Use correct HTTP status codes: 201 for creation, 204 for deletion, 400 for bad input, 404 for not found, 422 for validation errors
+- Use nouns in URLs (GET /users/123), HTTP methods for verbs — NEVER /getUser/123
+- Consistent error response shape: { error: { code: string, message: string } }
+
+### Database/ORM rules:
+- NEVER do N+1 queries: use include/select (Prisma), select_related/prefetch_related (Django), joinedload (SQLAlchemy), eager loading (TypeORM)
+- Prisma: use findUnique for lookups by unique fields, not findFirst. Define both sides of relations.
+- Add database indexes for columns used in WHERE/JOIN/ORDER BY
+- Use SELECT only needed columns, not SELECT *
+
+### Docker rules (when generating Dockerfiles):
+- Always add a non-root USER directive
+- Use multi-stage builds: build stage with dev deps, production stage with runtime only
+- Copy package.json/lock files BEFORE source code to cache install layer
+- Always create .dockerignore with node_modules, .git, .env
+- Use exec form CMD ["node", "server.js"], not shell form
 
 ### File output formats:
 - For NEW files: use ` + "```lang:filepath" + ` fences with full content.
@@ -1921,10 +2077,43 @@ const codeStageWholeFile = `
 ## Your role: IMPLEMENTER
 Write the complete implementation based on the plan. Requirements:
 - Every function body has real logic — no stubs, no TODOs, no placeholder returns
-- Inputs validated at system boundaries (HTTP handlers, CLI args, file reads)
-- Errors surfaced to callers — no silent swallowing
+- Errors surfaced to callers — no silent swallowing. Every catch block must re-throw, return an error response, or explicitly handle the failure. NEVER catch (e) { console.log(e) }.
 - No debugging prints left in
 - Config via environment variables, not hardcoded strings
+
+### Input validation rules:
+- Validate inputs at system boundaries (HTTP handlers, CLI args, file reads) using a schema validator (Zod, Joi, class-validator)
+- Express/Koa: validate req.body directly — NEVER wrap in {body: req.body, query, params}
+- Zod/Joi schemas match the DATA shape (e.g. {title: z.string()}), NOT the Express Request object
+- Always use express.json() middleware BEFORE route handlers
+- Place validation middleware BEFORE route handlers. Error-handling middleware (err, req, res, next) AFTER all routes.
+- Wrap async route handlers: const asyncHandler = (fn) => (req, res, next) => fn(req, res, next).catch(next)
+
+### Security rules:
+- NEVER string-concatenate SQL — use parameterized queries / ORM methods
+- NEVER use innerHTML/dangerouslySetInnerHTML with user data
+- NEVER hardcode secrets — use environment variables
+- Use bcrypt/scrypt/argon2 for passwords — NEVER MD5/SHA1/plain text
+- Use execFile() not exec() for OS commands
+
+### Import and module rules:
+- Only import REAL, well-known packages — NEVER invent package names
+- Check package.json "type" field for ESM vs CJS
+- NEVER use deprecated APIs: Buffer.from() not new Buffer(), useEffect not componentWillMount
+
+### Async rules:
+- Use Promise.all for independent parallel calls, not sequential await
+- Every promise must have error handling — no floating promises
+- Always set timeouts on outbound HTTP calls
+- Go: every goroutine needs an exit path. Python async: never block inside async def.
+
+### API design:
+- Correct HTTP status codes: 201 creation, 204 deletion, 400 bad input, 404 not found, 422 validation
+- Nouns in URLs, HTTP methods for verbs. Consistent error shape: { error: { code, message } }
+
+### Database/ORM:
+- NEVER do N+1 queries — use include/joinedload/select_related
+- Add indexes for columns in WHERE/JOIN/ORDER BY
 
 ### File output format:
 - Use ` + "```lang:filepath" + ` fences with the COMPLETE file content for every file.
@@ -1951,7 +2140,16 @@ Write comprehensive tests based on the implementation plan.
 - Use ` + "```lang:filepath" + ` fences for every test file.
 - Cover: happy path, edge cases, error cases, boundary values.
 - {TEST_NAMING}
-- Mock external dependencies. Test behaviour, not implementation.
+
+### Testing rules:
+- Mock ONLY external services and I/O. Use real implementations for in-process dependencies. Prefer integration tests for service boundaries.
+- Assert SPECIFIC values, not just existence — NEVER expect(result).toBeDefined() without checking the actual value.
+- Test BEHAVIOUR and outputs, not internal implementation details (e.g. don't assert internal method call counts).
+- Each test must set up and tear down its own state — NEVER depend on test execution order or shared mutable state.
+- Always include tests for: empty input, null/undefined, boundary values (0, -1, MAX_INT), special characters, error/failure cases.
+- Write the expected value BEFORE running the test — do NOT copy buggy output as the expected value.
+- For API tests: test correct status codes (201/400/404/422), error response shapes, input validation rejection.
+- For async code: test timeout behaviour, concurrent access, cancellation/abort.
 
 CRITICAL: Begin your response IMMEDIATELY with the first ` + "```lang:filepath" + ` test file block. Do NOT write any preamble, "I'll create...", "Let me analyze...", or any sentences before the first code block.
 `
@@ -1984,23 +2182,81 @@ func detectLang(root string) string {
 func langPlanRules(lang string) string {
 	switch lang {
 	case "typescript":
-		return "\n### Framework rules:\n" +
+		return "\n### TypeScript/JavaScript framework rules:\n" +
 			"- tsconfig.json MUST NOT enable \"noUnusedLocals\" or \"noUnusedParameters\" (causes cascading errors in Express/middleware handlers).\n" +
-			"- If using Prisma: all @relation fields with multiple references to the same model MUST have explicit relation names.\n" +
-			"- Use ESM imports (import/export), not require().\n"
+			"- Use ESM imports (import/export), not require(). Check package.json \"type\" field.\n" +
+			"- Use explicit file extensions in Node.js ESM imports (.js at runtime, not .ts).\n" +
+			"- NEVER use path aliases (@/...) unless tsconfig.json paths AND bundler are confirmed.\n" +
+			"- NEVER use deprecated APIs: Buffer.from() not new Buffer(), useEffect not componentWillMount.\n" +
+			"\n### Express/Koa/NestJS rules:\n" +
+			"- Express validation middleware MUST validate req.body directly, not {body: req.body, query, params}.\n" +
+			"- Zod/Joi schemas must match the DATA shape (e.g. {title: z.string()}), NOT the Express Request object.\n" +
+			"- Always use express.json() middleware BEFORE route handlers.\n" +
+			"- Place error-handling middleware (err, req, res, next) AFTER all routes.\n" +
+			"- Wrap async route handlers: asyncHandler = (fn) => (req, res, next) => fn(req, res, next).catch(next).\n" +
+			"- NestJS: apply ValidationPipe globally in main.ts. Use DTOs with class-validator decorators. Keep controllers thin.\n" +
+			"\n### React/Next.js rules:\n" +
+			"- Default to server components in Next.js App Router. Only add 'use client' when using hooks, event handlers, or browser APIs.\n" +
+			"- NEVER use useState for derived data — compute during render instead.\n" +
+			"- Use React Query/SWR for server state — do NOT duplicate server state in useState.\n" +
+			"- Use useCallback for handlers passed as props. Include ALL deps in useEffect dependency arrays.\n" +
+			"- Fetch data in useEffect with AbortController cleanup, or use React Query/SWR for race-condition safety.\n" +
+			"- Use stable unique IDs as keys — NEVER array index on reorderable lists.\n" +
+			"\n### Prisma/TypeORM rules:\n" +
+			"- Prisma: all @relation fields with multiple references to the same model MUST have explicit relation names.\n" +
+			"- Prisma: use findUnique for unique field lookups, not findFirst. Define BOTH sides of relations.\n" +
+			"- Prisma: use include/select for related data — NEVER loop to fetch relations (N+1).\n" +
+			"- TypeORM: always verify relations are loaded before accessing. Never trust TS types for unloaded relation fields.\n" +
+			"\n### TypeScript type safety:\n" +
+			"- NEVER use 'any' to silence errors — use 'unknown' and narrow with type guards.\n" +
+			"- Prefer 'interface' over 'type' for object shapes. Use 'satisfies' over 'as' for type checking without widening.\n" +
+			"- Prefer union types ('active' | 'inactive') over enums.\n" +
+			"\n### Async patterns:\n" +
+			"- Use Promise.all for independent parallel calls — NEVER sequential await for independent operations.\n" +
+			"- Use Promise.allSettled when one failure should NOT cancel others.\n" +
+			"- No floating promises — every promise must have error handling.\n" +
+			"- Always set timeouts on outbound HTTP calls (axios timeout, fetch AbortSignal.timeout).\n"
 	case "go":
-		return "\n### Framework rules:\n" +
+		return "\n### Go framework rules:\n" +
 			"- Every exported function MUST have a doc comment.\n" +
-			"- Use `errors.Is` / `errors.As` for error matching; never compare error strings.\n" +
-			"- All goroutines MUST have a defined exit condition (context cancel or done channel).\n"
+			"- Use `errors.Is` / `errors.As` for error matching; NEVER compare error strings.\n" +
+			"- All goroutines MUST have a defined exit condition (context cancel, done channel, or WaitGroup).\n" +
+			"- NEVER use time.Sleep for synchronization — use channels or sync.WaitGroup.\n" +
+			"- NEVER discard errors with _ = someFunc(). Always handle or wrap with fmt.Errorf(\"context: %%w\", err).\n" +
+			"- For deferred Close(), use a named return and assign the close error.\n" +
+			"- Be aware of nil interface trap: (*MyError)(nil) assigned to error is NOT == nil.\n" +
+			"- Name packages by what they provide, not 'utils'/'helpers'/'common'.\n" +
+			"- Separate API DTOs from database models — no single struct with json+db+validate tags.\n" +
+			"- Use value types unless mutation or nil semantics are needed — avoid excessive pointers.\n" +
+			"- Use context.Context as the first parameter in functions that do I/O or can be canceled.\n" +
+			"- Use errgroup.Group for parallel goroutines with error propagation.\n"
 	case "rust":
-		return "\n### Framework rules:\n" +
+		return "\n### Rust framework rules:\n" +
 			"- Use `thiserror` for library errors, `anyhow` for binary errors.\n" +
-			"- All `unwrap()` calls in non-test code MUST be replaced with `?` or explicit handling.\n"
+			"- All `unwrap()` calls in non-test code MUST be replaced with `?` or explicit handling.\n" +
+			"- Use `clippy` lint-clean code: no `clone()` when a reference suffices, no `collect()` into Vec when an iterator works.\n" +
+			"- Use `#[derive(Debug, Clone)]` on public types. Implement Display for error types.\n" +
+			"- Prefer `&str` over `String` in function parameters when ownership is not needed.\n" +
+			"- Use builder pattern for structs with many optional fields.\n"
 	case "python":
-		return "\n### Framework rules:\n" +
+		return "\n### Python framework rules:\n" +
 			"- Use type annotations on all public functions (PEP 484).\n" +
-			"- Prefer `pathlib.Path` over `os.path` for filesystem operations.\n"
+			"- Prefer `pathlib.Path` over `os.path` for filesystem operations.\n" +
+			"- NEVER use mutable default arguments (def f(lst=[])). Use None and create inside function body.\n" +
+			"- Use dependency injection or factory functions — avoid module-level mutable state.\n" +
+			"\n### Django rules:\n" +
+			"- ALWAYS use select_related for FK traversals and prefetch_related for reverse/M2M relations.\n" +
+			"- Use .filter().first() instead of .get() when caller should handle absence gracefully.\n" +
+			"- NEVER do N+1: iterate a queryset and access related objects without prefetch.\n" +
+			"\n### FastAPI rules:\n" +
+			"- All Pydantic model fields must have explicit types — NEVER use dict as a field type.\n" +
+			"- Use async def only with truly async I/O. Use def (sync) for blocking ORM calls.\n" +
+			"- Use asyncio.to_thread() for unavoidable blocking calls inside async functions.\n" +
+			"- NEVER call asyncio.run() inside an already-running event loop.\n" +
+			"- Use asyncio.Lock not threading.Lock in async code.\n" +
+			"\n### SQLAlchemy rules:\n" +
+			"- Use joinedload() or subqueryload() for eager loading — default lazy='select' causes N+1.\n" +
+			"- Use 'with Session() as session:' context manager pattern to prevent connection pool exhaustion.\n"
 	default:
 		return ""
 	}
@@ -2118,14 +2374,20 @@ func autoCommitWrites(root string, files []string, summary string) {
 	if exec.Command("git", diffArgs...).Run() == nil {
 		return // our files have no changes
 	}
-	// Build commit message.
-	msg := "mantis: auto-commit"
+	// Build commit message from plan summary — skip markdown headers and blank lines.
+	msg := fmt.Sprintf("mantis: update %d file(s)", len(files))
 	if summary != "" {
-		line := strings.SplitN(summary, "\n", 2)[0]
-		if len(line) > 68 {
-			line = line[:68] + "..."
+		for _, line := range strings.Split(summary, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "---") || strings.HasPrefix(line, "```") {
+				continue
+			}
+			if len(line) > 68 {
+				line = line[:68] + "..."
+			}
+			msg = "mantis: " + line
+			break
 		}
-		msg = "mantis: " + line
 	}
 	// Commit only our specific files to avoid including unrelated staged changes.
 	commitArgs := append([]string{"-C", root, "commit", "-m", msg, "--"}, files...)

@@ -712,6 +712,11 @@ func Run(cfg Config) error {
 				}
 			}
 		}
+		// If the request qualifies for the full SWE pipeline (complex build/implement),
+		// skip the fix agent — the pipeline has planning, parallel tasks, and build verification.
+		if needsAgent && pipeline.ShouldRun(intent, input) {
+			needsAgent = false
+		}
 		if needsAgent {
 			fmt.Printf("%s  ◆ fix agent [%s] — investigating with tools%s\n", colorDim, model, colorReset)
 			stopSpin := startSpinner(string(intent.TaskType))
@@ -780,6 +785,8 @@ func Run(cfg Config) error {
 		// Triggered before the single-model path so complex tasks get:
 		//   plan (reason model) → code + tests (code model, parallel)
 		if pipeline.ShouldRun(intent, input) {
+			// Fix 8: snapshot existing files to distinguish new vs edited after pipeline.
+			preExisting := snapshotExistingFiles(root)
 			pipelineOpts := pipeline.Options{AvailableModels: availableModels, Root: root, PlanOnly: planMode}
 			pipelineCtx, pipelineCancel := context.WithTimeout(turnCtx, 20*time.Minute)
 			sysPrompt := buildSystemPrompt(brainContext, tierSkills, router.TierCode)
@@ -867,8 +874,19 @@ func Run(cfg Config) error {
 				// Use the WrittenFiles list from task execution directly instead.
 				var wf []WrittenFile
 				if len(pRes.WrittenFiles) > 0 {
+					// BUG-2: record files in opLog so /undo works for task-based pipeline.
+					batchID := opLog.NextBatch()
+					seen := map[string]bool{}
 					for _, p := range pRes.WrittenFiles {
-						wf = append(wf, WrittenFile{Path: p})
+						if seen[p] {
+							continue // deduplicate
+						}
+						seen[p] = true
+						absPath := filepath.Join(root, p)
+						opLog.Record(batchID, absPath, "create", "")
+						// Fix 8: check if file existed before pipeline to set Created flag.
+						isNew := !preExisting[absPath] && !preExisting[p]
+						wf = append(wf, WrittenFile{Path: p, Created: isNew})
 					}
 					// P9.9: cap the preview to 5 files + show /undo hint.
 					printWrittenFilesCapped(wf, 5)
@@ -883,8 +901,10 @@ func Run(cfg Config) error {
 					}
 				}
 				messages = append(messages, ollama.Message{Role: "assistant", Content: pRes.Combined})
-				// Verify build and auto-fix if needed (uses background ctx so not bounded by streamCtx).
-				verifyAndFix(turnCtx, client, model, intent.Tier, root, wf, &messages)
+				// UX-5: skip verifyAndFix if pipeline already ran test loop.
+				if !pRes.TestsRan {
+					verifyAndFix(turnCtx, client, model, intent.Tier, root, wf, &messages)
+				}
 				sess.Add(model, intent.Tier, pRes.PromptTok, pRes.ComplTok, hasImage)
 				var pipeWrittenPaths []string
 				for _, f := range wf {
@@ -2756,7 +2776,26 @@ KEY RULES:
 - After each fix, ALWAYS re-run the build to verify.
 - Use edit_file for surgical changes to existing files.
 - Use write_file to create new files that are missing.
-- Use search_files to find imports, usages, and definitions.`,
+- Use search_files to find imports, usages, and definitions.
+- After creating Node/TS projects, ALWAYS run ` + "`npm install`" + ` then ` + "`npm run build`" + ` to verify.
+
+CODE QUALITY RULES — apply these when writing or fixing code:
+- Express validation: validate req.body directly, NOT {body: req.body, query, params}. Zod/Joi schemas match the DATA shape, not the Request object.
+- Always use express.json() middleware BEFORE route handlers. Place error-handling middleware (err,req,res,next) AFTER all routes.
+- Wrap async Express handlers: asyncHandler = (fn) => (req,res,next) => fn(req,res,next).catch(next).
+- NEVER use string concatenation for SQL — use parameterized queries or ORM methods.
+- NEVER hardcode secrets — use environment variables.
+- NEVER use innerHTML/dangerouslySetInnerHTML with user data.
+- Use correct HTTP status codes: 201 creation, 204 deletion, 400 bad input, 404 not found, 422 validation.
+- NEVER import packages that do not exist. Only use REAL, well-known packages.
+- NEVER use deprecated APIs: Buffer.from() not new Buffer().
+- Use Promise.all for independent parallel async calls, not sequential await.
+- Every catch block must re-throw or return an error response — NEVER catch(e){console.log(e)}.
+- Prisma: use include for relations (no N+1 loops). Use findUnique not findFirst for unique fields.
+- React/Next.js: default to server components. Only 'use client' when hooks/events/browser APIs are needed.
+- Go: never discard errors with _. Wrap errors: fmt.Errorf("context: %w", err). Every goroutine needs an exit path.
+- Python: never use mutable default args (def f(lst=[])). Use None default. Django: always select_related/prefetch_related.
+- Docker: always add non-root USER, multi-stage builds, .dockerignore, exec form CMD.`,
 	}
 
 	// Copy messages and prepend fix system prompt.
@@ -3125,8 +3164,14 @@ func renderResponse(content string) {
 // followed by generic humorous messages to keep the user entertained.
 // Returns a stop function that clears the spinner line and returns elapsed time.
 func startSpinner(taskType string) func() time.Duration {
-	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 	start := time.Now()
+
+	// Suppress spinner animation when stdout is not a terminal (piped output).
+	if !term.IsTerminal(int(os.Stdout.Fd())) {
+		return func() time.Duration { return time.Since(start) }
+	}
+
+	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 	// Task-specific lead messages — shown first so they feel responsive.
 	taskLeads := map[string][]string{

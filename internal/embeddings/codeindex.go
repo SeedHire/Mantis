@@ -92,6 +92,7 @@ func (s *Store) IndexSourceFiles(ctx context.Context, root string, parsers []par
 
 		// Index each symbol.
 		lines := strings.Split(string(content), "\n")
+		var firstErr error
 		for _, sym := range result.Symbols {
 			if sym.LineStart <= 0 {
 				continue
@@ -106,9 +107,16 @@ func (s *Store) IndexSourceFiles(ctx context.Context, root string, parsers []par
 			label := fmt.Sprintf("%s:%s", sym.Type, sym.Name)
 
 			if err := s.Add(ctx, id, rel, label, chunk); err != nil {
-				continue // best-effort
+				if firstErr == nil {
+					firstErr = fmt.Errorf("embedding %s: %w", id, err)
+				}
+				continue
 			}
 			indexed++
+		}
+		// Surface first embedding error so caller can warn the user.
+		if indexed == 0 && firstErr != nil {
+			return firstErr
 		}
 
 		// Store file-level hash marker so we can skip unchanged files on next run.

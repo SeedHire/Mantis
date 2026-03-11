@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 )
 
@@ -13,6 +12,84 @@ type EditBlock struct {
 	FilePath string
 	OldText  string
 	NewText  string
+}
+
+// codeBlock represents a single fenced code block extracted from model output.
+type codeBlock struct {
+	lang   string // language tag (e.g. "go", "typescript", "edit")
+	path   string // file path from the fence header
+	body   string // content between the fences
+	isEdit bool   // true if this is an ```edit:filepath block
+}
+
+// parseCodeBlocks extracts fenced code blocks using line-by-line scanning.
+// This avoids regex [\s\S]*? which truncates content containing nested backticks
+// (e.g. JS/TS template literals). A block ends ONLY on a bare "```" line
+// (triple backtick with nothing after it), which never appears inside real code.
+func parseCodeBlocks(text string) []codeBlock {
+	lines := strings.Split(text, "\n")
+	var blocks []codeBlock
+	var current *codeBlock
+	var bodyLines []string
+
+	for _, line := range lines {
+		if current == nil {
+			// Look for opening fence: ```lang:path or ```lang/path or ```lang path
+			if !strings.HasPrefix(line, "```") {
+				continue
+			}
+			header := line[3:]
+			if header == "" || header == "`" {
+				continue // bare ``` or ```` — not an opener with a path
+			}
+			// Extract lang and path from header.
+			// Formats: "edit:filepath", "go:filepath", "typescript/filepath", "go filepath"
+			lang, path := parseFenceHeader(header)
+			if path == "" {
+				continue // no file path — skip (plain ```go code blocks)
+			}
+			current = &codeBlock{
+				lang:   lang,
+				path:   strings.TrimSpace(path),
+				isEdit: lang == "edit",
+			}
+			bodyLines = nil
+		} else {
+			// Inside a block — check for closing fence.
+			// A bare "```" (with optional trailing whitespace) closes the block.
+			trimmed := strings.TrimRight(line, " \t")
+			if trimmed == "```" {
+				current.body = strings.Join(bodyLines, "\n")
+				blocks = append(blocks, *current)
+				current = nil
+				bodyLines = nil
+			} else {
+				bodyLines = append(bodyLines, line)
+			}
+		}
+	}
+	return blocks
+}
+
+// parseFenceHeader splits a fence header like "go:filepath" or "edit/filepath" into (lang, path).
+func parseFenceHeader(header string) (string, string) {
+	// Try colon separator first (most common): ```go:src/main.go
+	if idx := strings.IndexByte(header, ':'); idx > 0 {
+		return header[:idx], header[idx+1:]
+	}
+	// Try slash separator: ```go/src/main.go
+	if idx := strings.IndexByte(header, '/'); idx > 0 {
+		lang := header[:idx]
+		// Only treat as lang/path if the lang part looks like a language tag (no dots, short).
+		if len(lang) <= 12 && !strings.ContainsAny(lang, ". \t") {
+			return lang, header[idx+1:]
+		}
+	}
+	// Try space separator: ```go src/main.go
+	if idx := strings.IndexByte(header, ' '); idx > 0 {
+		return header[:idx], strings.TrimSpace(header[idx+1:])
+	}
+	return header, ""
 }
 
 // parseEditBlocks extracts SEARCH/REPLACE pairs from ```edit:filepath fenced blocks.
@@ -28,19 +105,12 @@ type EditBlock struct {
 //
 // Multiple <<<SEARCH ... >>>SEARCH sections per block are supported.
 func parseEditBlocks(text string) []EditBlock {
-	// Match ```edit:filepath ... ``` blocks.
-	blockRe := regexp.MustCompile("(?m)^```edit[:/ ]([^\\s`]+)\\n([\\s\\S]*?)\\n```")
 	var edits []EditBlock
-
-	for _, m := range blockRe.FindAllStringSubmatch(text, -1) {
-		if len(m) < 3 {
+	for _, block := range parseCodeBlocks(text) {
+		if !block.isEdit {
 			continue
 		}
-		relPath := strings.TrimSpace(m[1])
-		body := m[2]
-
-		// Parse individual SEARCH/REPLACE sections within the block.
-		edits = append(edits, parseSearchReplacePairs(relPath, body)...)
+		edits = append(edits, parseSearchReplacePairs(block.path, block.body)...)
 	}
 	return edits
 }
@@ -222,22 +292,14 @@ func extractAndApplyChanges(text, root string) []string {
 	}
 
 	// 2. Apply whole-file blocks (new files, or fallback when model ignores edit format).
-	// For existing files: silently overwrite — the model fell back to whole-file because
-	// edit blocks failed; skipping the whole-file block would leave broken code in place.
-	wholeFileRe := regexp.MustCompile("(?m)^```[a-zA-Z0-9_+-]*[:/ ]([^\\s`]+)\\n([\\s\\S]*?)\\n```")
-	editPathRe := regexp.MustCompile("(?m)^```edit[:/ ]")
-	for _, m := range wholeFileRe.FindAllStringSubmatch(text, -1) {
-		if len(m) < 3 {
-			continue
-		}
-		// Skip if this is an edit block (already handled above).
-		fullMatch := m[0]
-		if editPathRe.MatchString(fullMatch) {
-			continue
+	// Uses line-by-line parseCodeBlocks to avoid nested-backtick truncation.
+	for _, block := range parseCodeBlocks(text) {
+		if block.isEdit {
+			continue // already handled above
 		}
 
-		relPath := strings.TrimSpace(m[1])
-		content := m[2]
+		relPath := strings.TrimSpace(block.path)
+		content := block.body
 		if relPath == "" {
 			continue
 		}
@@ -254,11 +316,23 @@ func extractAndApplyChanges(text, root string) []string {
 		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 			continue
 		}
-		// Write unconditionally — new file or silent overwrite for existing files.
-		if err := os.WriteFile(abs, []byte(content+"\n"), 0o644); err != nil {
+		// Fix 3: conditional newline — don't double-append if content already ends with \n.
+		if !strings.HasSuffix(content, "\n") {
+			content += "\n"
+		}
+		if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
 			continue
 		}
 		allPaths = append(allPaths, abs)
+	}
+
+	// UX-7: diagnostic when no files could be extracted.
+	if len(allPaths) == 0 {
+		fences := countCodeFences(text)
+		if fences > 0 {
+			fmt.Printf("%s  ⚠ 0 files written (%d code fence(s) found but none had valid file paths)%s\n",
+				pColorDim, fences, pColorReset)
+		}
 	}
 
 	return allPaths

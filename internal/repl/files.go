@@ -592,3 +592,28 @@ func stripInternalBlocks(s string) string {
 	}
 	return strings.TrimSpace(s) + "\n"
 }
+
+// snapshotExistingFiles walks root and returns a set of absolute paths for all regular files.
+// Used to distinguish new vs edited files after pipeline execution (Fix 8).
+func snapshotExistingFiles(root string) map[string]bool {
+	existing := map[string]bool{}
+	if root == "" {
+		return existing
+	}
+	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		// Skip common large directories.
+		if info.IsDir() {
+			name := info.Name()
+			if name == "node_modules" || name == ".git" || name == "vendor" || name == ".mantis" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		existing[path] = true
+		return nil
+	})
+	return existing
+}

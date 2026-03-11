@@ -154,8 +154,8 @@ func (s *Session) Report() string {
 
 func padLine(s string, width int) string {
 	runes := []rune(s)
-	if len(runes) >= width {
-		return "│" + string(runes[:width]) + "│"
+	if len(runes) > width {
+		return "│" + string(runes[:width-1]) + "…│"
 	}
 	return "│" + s + strings.Repeat(" ", width-len(runes)) + "│"
 }
