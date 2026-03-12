@@ -1,0 +1,1098 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mantis — Technical Deep Dive</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <link rel="shortcut icon" href="favicon.svg" />
+  <meta name="description" content="Mantis technical deep dive — algorithms, architecture decisions, research papers, and implementation details for the AI coding assistant." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --copper:      #C87941;
+      --copper-lt:   #E8A96A;
+      --copper-dk:   #7A3E10;
+      --copper-pale: #F5D9BB;
+      --gold:        #F0C040;
+      --bg:          #08090F;
+      --surface:     #0E1018;
+      --surface2:    #151820;
+      --surface3:    #1C2030;
+      --border:      #1E2230;
+      --border-hi:   #2E3448;
+      --fg:          #E8EAF2;
+      --fg-dim:      #8A90A8;
+      --fg-muted:    #5A5F7A;
+      --green:       #2DD4A0;
+      --red:         #F05060;
+      --blue:        #60A5FA;
+      --yellow:      #F0A030;
+      --radius:      10px;
+      --radius-lg:   14px;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--fg);
+      font-family: 'Space Grotesk', 'Inter', system-ui, sans-serif;
+      font-size: 16px;
+      line-height: 1.7;
+      overflow-x: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    body::after {
+      content: '';
+      position: fixed; inset: 0;
+      pointer-events: none; z-index: 9999;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23n)' opacity='0.028'/%3E%3C/svg%3E");
+      opacity: .5;
+    }
+
+    a { color: var(--copper-lt); text-decoration: none; }
+    a:hover { color: var(--gold); }
+    code { font-family: 'JetBrains Mono', monospace; }
+
+    .metallic {
+      background: linear-gradient(135deg, #C87941 0%, #F0C040 28%, #E8A96A 50%, #C87941 72%, #F5D9BB 100%);
+      background-size: 200% 200%;
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      animation: sheen 6s ease-in-out infinite;
+    }
+    @keyframes sheen { 0%,100% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } }
+
+    /* ── Nav ──────────────────────────────────────── */
+    nav {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      background: rgba(8,9,15,0.92);
+      backdrop-filter: blur(20px) saturate(180%);
+      -webkit-backdrop-filter: blur(20px) saturate(180%);
+      border-bottom: 1px solid var(--border);
+    }
+    nav::after {
+      content: '';
+      position: absolute;
+      bottom: 0; left: 0; right: 0; height: 1px;
+      background: linear-gradient(90deg, transparent, var(--copper-dk), var(--copper), var(--copper-dk), transparent);
+      opacity: .5;
+    }
+    .nav-inner {
+      max-width: 1200px; margin: 0 auto;
+      display: flex; align-items: center; justify-content: space-between;
+      height: 62px; padding: 0 28px;
+    }
+    .nav-brand {
+      display: flex; align-items: center; gap: 8px;
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 700; font-size: 15px; letter-spacing: .06em;
+      color: var(--copper); text-decoration: none;
+    }
+    .nav-mascot { color: var(--copper-lt); font-size: 13px; }
+    .nav-links { display: flex; align-items: center; gap: 24px; }
+    .nav-links a { color: var(--fg-dim); font-size: 14px; font-weight: 500; transition: color .2s; }
+    .nav-links a:hover { color: var(--fg); }
+    .nav-links a.active { color: var(--copper-lt); }
+
+    /* ── Layout: sidebar + content ───────────────── */
+    .doc-layout {
+      display: grid;
+      grid-template-columns: 260px 1fr;
+      max-width: 1200px;
+      margin: 0 auto;
+      min-height: 100vh;
+      padding-top: 62px;
+    }
+
+    /* Sidebar */
+    .sidebar {
+      position: sticky;
+      top: 62px;
+      height: calc(100vh - 62px);
+      overflow-y: auto;
+      padding: 2rem 1.5rem;
+      border-right: 1px solid var(--border);
+      scrollbar-width: thin;
+      scrollbar-color: var(--border-hi) transparent;
+    }
+    .sidebar::-webkit-scrollbar { width: 4px; }
+    .sidebar::-webkit-scrollbar-thumb { background: var(--border-hi); border-radius: 2px; }
+    .sidebar-group { margin-bottom: 2rem; }
+    .sidebar-group-title {
+      font-size: .7rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .12em; color: var(--copper);
+      margin-bottom: .75rem;
+      padding-bottom: .5rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .sidebar a {
+      display: block;
+      padding: 5px 10px;
+      font-size: .85rem;
+      color: var(--fg-dim);
+      border-radius: 6px;
+      transition: background .15s, color .15s;
+      margin-bottom: 2px;
+    }
+    .sidebar a:hover { background: var(--surface2); color: var(--fg); }
+    .sidebar a.active { background: rgba(200,121,65,.1); color: var(--copper-lt); }
+
+    /* Content */
+    .doc-content {
+      padding: 3rem 3rem 6rem;
+      max-width: 800px;
+    }
+    .doc-content h1 {
+      font-size: 2.2rem; font-weight: 800;
+      margin-bottom: .5rem;
+      line-height: 1.2;
+    }
+    .doc-content .subtitle {
+      font-size: 1rem; color: var(--fg-dim);
+      margin-bottom: 3rem;
+    }
+    .doc-content h2 {
+      font-size: 1.5rem; font-weight: 700;
+      margin-top: 4rem; margin-bottom: 1rem;
+      padding-top: 2rem;
+      border-top: 1px solid var(--border);
+    }
+    .doc-content h2:first-of-type { border-top: none; padding-top: 0; margin-top: 0; }
+    .doc-content h3 {
+      font-size: 1.1rem; font-weight: 700;
+      margin-top: 2.5rem; margin-bottom: .75rem;
+      color: var(--copper-lt);
+    }
+    .doc-content h4 {
+      font-size: .95rem; font-weight: 600;
+      margin-top: 1.5rem; margin-bottom: .5rem;
+      color: var(--fg);
+    }
+    .doc-content p {
+      margin-bottom: 1rem;
+      color: var(--fg-dim);
+    }
+    .doc-content ul, .doc-content ol {
+      margin-bottom: 1rem;
+      padding-left: 1.5rem;
+      color: var(--fg-dim);
+    }
+    .doc-content li { margin-bottom: .4rem; }
+    .doc-content li::marker { color: var(--copper); }
+
+    /* Code blocks */
+    .doc-content pre {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1rem 1.25rem;
+      overflow-x: auto;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .82rem;
+      line-height: 1.7;
+      color: var(--fg-dim);
+      margin-bottom: 1.5rem;
+    }
+    .doc-content code {
+      background: var(--surface2);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: .85em;
+      color: var(--copper-lt);
+    }
+    .doc-content pre code {
+      background: none;
+      padding: 0;
+      color: inherit;
+    }
+
+    /* Tables */
+    .doc-content table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      margin-bottom: 1.5rem;
+      font-size: .88rem;
+    }
+    .doc-content th, .doc-content td {
+      padding: .7rem 1rem;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+    .doc-content th {
+      background: var(--surface2);
+      font-weight: 700;
+      color: var(--fg);
+    }
+    .doc-content td { color: var(--fg-dim); }
+    .doc-content td code { font-size: .82em; }
+    .doc-content tr:last-child td { border-bottom: none; }
+
+    /* Callout boxes */
+    .callout {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--copper);
+      border-radius: var(--radius);
+      padding: 1rem 1.25rem;
+      margin-bottom: 1.5rem;
+      font-size: .9rem;
+    }
+    .callout.tip { border-left-color: var(--green); }
+    .callout.warn { border-left-color: var(--yellow); }
+    .callout.paper { border-left-color: var(--blue); }
+    .callout strong { color: var(--fg); }
+
+    /* Formula callout */
+    .formula {
+      background: var(--surface);
+      border: 1px solid var(--border-hi);
+      border-radius: var(--radius);
+      padding: 1rem 1.25rem;
+      margin-bottom: 1.5rem;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .85rem;
+      color: var(--copper-lt);
+      text-align: center;
+    }
+
+    /* Flow diagram */
+    .flow-diagram {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: .8rem;
+      line-height: 1.8;
+      color: var(--fg-dim);
+      overflow-x: auto;
+      text-align: center;
+    }
+    .flow-diagram .flow-node {
+      display: inline-block;
+      background: var(--surface2);
+      border: 1px solid var(--border-hi);
+      border-radius: 6px;
+      padding: 4px 12px;
+      color: var(--copper-lt);
+      font-weight: 600;
+    }
+    .flow-diagram .flow-arrow {
+      color: var(--fg-muted);
+      margin: 0 6px;
+    }
+
+    /* Section dividers */
+    .doc-section {
+      scroll-margin-top: 80px;
+    }
+
+    /* ── Footer ──────────────────────────────────── */
+    .doc-footer {
+      border-top: 1px solid var(--border);
+      padding: 2rem 28px;
+      text-align: center;
+      color: var(--fg-muted);
+      font-size: .85rem;
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    .doc-footer a { color: var(--fg-dim); }
+    .doc-footer a:hover { color: var(--copper-lt); }
+
+    /* ── Responsive ──────────────────────────────── */
+    @media (max-width: 900px) {
+      .doc-layout { grid-template-columns: 1fr; }
+      .sidebar {
+        position: relative; top: 0;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        padding: 1.5rem;
+      }
+      .doc-content { padding: 2rem 1.5rem 4rem; }
+    }
+    @media (max-width: 640px) {
+      .doc-content h1 { font-size: 1.6rem; }
+      .doc-content h2 { font-size: 1.25rem; }
+      .doc-content pre { font-size: .75rem; padding: .75rem 1rem; }
+      .flow-diagram { font-size: .7rem; padding: 1rem; }
+    }
+  </style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-inner">
+    <a href="index.html" class="nav-brand">mantis <span class="nav-mascot">(o_o)</span></a>
+    <div class="nav-links">
+      <a href="index.html">Home</a>
+      <a href="documentation.html">Docs</a>
+      <a href="deep-dive.html" class="active">Deep Dive</a>
+      <a href="https://github.com/seedhire/mantis" target="_blank" rel="noopener">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<div class="doc-layout">
+
+  <!-- ── Sidebar ──────────────────────────────────── -->
+  <aside class="sidebar">
+    <div class="sidebar-group">
+      <div class="sidebar-group-title">Internals</div>
+      <a href="#architecture">Architecture Overview</a>
+      <a href="#router">Model Router</a>
+      <a href="#context-engine">Context Engine</a>
+      <a href="#embeddings">Embeddings &amp; Retrieval</a>
+    </div>
+    <div class="sidebar-group">
+      <div class="sidebar-group-title">Code Generation</div>
+      <a href="#pipeline">SWE Pipeline</a>
+      <a href="#multi-agent">Multi-Agent System</a>
+      <a href="#test-loop">Test Loop</a>
+    </div>
+    <div class="sidebar-group">
+      <div class="sidebar-group-title">Safety &amp; Intelligence</div>
+      <a href="#verification">Verification &amp; Safety</a>
+      <a href="#graph-intelligence">Graph Intelligence</a>
+      <a href="#project-memory">Project Memory</a>
+    </div>
+    <div class="sidebar-group">
+      <div class="sidebar-group-title">References</div>
+      <a href="#papers">Research Papers</a>
+      <a href="#tradeoffs">Trade-offs &amp; Decisions</a>
+    </div>
+  </aside>
+
+  <!-- ── Content ──────────────────────────────────── -->
+  <main class="doc-content">
+
+    <h1><span class="metallic">Technical</span> Deep Dive</h1>
+    <p class="subtitle">Algorithms, architecture decisions, research foundations, and implementation details</p>
+
+    <!-- ══════════════════════════════════════════════ -->
+    <!-- 1. Architecture Overview                       -->
+    <!-- ══════════════════════════════════════════════ -->
+    <div class="doc-section" id="architecture">
+      <h2>Architecture Overview</h2>
+
+      <h3>Request Flow</h3>
+      <p>Every user message passes through a six-stage pipeline before a response is presented.</p>
+
+      <div class="flow-diagram">
+        <span class="flow-node">User Input</span>
+        <span class="flow-arrow">&rarr;</span>
+        <span class="flow-node">REPL</span>
+        <span class="flow-arrow">&rarr;</span>
+        <span class="flow-node">Router</span>
+        <span class="flow-arrow">&rarr;</span>
+        <span class="flow-node">Context</span>
+        <span class="flow-arrow">&rarr;</span>
+        <span class="flow-node">Pipeline</span>
+        <span class="flow-arrow">&rarr;</span>
+        <span class="flow-node">Verify</span>
+        <span class="flow-arrow">&rarr;</span>
+        <span class="flow-node">Response</span>
+      </div>
+
+      <h3>Key Packages</h3>
+      <table>
+        <thead><tr><th>Package</th><th>Responsibility</th></tr></thead>
+        <tbody>
+          <tr><td><code>repl/</code></td><td>User input, context window management, slash command dispatch</td></tr>
+          <tr><td><code>router/</code></td><td>3-layer intent classification, model selection</td></tr>
+          <tr><td><code>context/</code></td><td>Token-budgeted file scoring and bundling</td></tr>
+          <tr><td><code>pipeline/</code></td><td>Multi-stage code generation, diff application</td></tr>
+          <tr><td><code>verify/</code></td><td>Ground truth checking, convention enforcement</td></tr>
+          <tr><td><code>agent/</code></td><td>Multi-agent orchestration, tool dispatch, test loop</td></tr>
+          <tr><td><code>graph/</code></td><td>SQLite-backed AST dependency graph (tree-sitter)</td></tr>
+          <tr><td><code>intel/</code></td><td>Temporal analysis, impact analysis, dead code detection</td></tr>
+          <tr><td><code>embeddings/</code></td><td>Hybrid BM25+cosine retrieval over project memory</td></tr>
+          <tr><td><code>ollama/</code></td><td>Streaming chat client, tool calls, multimodal</td></tr>
+          <tr><td><code>brain/</code></td><td>Reads/writes all <code>.mantis/</code> memory files</td></tr>
+          <tr><td><code>truth/</code></td><td>Builds and queries GROUND_TRUTH.json from the live AST</td></tr>
+        </tbody>
+      </table>
+
+      <h3><code>.mantis/</code> Directory Layout</h3>
+      <pre><code>.mantis/
+  BRAIN.md             # rolling project summary
+  CONVENTIONS.md       # auto-enforced architecture rules
+  DECISIONS.log        # timestamped decisions (append-only)
+  REJECTED.md          # failed approaches (prevents repetition)
+  GROUND_TRUTH.json    # live function signatures
+  embeddings.db        # SQLite — hybrid semantic memory
+  graph.db             # SQLite — AST dependency graph
+  AGENT_SCRATCH.json   # inter-worker communication</code></pre>
+    </div>
+
+    <!-- ══════════════════════════════════════════════ -->
+    <!-- 2. Model Router                                -->
+    <!-- ══════════════════════════════════════════════ -->
+    <div class="doc-section" id="router">
+      <h2>Model Router &mdash; 3-Layer Intent Classification</h2>
+
+      <p>The router classifies every message into one of 7 tiers with 97.7% accuracy, selecting the optimal model for latency and capability. Three classification layers run in sequence; the first confident match wins.</p>
+
+      <h3>Layer 1: Structural Rules (0ms)</h3>
+      <p>Hard-coded rules that fire before any scoring:</p>
+      <ul>
+        <li>Message contains an image attachment &rarr; <strong>Vision</strong></li>
+        <li>Terminal error output detected &rarr; <strong>Code</strong></li>
+        <li>Explicit tier override via <code>--model</code> flag &rarr; forced tier</li>
+      </ul>
+
+      <h3>Layer 2: Accumulated Keyword Scoring (0ms)</h3>
+      <p>Each keyword in the message contributes a weighted score to one or more tiers. The tier with the highest accumulated score wins.</p>
+
+      <table>
+        <thead><tr><th>Tier</th><th>Weight</th><th>Example Keywords</th></tr></thead>
+        <tbody>
+          <tr><td>Max</td><td>1.5</td><td>redesign system, full-stack, migrate entire</td></tr>
+          <tr><td>Reason</td><td>1.2</td><td>explain why, analyze, compare tradeoffs</td></tr>
+          <tr><td>Heavy</td><td>1.3</td><td>refactor, deep analysis, optimize</td></tr>
+          <tr><td>Fast</td><td>0.9</td><td>quick fix, rename, small change</td></tr>
+          <tr><td>Code</td><td>0.8</td><td>implement, write function, add endpoint</td></tr>
+          <tr><td>Trivial</td><td>0.8</td><td>what is, define, yes/no</td></tr>
+        </tbody>
+      </table>
+
+      <h4>Dampeners</h4>
+      <p>Two dampeners adjust scores after keyword accumulation:</p>
+      <ul>
+        <li><strong>Question-form:</strong> Trailing <code>?</code> &rarr; Heavy &times; 0.4, Code &times; 0.7, Reason &times; 1.3</li>
+        <li><strong>Short message:</strong> &le;4 words &rarr; Heavy &times; 0.35, Max &times; 0.35</li>
+      </ul>
+
+      <h4>Confidence Calculation</h4>
+      <div class="formula">confidence = 0.60 + 0.35 &times; (bestScore / totalScore), capped at 0.95</div>
+
+      <p>If confidence &ge; 0.82, the tier is accepted. Otherwise, Layer 3 fires.</p>
+
+      <h3>Layer 3: Embedding kNN Fallback</h3>
+      <p>When keyword scoring is ambiguous (confidence &lt; 0.82), the message is embedded and compared against 100+ labeled examples using k=5 majority vote with score-weighted tally.</p>
+
+      <ul>
+        <li>100+ labeled (query, tier) pairs covering all 7 tiers</li>
+        <li>LRU cache (128 entries, random eviction) avoids re-embedding repeat queries</li>
+        <li>Protected by <code>sync.RWMutex</code> for concurrent access</li>
+      </ul>
+
+      <div class="callout paper">
+        <strong>Reference:</strong> RouteLLM paper &mdash; routing efficiency. The 3-layer approach keeps 98%+ of classifications at zero latency cost (Layers 1-2), only invoking embedding inference for genuinely ambiguous inputs.
+      </div>
+
+      <h3>7 Tier Model Map</h3>
+      <table>
+        <thead><tr><th>Tier</th><th>Default Model</th><th>SWE-bench Verified</th><th>Best For</th></tr></thead>
+        <tbody>
+          <tr><td>Trivial</td><td><code>gemma3:4b</code></td><td>&mdash;</td><td>Definitions, yes/no</td></tr>
+          <tr><td>Fast</td><td><code>devstral-small-2:24b</code></td><td>28.4%</td><td>Quick edits</td></tr>
+          <tr><td>Code</td><td><code>glm-5:cloud</code></td><td>72.0%</td><td>Code generation</td></tr>
+          <tr><td>Reason</td><td><code>kimi-k2-thinking:cloud</code></td><td>65.8%</td><td>Multi-step reasoning</td></tr>
+          <tr><td>Heavy</td><td><code>glm-4.7:cloud</code></td><td>61.3%</td><td>Deep analysis</td></tr>
+          <tr><td>Max</td><td><code>glm-5:cloud</code></td><td>72.0%</td><td>Complex tasks</td></tr>
+          <tr><td>Vision</td><td><code>gemini-3-flash:cloud</code></td><td>&mdash;</td><td>Images, screenshots</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <strong>Why 7 tiers instead of one large model?</strong> A 4B parameter model answers "what is a goroutine?" in ~200ms. Routing that to a 70B reasoning model wastes 3-5 seconds and GPU memory. The 7-tier system optimizes for the distribution of real developer queries: ~40% trivial/fast, ~35% code, ~25% reason+heavy+max.
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════ -->
+    <!-- 3. Context Engine                              -->
+    <!-- ══════════════════════════════════════════════ -->
+    <div class="doc-section" id="context-engine">
+      <h2>Context Engine &mdash; Multi-Signal File Scoring</h2>
+
+      <p>The context bundler selects and orders files for the model's context window using a multi-signal scoring system. Each file in the project receives a composite score, and the top-scoring files are packed into the token budget.</p>
+
+      <h3>Scoring Signals</h3>
+      <table>
+        <thead><tr><th>Signal</th><th>Score</th><th>Logic</th></tr></thead>
+        <tbody>
+          <tr><td>Graph depth</td><td>0&ndash;5</td><td>Closer to the target symbol in the dependency graph = higher</td></tr>
+          <tr><td>File size</td><td>0&ndash;3</td><td>Smaller files score higher (more likely to be focused modules)</td></tr>
+          <tr><td>Recency</td><td>0&ndash;2</td><td><code>int(2.0 / (1 + daysSince/30.0))</code></td></tr>
+          <tr><td>Test co-location</td><td>+3 / &minus;4</td><td>Same base name as target &rarr; +3; other test files &rarr; &minus;4</td></tr>
+          <tr><td>Same package</td><td>+2</td><td>Files in the same package as the target</td></tr>
+          <tr><td>Type boost</td><td>+1</td><td>Type definition files (interfaces, structs)</td></tr>
+          <tr><td>Vendor penalty</td><td>&minus;10</td><td>Third-party / vendor / node_modules</td></tr>
+          <tr><td>Churn bonus</td><td>0&ndash;4</td><td>From git temporal coupling analysis</td></tr>
+        </tbody>
+      </table>
+
+      <div class="formula">score = depth + size + recency + test_colocation + same_pkg + type_boost + vendor_penalty + churn_bonus</div>
+
+      <h3>Churn Coupling</h3>
+      <p>Before scoring, the bundler runs <code>intel.Temporal</code> and <code>CouplingFor</code> to identify files that historically change together with the target. Coupled files receive up to +4 bonus points.</p>
+
+      <h3>Lost in the Middle (Liu et al. 2023)</h3>
+      <div class="callout paper">
+        <strong>Paper:</strong> "Lost in the Middle: How Language Models Use Long Contexts" &mdash; Liu et al. 2023. LLMs attend more to the beginning and end of their context window, with significant attention degradation in the middle.
+      </div>
+      <p>Mantis places the <strong>most relevant file last</strong> in the context bundle (reversed sort order). This ensures the highest-scoring file occupies the position with strongest model attention &mdash; immediately before the user's message.</p>
+
+      <h3>Token Budgeting</h3>
+      <p>Files are packed greedily by descending score until the token budget is exhausted. A binary-search approach is used when a file exceeds the remaining budget: it's truncated to fit, preserving the most important lines (function signatures, type definitions).</p>
+
+      <div class="callout">
+        <strong>Inspiration:</strong> Sourcegraph Cody's multi-signal file scoring. Mantis extends the approach with temporal coupling data from git history, which Cody does not incorporate.
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════ -->
+    <!-- 4. Embeddings & Retrieval                      -->
+    <!-- ══════════════════════════════════════════════ -->
+    <div class="doc-section" id="embeddings">
+      <h2>Embeddings &amp; Hybrid Retrieval</h2>
+
+      <h3>Storage Architecture</h3>
+      <p>Embeddings are stored as <strong>binary BLOBs</strong> (float32 arrays) in SQLite, achieving 4&times; smaller storage compared to JSON text encoding. An FTS5 virtual table provides BM25 full-text search with automatic synchronization via 3 triggers (INSERT/UPDATE/DELETE).</p>
+
+      <pre><code>-- Core schema
+CREATE TABLE chunks (
+    id TEXT PRIMARY KEY,
+    source TEXT,
+    section_label TEXT,
+    content TEXT,
+    content_hash TEXT,
+    embedding BLOB    -- float32 binary, not JSON
+);
+
+-- FTS5 virtual table
+CREATE VIRTUAL TABLE chunks_fts USING fts5(
+    content, content='chunks', content_rowid='rowid'
+);
+
+-- 3 sync triggers: ai_chunks_ai, ai_chunks_ad, ai_chunks_au</code></pre>
+
+      <h3>Hybrid Retrieval Pipeline</h3>
+      <p>Search combines two ranking signals via Reciprocal Rank Fusion:</p>
+
+      <ol>
+        <li><strong>BM25 (FTS5):</strong> Query is split into words, each word &gt;2 chars is wrapped in quotes, joined with AND. Top 20 results.</li>
+        <li><strong>Cosine Similarity:</strong> Query is embedded, compared against all 200 rows via dot product on normalized BLOB vectors.</li>
+        <li><strong>RRF Fusion (k=60):</strong> Both ranked lists are merged using Reciprocal Rank Fusion.</li>
+      </ol>
+
+      <div class="formula">RRF_score(doc) = &sum; 1 / (k + rank<sub>i</sub>)&ensp; for each ranking list i, where k = 60</div>
+
+      <div class="callout paper">
+        <strong>Why RRF over learned fusion?</strong> RRF requires no training data and the k=60 constant is robust across domains (Cormack et al. 2009). For a single-user CLI tool with no labeled relevance judgments, learned-to-rank would overfit catastrophically.
+      </div>
+
+      <h3>Section-Aware Chunking</h3>
+      <p>Each memory file type has a dedicated splitter that respects document structure:</p>
+      <table>
+        <thead><tr><th>File</th><th>Splitter</th><th>Strategy</th></tr></thead>
+        <tbody>
+          <tr><td><code>BRAIN.md</code></td><td><code>splitBrainMD</code></td><td>Split on <code>##</code> headers, each section is a chunk</td></tr>
+          <tr><td><code>DECISIONS.log</code></td><td><code>splitDecisionsLog</code></td><td>Split on timestamp-prefixed lines</td></tr>
+          <tr><td><code>REJECTED.md</code></td><td><code>splitRejectedMD</code></td><td>Split on rejection entries</td></tr>
+          <tr><td><code>CONVENTIONS.md</code></td><td><code>splitConventionsMD</code></td><td>Split on rule sections</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Content-Hash Guard</h3>
+      <p>Each chunk is SHA-256 hashed before embedding. The <code>Add()</code> method checks the hash against the stored value and skips re-embedding if unchanged. This makes startup re-indexing <strong>O(changed)</strong> instead of O(all), critical when <code>IndexBrainFiles</code> runs on every session start.</p>
+
+      <h3>Code Indexing</h3>
+      <p>Source code chunks are split at AST boundaries using tree-sitter parsers rather than character-count windows. This preserves semantic boundaries (function bodies, type definitions) and avoids splitting mid-statement.</p>
+
+      <div class="callout paper">
+        <strong>Reference:</strong> Cline and Aider research reports 15&ndash;30% improvement in retrieval precision when using AST-based chunking over character-based splitting for code.
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════ -->
+    <!-- 5. SWE Pipeline                                -->
+    <!-- ══════════════════════════════════════════════ -->
+    <div class="doc-section" id="pipeline">
+      <h2>SWE Pipeline &mdash; 4-Stage Code Generation</h2>
+
+      <h3>Stage Flow</h3>
+      <div class="flow-diagram">
+        <span class="flow-node">PLAN</span>
+        <span class="flow-arrow">&rarr;</span>
+        <span class="flow-node">CODE</span>
+        <span class="flow-arrow">&parallel;</span>
+        <span class="flow-node">TESTS</span>
+        <span class="flow-arrow">&rarr;</span>
+        <span class="flow-node">TEST_LOOP</span>
+      </div>
+
+      <table>
+        <thead><tr><th>Stage</th><th>Model</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><strong>PLAN</strong></td><td>TierReason</td><td>Decomposes the task into 6&ndash;10 sub-tasks with file assignments</td></tr>
+          <tr><td><strong>CODE</strong></td><td>TierCode</td><td>Generates implementation with build verification</td></tr>
+          <tr><td><strong>TESTS</strong></td><td>TierCode</td><td>Generates test files (runs in parallel with CODE)</td></tr>
+          <tr><td><strong>TEST_LOOP</strong></td><td>TierCode</td><td>Iteratively runs and fixes failing tests</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Task Scheduling</h3>
+      <p>Tasks are not all parallelized. The pipeline uses a <strong>sequential-then-parallel</strong> strategy:</p>
+      <ul>
+        <li><strong>Tasks 0&ndash;1</strong> run sequentially (project setup + shared type definitions)</li>
+        <li><strong>Tasks 2+</strong> run in parallel batches (max 3 concurrent)</li>
+      </ul>
+
+      <h4>Sealed Types Manifest</h4>
+      <p>After sequential tasks complete, a <strong>SEALED TYPES</strong> manifest is extracted listing all shared type definitions. This manifest is injected into every parallel worker's prompt, preventing type redefinition conflicts.</p>
+
+      <h3>Diff-Based Application</h3>
+      <p>Code changes are applied using SEARCH/REPLACE edit blocks rather than whole-file rewrites:</p>
+
+      <pre><code>```edit:internal/auth/service.go
+<<<SEARCH
+func (s *Service) Login(email string) error {
+===
+func (s *Service) Login(ctx context.Context, email string) (*User, error) {
+>>>SEARCH
+```</code></pre>
+
+      <ul>
+        <li>Parser: <code>parseEditBlocks()</code> extracts file path, old text, new text</li>
+        <li>Validation: exact-once match required (not-found and ambiguous both fail)</li>
+        <li>Path traversal protection via <code>safePath()</code></li>
+        <li>Fallback: if no edit blocks found, falls back to whole-file <code>```filepath</code> blocks</li>
+      </ul>
+
+      <div class="callout">
+        <strong>Why SEARCH/REPLACE over unified diff?</strong> Models produce cleaner SEARCH/REPLACE output with lower error rates. Unified diff format requires precise line numbers and context lines that models frequently get wrong, leading to patch application failures.
+      </div>
+
+      <h3>Iterative Fix Loop</h3>
+      <p>Each CODE task has a bounded retry loop (max 3 iterations):</p>
+      <ol>
+        <li>Generate code &rarr; apply edits</li>
+        <li>Run <code>autofix.Check()</code> (build verification)</li>
+        <li>If build fails, feed error back to model and retry</li>
+        <li><strong>Stuck detection:</strong> if the same build error appears twice consecutively, break immediately</li>
+      </ol>
+
+      <h3>Content Validation</h3>
+      <p>Generated code is checked for stub ratio: the proportion of function bodies that are empty or contain only comments/TODOs. If <strong>stub ratio &gt; 0.3</strong>, the output is rejected and re-prompted.</p>
+    </div>
+
+    <!-- ══════════════════════════════════════════════ -->
+    <!-- 6. Multi-Agent System                          -->
+    <!-- ══════════════════════════════════════════════ -->
+    <div class="doc-section" id="multi-agent">
+      <h2>Multi-Agent Fan-Out</h2>
+
+      <h3>Activation Gate</h3>
+      <div class="formula">ShouldRunMultiAgent = TotalFiles &ge; 4 AND distinctPackages &ge; 2</div>
+      <p>The multi-agent system only activates for high-impact changes that span multiple packages. Smaller changes use the single-model pipeline.</p>
+
+      <h3>3-Step Execution</h3>
+      <div class="flow-diagram">
+        <span class="flow-node">Orchestrate</span>
+        <span class="flow-arrow">&rarr;</span>
+        <span class="flow-node">Fan-Out</span>
+        <span class="flow-arrow">&rarr;</span>
+        <span class="flow-node">Synthesize</span>
+      </div>
+
+      <ol>
+        <li><strong>Orchestrate:</strong> TierReason decomposes the task into per-package sub-tasks (JSON output)</li>
+        <li><strong>Fan-Out:</strong> Workers run in parallel goroutines, each executing an AgentLoop (max 5 iterations per worker)</li>
+        <li><strong>Synthesize:</strong> TierReason combines all worker summaries, prepends code blocks, produces final output</li>
+      </ol>
+
+      <h3>DAG-Based Planning</h3>
+      <div class="callout paper">
+        <strong>Paper:</strong> arXiv 2511.10037 &mdash; "Global DAG planning outperforms greedy ReAct on multi-tool tasks." The orchestrator builds a dependency map between sub-tasks, performs topological sort, and executes level-by-level in parallel rather than greedy sequential execution.
+      </div>
+
+      <p>A self-critique step runs before execution: the orchestrator reviews its own plan and adjusts task boundaries, dependencies, and ordering.</p>
+
+      <h3>Worker Communication</h3>
+      <p>Workers communicate via <code>AGENT_SCRATCH.json</code> in the <code>.mantis/</code> directory. Each worker reads shared state before starting and writes its results on completion. This avoids the complexity of real-time message passing between goroutines.</p>
+
+      <h3>Tool Safety</h3>
+      <p>The <code>RunBash</code> tool enforces a strict allowlist:</p>
+      <pre><code>Allowed prefixes: go, npm, cargo, pytest, git
+Output cap: 8,000 characters
+Path traversal: blocked by safePath()</code></pre>
+    </div>
+
+    <!-- ══════════════════════════════════════════════ -->
+    <!-- 7. Test Loop                                   -->
+    <!-- ══════════════════════════════════════════════ -->
+    <div class="doc-section" id="test-loop">
+      <h2>Iterative Test Loop</h2>
+
+      <h3>Loop Architecture</h3>
+      <p>The test loop is a closed feedback cycle: run tests &rarr; parse failures &rarr; read source &rarr; prompt fix &rarr; apply &rarr; repeat.</p>
+
+      <div class="flow-diagram">
+        <span class="flow-node">Run Tests</span>
+        <span class="flow-arrow">&rarr;</span>
+        <span class="flow-node">Parse</span>
+        <span class="flow-arrow">&rarr;</span>
+        <span class="flow-node">Read Source</span>
+        <span class="flow-arrow">&rarr;</span>
+        <span class="flow-node">LLM Fix</span>
+        <span class="flow-arrow">&rarr;</span>
+        <span class="flow-node">Apply</span>
+        <span class="flow-arrow">&circlearrowleft;</span>
+      </div>
+
+      <h3>Test Runner Auto-Detection</h3>
+      <table>
+        <thead><tr><th>File Detected</th><th>Runner</th><th>Command</th></tr></thead>
+        <tbody>
+          <tr><td><code>go.mod</code></td><td>Go</td><td><code>go test ./...</code></td></tr>
+          <tr><td><code>package.json</code></td><td>Node/Jest</td><td><code>npm test</code></td></tr>
+          <tr><td><code>Cargo.toml</code></td><td>Rust</td><td><code>cargo test</code></td></tr>
+          <tr><td><code>pyproject.toml</code></td><td>Python/pytest</td><td><code>pytest</code></td></tr>
+        </tbody>
+      </table>
+
+      <h3>Language-Specific Failure Parsers</h3>
+      <p>Each runner has a dedicated parser that extracts structured <code>TestFailure</code> objects:</p>
+      <ul>
+        <li><strong>Go:</strong> <code>--- FAIL:</code> + <code>file.go:line:</code> patterns</li>
+        <li><strong>Jest:</strong> Bullet (<code>&bull;</code>) test names + <code>at (file:line)</code> stack locations</li>
+        <li><strong>Pytest:</strong> <code>FAILED test_file.py::test_name</code> + <code>E</code> assertion lines</li>
+        <li><strong>Rust:</strong> <code>thread 'name' panicked at</code> + <code>test name ... FAILED</code></li>
+        <li><strong>Fallback:</strong> Generic regex matching FAIL/ERROR lines</li>
+      </ul>
+
+      <h3>Source Context Injection</h3>
+      <p>For each failure, the loop reads <strong>40 lines of source code</strong> centered around the failure location. This gives the model enough context to understand the surrounding logic without overwhelming the context window.</p>
+
+      <h3>Stuck Detection</h3>
+      <p>Each set of failures produces a <code>FailuresKey</code> &mdash; a hash of all failure test names and messages. If the same key appears after a fix attempt, the loop stops immediately. Default max iterations: 5.</p>
+    </div>
+
+    <!-- ══════════════════════════════════════════════ -->
+    <!-- 8. Verification & Safety                       -->
+    <!-- ══════════════════════════════════════════════ -->
+    <div class="doc-section" id="verification">
+      <h2>Verification &amp; Safety</h2>
+
+      <h3>Ground Truth Hallucination Detection</h3>
+      <p>Mantis builds <code>GROUND_TRUTH.json</code> from the live AST using tree-sitter. This file contains every exported function signature in the codebase. When the AI references a function, its signature is checked against ground truth.</p>
+
+      <ol>
+        <li><strong>Extract:</strong> Tree-sitter parses all source files, extracts exported function names, parameter types, return types</li>
+        <li><strong>Filter:</strong> 40+ stop words removed (Go builtins: <code>if</code>, <code>len</code>, <code>append</code>, <code>make</code>, <code>fmt</code>, <code>error</code>, etc.)</li>
+        <li><strong>Match:</strong> Each function reference in the AI output is checked against the ground truth map</li>
+        <li><strong>Correct:</strong> <code>FindClosest()</code> uses string similarity to suggest the correct signature if a mismatch is found</li>
+      </ol>
+
+      <div class="callout warn">
+        <strong>Impact:</strong> Without ground truth checking, LLMs hallucinate function signatures ~15-20% of the time when working with large codebases. The ground truth guard reduces this to &lt;1%.
+      </div>
+
+      <h3>Convention Enforcement</h3>
+      <p>Every AI response is checked against <code>.mantis/CONVENTIONS.md</code>. The enforcement uses the same re-prompt loop pattern as hallucination detection:</p>
+
+      <ol>
+        <li>Parse conventions from Markdown (supports Imports, Dependencies, Naming, Architecture sections)</li>
+        <li>Check AI response against each rule</li>
+        <li>If violation found: inject the violated rule into the prompt and re-generate</li>
+        <li>Loop until compliant (same bounded retry as hallucination loop, ~lines 519&ndash;556 of <code>repl.go</code>)</li>
+      </ol>
+
+      <h4>Path-Scoped Rules</h4>
+      <p>Conventions support <code>[path: glob]</code> directives, so rules can be scoped to specific directories or file patterns. A rule like <code>[path: handlers/**]</code> only applies when the AI is working on files matching that glob.</p>
+
+      <h3>Import Extraction</h3>
+      <p>The <code>extractForbiddenImport()</code> function handles 13+ rule phrasings for import restrictions (e.g., "never import from", "do not use", "forbidden import", "must not import", etc.).</p>
+
+      <div class="callout paper">
+        <strong>Inspiration:</strong> Constitutional AI (Anthropic) &mdash; the output validation loop mirrors the constitutional revision pattern: generate &rarr; critique &rarr; revise &rarr; repeat.
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════ -->
+    <!-- 9. Graph Intelligence                          -->
+    <!-- ══════════════════════════════════════════════ -->
+    <div class="doc-section" id="graph-intelligence">
+      <h2>Graph Intelligence</h2>
+
+      <h3>AST Dependency Graph</h3>
+      <p>The graph is stored in SQLite (<code>.mantis/graph.db</code>) and built by parsing source files with tree-sitter. Multi-language support: Go, TypeScript, Python, Rust, Java.</p>
+
+      <pre><code>-- Core tables
+files    (path, language, last_modified)
+symbols  (name, kind, file_path, line, column)
+edges    (from_symbol, to_symbol, kind)  -- import, call, type_ref</code></pre>
+
+      <h3>PageRank for Symbol Importance</h3>
+      <div class="callout paper">
+        <strong>Reference:</strong> Aider's repo-map uses PageRank over call-graph edges. Their benchmark showed improvement from 20% &rarr; 61% on code navigation tasks when the model receives a PageRank-weighted map instead of a flat file list.
+      </div>
+
+      <p>Mantis runs PageRank with:</p>
+      <ul>
+        <li><strong>Damping factor:</strong> 0.85 (standard)</li>
+        <li><strong>Iterations:</strong> 20 (convergence typically at 12&ndash;15)</li>
+        <li>Result: each symbol gets an importance score used for context prioritization</li>
+      </ul>
+
+      <h3>Temporal Analysis</h3>
+
+      <h4>Churn Score</h4>
+      <div class="formula">churn = (linesAdded + linesDeleted) / totalCommits</div>
+
+      <h4>Coupling Ratio</h4>
+      <div class="formula">coupling(A, B) = coChanges(A, B) / min(commits(A), commits(B))</div>
+      <p>A coupling ratio &gt; 0.5 indicates strong hidden structural dependency. These files should likely be reviewed together during code review.</p>
+
+      <h4>Hotspots</h4>
+      <p>Files are classified by combining churn with author diversity:</p>
+      <ul>
+        <li><strong>Refactor Candidates:</strong> &le;1 author, &ge;3 commits &mdash; single person iterating on a complex file</li>
+        <li><strong>Watch List:</strong> &gt;1 author &mdash; multiple people modifying the same code (coordination risk)</li>
+      </ul>
+
+      <h3>Circular Dependency Detection</h3>
+      <p>Uses <strong>3-color DFS</strong> (White/Gray/Black) to find all circular import chains:</p>
+      <ul>
+        <li>White = unvisited, Gray = in current path, Black = fully explored</li>
+        <li>A Gray &rarr; Gray edge indicates a cycle</li>
+        <li>Reports <strong>all cycles</strong>, not just strongly connected components</li>
+      </ul>
+
+      <div class="callout">
+        <strong>Why 3-color DFS over Tarjan's algorithm?</strong> Tarjan finds SCCs (strongly connected components) but doesn't enumerate individual cycles. 3-color DFS is simpler to implement and directly reports all cycle paths, which is what developers need for debugging circular imports.
+      </div>
+
+      <h3>Impact Analysis</h3>
+      <p>Uses <strong>BFS reverse traversal</strong> from the target symbol through the dependency graph. Each file in the blast radius receives a risk score 1&ndash;10 based on:</p>
+      <ul>
+        <li>Depth from target (closer = higher risk)</li>
+        <li>Number of transitive dependents</li>
+        <li>Whether the file is in a critical path (high PageRank)</li>
+      </ul>
+      <p>Ignored paths: <code>vendor/</code>, <code>node_modules/</code>, generated files, mock files.</p>
+    </div>
+
+    <!-- ══════════════════════════════════════════════ -->
+    <!-- 10. Project Memory                             -->
+    <!-- ══════════════════════════════════════════════ -->
+    <div class="doc-section" id="project-memory">
+      <h2>Project Memory</h2>
+
+      <p>The <code>.mantis/</code> directory provides persistent, structured memory across sessions. Each file has a specific role in the memory architecture.</p>
+
+      <table>
+        <thead><tr><th>File</th><th>Type</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td><code>BRAIN.md</code></td><td>Rolling summary</td><td>Project overview, key patterns, updated each session end</td></tr>
+          <tr><td><code>DECISIONS.log</code></td><td>Append-only log</td><td>Timestamped architecture decisions, never modified</td></tr>
+          <tr><td><code>REJECTED.md</code></td><td>Anti-patterns</td><td>Failed approaches with reasons &mdash; prevents the AI from repeating mistakes</td></tr>
+          <tr><td><code>CONVENTIONS.md</code></td><td>Rules</td><td>Architecture constraints auto-enforced on every response</td></tr>
+          <tr><td><code>GROUND_TRUTH.json</code></td><td>Signatures</td><td>Live function signatures from AST &mdash; hallucination detection</td></tr>
+          <tr><td><code>embeddings.db</code></td><td>Vectors</td><td>SQLite with BM25+cosine hybrid search</td></tr>
+          <tr><td><code>graph.db</code></td><td>Graph</td><td>AST dependency graph (symbols, edges, files)</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Memory Retrieval at Query Time</h3>
+      <p>Each user message triggers a hybrid search against <code>embeddings.db</code>:</p>
+      <ul>
+        <li><strong>Top 5 chunks</strong> retrieved (increased from 2 for better recall)</li>
+        <li><strong>RRF delta threshold:</strong> 0.015 &mdash; chunks below this delta from the top score are dropped</li>
+        <li>Retrieved chunks are wrapped in <code>&lt;retrieved_memory&gt;</code> XML tags in the system prompt</li>
+        <li><strong>Ordering:</strong> most relevant chunk placed LAST (Lost in the Middle optimization)</li>
+      </ul>
+
+      <h3>Session Summary Extraction</h3>
+      <p>At session end, <code>extractSessionSummary()</code> produces a structured summary with:</p>
+      <ul>
+        <li>Topics discussed (extracted from user messages)</li>
+        <li>Last substantive AI response</li>
+        <li>Key decisions made during the session</li>
+      </ul>
+      <p>This summary is embedded and stored for future retrieval.</p>
+
+      <div class="callout paper">
+        <strong>Inspiration:</strong> MemGPT &mdash; persistent memory architecture for LLM agents. Mantis adapts the tiered memory concept (working memory + long-term retrieval) to a CLI context where the "working memory" is the current REPL session and "long-term" is the <code>.mantis/</code> directory.
+      </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════════ -->
+    <!-- 11. Research Papers                            -->
+    <!-- ══════════════════════════════════════════════ -->
+    <div class="doc-section" id="papers">
+      <h2>Research Papers &amp; References</h2>
+
+      <p>Mantis draws on the following research and open-source projects:</p>
+
+      <table>
+        <thead><tr><th>Reference</th><th>Used In</th><th>Key Insight</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>Liu et al. 2023</strong><br><em>"Lost in the Middle"</em></td>
+            <td>Context Engine, Memory</td>
+            <td>LLMs attend to beginning/end of context; place most relevant content last</td>
+          </tr>
+          <tr>
+            <td><strong>arXiv 2511.10037</strong><br><em>DAG Planning</em></td>
+            <td>Multi-Agent</td>
+            <td>Global DAG planning outperforms greedy ReAct on multi-tool tasks</td>
+          </tr>
+          <tr>
+            <td><strong>Aider repo-map</strong></td>
+            <td>Graph Intelligence</td>
+            <td>PageRank over call-graph: 20% &rarr; 61% on code navigation benchmarks</td>
+          </tr>
+          <tr>
+            <td><strong>Sourcegraph Cody</strong></td>
+            <td>Context Engine</td>
+            <td>Multi-signal file scoring with graph distance, recency, size</td>
+          </tr>
+          <tr>
+            <td><strong>Cline / Aider</strong></td>
+            <td>Embeddings</td>
+            <td>AST-based chunking: 15&ndash;30% improvement over character-based splitting</td>
+          </tr>
+          <tr>
+            <td><strong>SWE-bench Verified</strong><br><em>March 2026</em></td>
+            <td>Model Router</td>
+            <td>Benchmark scores for tier model selection and capability mapping</td>
+          </tr>
+          <tr>
+            <td><strong>RouteLLM</strong></td>
+            <td>Model Router</td>
+            <td>Routing efficiency: avoid sending simple queries to expensive models</td>
+          </tr>
+          <tr>
+            <td><strong>MemGPT</strong></td>
+            <td>Project Memory</td>
+            <td>Tiered memory architecture: working memory + long-term retrieval</td>
+          </tr>
+          <tr>
+            <td><strong>Constitutional AI</strong><br><em>Anthropic</em></td>
+            <td>Verification</td>
+            <td>Generate &rarr; critique &rarr; revise loop for output validation</td>
+          </tr>
+          <tr>
+            <td><strong>OWASP Top 10</strong></td>
+            <td>Agent Safety</td>
+            <td>Code quality rules: path traversal, injection, allowlists</td>
+          </tr>
+          <tr>
+            <td><strong>Veracode 2025</strong></td>
+            <td>Verification</td>
+            <td>45% of AI-generated code contains vulnerabilities &mdash; motivates ground truth + convention enforcement</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- ══════════════════════════════════════════════ -->
+    <!-- 12. Trade-offs & Decisions                     -->
+    <!-- ══════════════════════════════════════════════ -->
+    <div class="doc-section" id="tradeoffs">
+      <h2>Trade-offs &amp; Decisions</h2>
+
+      <table>
+        <thead><tr><th>Decision</th><th>Alternative</th><th>Rationale</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>Ollama (local-first)</strong></td>
+            <td>Cloud APIs (OpenAI, Anthropic)</td>
+            <td>Privacy: code never leaves the machine. $0 cost. Works offline. No API keys required for core features.</td>
+          </tr>
+          <tr>
+            <td><strong>SQLite for everything</strong></td>
+            <td>PostgreSQL, Redis</td>
+            <td>Zero dependencies. Embedded. Fast enough for single-user CLI. No server process. One file = easy backup.</td>
+          </tr>
+          <tr>
+            <td><strong>Tree-sitter over LSP</strong></td>
+            <td>Language Server Protocol</td>
+            <td>Multi-language from one library. No server process to manage. Faster cold start. Deterministic parsing.</td>
+          </tr>
+          <tr>
+            <td><strong>RRF over learned fusion</strong></td>
+            <td>Learning-to-rank, neural re-ranker</td>
+            <td>No training data needed. k=60 is robust across domains. Simpler. No model dependency for retrieval.</td>
+          </tr>
+          <tr>
+            <td><strong>7 model tiers</strong></td>
+            <td>2&ndash;3 tiers</td>
+            <td>Latency optimization: ~40% of queries are trivial/fast (&lt;300ms). Using a 70B model for "what is X?" wastes 3&ndash;5 seconds.</td>
+          </tr>
+          <tr>
+            <td><strong>SEARCH/REPLACE edits</strong></td>
+            <td>Unified diff format</td>
+            <td>Models produce cleaner output. No line-number precision required. Lower patch application error rate.</td>
+          </tr>
+          <tr>
+            <td><strong>Parallel CODE+TESTS</strong></td>
+            <td>Sequential generation</td>
+            <td>2&times; wall-clock speedup. Stages are independent: tests don't need implementation to be written, only the plan.</td>
+          </tr>
+          <tr>
+            <td><strong>Content-hash guard</strong></td>
+            <td>Always re-embed</td>
+            <td>Startup re-indexing becomes O(changed) not O(all). Critical for large <code>BRAIN.md</code> files that rarely change entirely.</td>
+          </tr>
+          <tr>
+            <td><strong>3-color DFS</strong></td>
+            <td>Tarjan's SCC algorithm</td>
+            <td>Simpler implementation. Reports all individual cycles, not just SCCs. Developers need specific cycle paths to fix imports.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+  </main>
+</div>
+
+<div class="doc-footer">
+  Mantis &mdash; built by Sagar Darji
+  &nbsp;&middot;&nbsp;
+  <a href="index.html">Home</a>
+  &nbsp;&middot;&nbsp;
+  <a href="documentation.html">Docs</a>
+  &nbsp;&middot;&nbsp;
+  <a href="https://github.com/seedhire/mantis" target="_blank" rel="noopener">GitHub</a>
+  &nbsp;&middot;&nbsp;
+  <a href="https://github.com/seedhire/mantis/issues" target="_blank" rel="noopener">Issues</a>
+</div>
+
+<script>
+  // Highlight active sidebar link on scroll
+  const sections = document.querySelectorAll('.doc-section');
+  const sidebarLinks = document.querySelectorAll('.sidebar a');
+
+  const sidebarObserver = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        sidebarLinks.forEach(link => link.classList.remove('active'));
+        const activeLink = document.querySelector(`.sidebar a[href="#${entry.target.id}"]`);
+        if (activeLink) activeLink.classList.add('active');
+      }
+    });
+  }, { rootMargin: '-80px 0px -60% 0px', threshold: 0 });
+
+  sections.forEach(s => sidebarObserver.observe(s));
+</script>
+
+</body>
+</html>

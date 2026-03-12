@@ -22,6 +22,7 @@ func (p *PythonParser) Extensions() []string { return []string{".py"} }
 // ParseFile parses a Python file and extracts symbols and imports.
 func (p *PythonParser) ParseFile(path string, content []byte) (*ParseResult, error) {
 	parser := sitter.NewParser()
+	defer parser.Close()
 	parser.SetLanguage(python.GetLanguage())
 
 	tree, err := parser.ParseCtx(context.Background(), nil, content)

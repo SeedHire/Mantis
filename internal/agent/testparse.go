@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -412,5 +413,6 @@ func FailuresKey(failures []TestFailure) string {
 	for i, f := range failures {
 		keys[i] = f.FailureKey()
 	}
+	sort.Strings(keys) // Go randomizes test order; sort for stable stuck detection
 	return strings.Join(keys, "\n")
 }

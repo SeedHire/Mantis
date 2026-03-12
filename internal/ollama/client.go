@@ -130,6 +130,22 @@ func NewWithBaseURL(baseURL string) *Client {
 	}
 }
 
+// SetAPIKey swaps the API key on an existing client.
+// If the new key is non-empty, the client switches to Cloud mode.
+func (c *Client) SetAPIKey(key string) {
+	c.apiKey = key
+	if key != "" {
+		c.baseURL = CloudBaseURL
+		c.isCloud = true
+	} else {
+		c.baseURL = LocalBaseURL
+		c.isCloud = false
+	}
+}
+
+// APIKey returns the current API key (for debugging/display).
+func (c *Client) APIKey() string { return c.apiKey }
+
 // IsCloud reports whether this client is using Ollama Cloud.
 func (c *Client) IsCloud() bool { return c.isCloud }
 

@@ -415,6 +415,11 @@ func runWorker(
 	toolErrCount := 0
 
 	for iter := 0; iter < workerMaxIter; iter++ {
+		select {
+		case <-ctx.Done():
+			return WorkerResult{Package: pkg, Err: "context cancelled"}
+		default:
+		}
 		result, err := client.ChatWithTools(ctx, model, msgs, tools, nil)
 		if err != nil {
 			return WorkerResult{Package: pkg, Err: err.Error()}
@@ -446,6 +451,8 @@ func runWorker(
 					toolErrCount++
 					out = fmt.Sprintf("error: %s", dispErr)
 				}
+			} else {
+				toolErrCount = 0 // reset on success — count consecutive errors only
 			}
 			msgs = append(msgs, ollama.ToolMessage{
 				Role:    "tool",

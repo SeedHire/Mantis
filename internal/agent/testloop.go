@@ -285,6 +285,8 @@ func (tl *TestLoop) promptFix(ctx context.Context, failures []TestFailure, sourc
 					toolErrCount++
 					out = fmt.Sprintf("error: %s", dispErr)
 				}
+			} else {
+				toolErrCount = 0 // BUG-19: reset on success — count consecutive errors only
 			}
 			msgs = append(msgs, ollama.ToolMessage{
 				Role:    "tool",

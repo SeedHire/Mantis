@@ -192,6 +192,9 @@ func encodeVec(v []float64) []byte {
 
 // decodeVec converts little-endian float32 binary back to []float64.
 func decodeVec(b []byte) []float64 {
+	if len(b)%4 != 0 || len(b) == 0 {
+		return nil
+	}
 	n := len(b) / 4
 	v := make([]float64, n)
 	for i := range v {
@@ -507,21 +510,40 @@ func splitOnPattern(text string, re *regexp.Regexp) []sectionChunk {
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
 // ftsQuery escapes the user query for FTS5 MATCH syntax.
+// Uses whitelist sanitization: only alphanumeric and underscore characters are
+// kept, preventing FTS5 operator injection (^, {, }, :, +, OR, NOT, etc.).
 func ftsQuery(q string) string {
 	words := strings.Fields(strings.ToLower(q))
 	if len(words) == 0 {
 		return ""
 	}
-	r := strings.NewReplacer(`"`, ``, `*`, ``, `(`, ``, `)`, ``, `-`, ` `)
 	var parts []string
 	for _, w := range words {
-		w = strings.TrimSpace(r.Replace(w))
-		if len(w) > 2 {
-			parts = append(parts, `"`+w+`"`)
+		// Strip all non-alphanumeric/underscore characters
+		var clean strings.Builder
+		for _, ch := range w {
+			if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_' {
+				clean.WriteRune(ch)
+			}
+		}
+		s := clean.String()
+		if len(s) > 2 {
+			parts = append(parts, `"`+s+`"`)
 		}
 	}
 	if len(parts) == 0 {
-		return `"` + words[0] + `"`
+		// Fallback: sanitize and quote the first word
+		var clean strings.Builder
+		for _, ch := range words[0] {
+			if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_' {
+				clean.WriteRune(ch)
+			}
+		}
+		s := clean.String()
+		if s == "" {
+			return ""
+		}
+		return `"` + s + `"`
 	}
 	return strings.Join(parts, " AND ")
 }

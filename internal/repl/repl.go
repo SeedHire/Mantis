@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 	"github.com/seedhire/mantis/internal/embeddings"
 	"github.com/seedhire/mantis/internal/graph"
 	"github.com/seedhire/mantis/internal/intel"
+	"github.com/seedhire/mantis/internal/keyring"
 	"github.com/seedhire/mantis/internal/parser"
 	"github.com/seedhire/mantis/internal/nl"
 	"github.com/seedhire/mantis/internal/ollama"
@@ -53,6 +55,9 @@ const (
 	colorRed    = "\033[38;5;197m"
 	colorBold   = "\033[1m"
 )
+
+// activeKeyRing is set during Run() so streamWithFallback can rotate keys.
+var activeKeyRing *keyring.KeyRing
 
 // routerEmbedAdapter adapts *embeddings.Store to satisfy router.EmbedStore.
 // The router package defines a minimal interface to avoid importing embeddings.
@@ -130,11 +135,58 @@ func Run(cfg Config) error {
 	creds, _ := setup.Load()
 	client := ollama.NewFromEnv()
 
+	// ── Build KeyRing from all configured API keys ──────────────────────────
+	var allKeys []string
+	if creds != nil {
+		allKeys = creds.AllKeys()
+	}
+	// OLLAMA_API_KEYS env var (comma-separated) takes priority.
+	if envKeys := os.Getenv("OLLAMA_API_KEYS"); envKeys != "" {
+		seen := map[string]bool{}
+		for _, k := range strings.Split(envKeys, ",") {
+			k = strings.TrimSpace(k)
+			if k != "" && !seen[k] {
+				seen[k] = true
+				allKeys = append(allKeys, k)
+			}
+		}
+	}
+	// Deduplicate final list.
+	{
+		seen := map[string]bool{}
+		deduped := allKeys[:0]
+		for _, k := range allKeys {
+			if !seen[k] {
+				seen[k] = true
+				deduped = append(deduped, k)
+			}
+		}
+		allKeys = deduped
+	}
+	// If single OLLAMA_API_KEY is set and not yet in the list, add it.
+	if envKey := os.Getenv("OLLAMA_API_KEY"); envKey != "" {
+		found := false
+		for _, k := range allKeys {
+			if k == envKey {
+				found = true
+				break
+			}
+		}
+		if !found {
+			allKeys = append([]string{envKey}, allKeys...)
+		}
+	}
+	keyRing := keyring.NewKeyRing(allKeys)
+	activeKeyRing = keyRing
+
 	// Single line: user · connection.
 	{
 		connStr := colorDim + "local Ollama" + colorReset
 		if client.IsCloud() {
 			connStr = colorGreen + "Ollama Cloud" + colorReset
+		}
+		if keyRing != nil && keyRing.Count() > 1 {
+			connStr += fmt.Sprintf(" %s(%d API keys)%s", colorDim, keyRing.Count(), colorReset)
 		}
 		if creds != nil && creds.GitHubUser != "" {
 			fmt.Printf("%s● %s%s · %s\n", colorGreen, creds.GitHubUser, colorReset, connStr)
@@ -363,6 +415,7 @@ func Run(cfg Config) error {
 		readline.PcItem("/pr"),
 		readline.PcItem("/git-log"),
 		readline.PcItem("/undo"),
+		readline.PcItem("/keys"),
 		readline.PcItem("/quit"),
 	)
 
@@ -393,7 +446,7 @@ func Run(cfg Config) error {
 	// Ctrl+C when idle: first press shows hint; second press within 2s exits.
 	var activeCancelMu sync.Mutex
 	var activeCancelFn context.CancelFunc
-	var lastInterruptAt time.Time
+	var lastInterruptNano atomic.Int64 // UnixNano of last Ctrl+C — atomic for signal safety
 
 	setActiveCancel := func(cancel context.CancelFunc) {
 		activeCancelMu.Lock()
@@ -423,14 +476,14 @@ func Run(cfg Config) error {
 				fmt.Printf("\r\033[K%s  ✗ cancelled%s\n", colorDim, colorReset)
 			} else {
 				// Idle at prompt — two-tap to exit.
-				if time.Since(lastInterruptAt) < 2*time.Second {
+				if time.Since(time.Unix(0, lastInterruptNano.Load())) < 2*time.Second {
 					fmt.Println()
 					tlog.Flush()
 					endSession(sess, b, messages, embStore)
 					rl.Close()
 					os.Exit(0)
 				}
-				lastInterruptAt = time.Now()
+				lastInterruptNano.Store(time.Now().UnixNano())
 				fmt.Printf("\n%s  Ctrl+C again to exit%s\n", colorDim, colorReset)
 			}
 		}
@@ -446,10 +499,10 @@ func Run(cfg Config) error {
 		line, err := rl.Readline()
 		if err == readline.ErrInterrupt {
 			// Two-tap: first Ctrl+C shows hint, second within 2s exits.
-			if time.Since(lastInterruptAt) < 2*time.Second {
+			if time.Since(time.Unix(0, lastInterruptNano.Load())) < 2*time.Second {
 				break
 			}
-			lastInterruptAt = time.Now()
+			lastInterruptNano.Store(time.Now().UnixNano())
 			if len(line) == 0 {
 				fmt.Printf("%s  Ctrl+C again to exit%s\n", colorDim, colorReset)
 			}
@@ -628,7 +681,12 @@ func Run(cfg Config) error {
 		// Phase 0: proactive compaction — check token budget BEFORE adding the new
 		// turn. Compressing with the prior history still intact gives the summarizer
 		// more headroom and avoids the threshold being blown by a long user message.
-		messages = compressIfNeeded(turnCtx, messages, client)
+		tokensBefore := estimateConversationTokens(messages)
+		messages = compressIfNeeded(turnCtx, messages, client, model)
+		tokensAfter := estimateConversationTokens(messages)
+		if tokensAfter < tokensBefore {
+			evLog.RecordCompaction(turn, (tokensBefore-tokensAfter)/100, tokensBefore, tokensAfter)
+		}
 
 		messages = append(messages, userMsg)
 
@@ -978,10 +1036,6 @@ func Run(cfg Config) error {
 		}
 		streamCancel()
 		spinElapsed := sp.stop()
-		// If spinner was never stopped (TierMax or no live chunks), stop it now.
-		if !sp.started {
-			spinElapsed = stopSpin()
-		}
 
 		if streamErr != nil {
 			rl.SetPrompt(idlePrompt)
@@ -1122,6 +1176,9 @@ func Run(cfg Config) error {
 				}
 
 				messages[len(messages)-1] = ollama.Message{Role: "assistant", Content: rb2.String()}
+				// Sync rb so downstream convention checks use the corrected response.
+				rb.Reset()
+				rb.WriteString(rb2.String())
 				sess.Add(model, intent.Tier, pt2, ct2, false)
 				fmt.Printf("%s◈ Mantis%s %s(corrected)%s\n", colorCopper+colorBold, colorReset, colorDim, colorReset)
 				renderResponse(stripInternalBlocks(stripFileBlocks(rb2.String())))
@@ -1560,6 +1617,25 @@ func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
 		} else {
 			for _, line := range restored {
 				fmt.Printf("%s  ↩ %s%s\n", colorGold, line, colorReset)
+			}
+			fmt.Println()
+		}
+	case "/keys":
+		if activeKeyRing == nil || activeKeyRing.Count() == 0 {
+			fmt.Printf("%s◈ No API keys configured (using local Ollama)%s\n\n", colorDim, colorReset)
+		} else {
+			statuses := activeKeyRing.Status()
+			fmt.Printf("%s◈ API Keys (%d configured)%s\n", colorGold, len(statuses), colorReset)
+			for _, s := range statuses {
+				switch {
+				case s.IsActive:
+					fmt.Printf("  %s● key #%d [%s] — active%s\n", colorGreen, s.Index, s.MaskedKey, colorReset)
+				case s.IsAvailable:
+					fmt.Printf("  %s○ key #%d [%s] — available%s\n", colorDim, s.Index, s.MaskedKey, colorReset)
+				default:
+					fmt.Printf("  %s✗ key #%d [%s] — rate limited (cooldown: %dm remaining)%s\n",
+						colorRed, s.Index, s.MaskedKey, int(s.CoolRemain.Minutes())+1, colorReset)
+				}
 			}
 			fmt.Println()
 		}
@@ -3031,13 +3107,12 @@ func endSession(sess *session.Session, b *brain.Brain, messages []interface{}, e
 	}
 
 	// Embed session summary for semantic retrieval in future sessions.
+	// Synchronous to avoid goroutine leak / use-after-close on embStore.
 	if embStore != nil && summary != "" {
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
-			id := fmt.Sprintf("session-%d", time.Now().Unix())
-			_ = embStore.Add(ctx, id, "session", topic, topic+"\n"+summary)
-		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		id := fmt.Sprintf("session-%d", time.Now().Unix())
+		_ = embStore.Add(ctx, id, "session", topic, topic+"\n"+summary)
+		cancel()
 	}
 }
 
@@ -3280,7 +3355,8 @@ func startSpinner(taskType string) func() time.Duration {
 			}
 		}
 	}()
-	return func() time.Duration { close(done); return time.Since(start) }
+	var once sync.Once
+	return func() time.Duration { once.Do(func() { close(done) }); return time.Since(start) }
 }
 
 // streamPrinter handles real-time token streaming to stdout.
@@ -3387,6 +3463,7 @@ func printHelp() {
 		{"/models", "show available models and current routing"},
 		{"/reject <reason>", "log last suggestion as rejected approach"},
 		{"/decision <text>", "log an architecture decision"},
+		{"/keys", "show API key status and rotation info"},
 		{"/telemetry on|off", "enable / disable anonymous usage upload"},
 		{"/version", "show current version"},
 		{"/quit", "exit  (also Ctrl+C)"},
@@ -3794,9 +3871,39 @@ func streamWithFallback(ctx context.Context, client *ollama.Client, model string
 			continue
 		}
 
-		// Rate limited or server overloaded — retry with exponential backoff before falling back.
+		// Rate limited or server overloaded — try key rotation first, then retry with backoff.
 		if strings.Contains(errStr, "429") || strings.Contains(errStr, "503") ||
 			strings.Contains(errStr, "rate limit") || strings.Contains(errStr, "overloaded") {
+
+			// ── Key rotation: try switching API key before retrying same model ──
+			if activeKeyRing != nil && activeKeyRing.Count() > 1 {
+				fromIdx := activeKeyRing.ActiveIndex()
+				activeKeyRing.MarkRateLimited(15 * time.Minute)
+				if newKey, toIdx, ok := activeKeyRing.Rotate(); ok {
+					client.SetAPIKey(newKey)
+					rb.Reset()
+					fmt.Printf("%s  [key #%d rate limited — switching to key #%d]%s\n",
+						colorDim, fromIdx, toIdx, colorReset)
+					pt, ct, err2 := client.StreamChat(ctx, m, messages, opts,
+						func(chunk string) { rb.WriteString(chunk); liveCallback(chunk) })
+					if err2 == nil {
+						if m != model {
+							fmt.Printf("%s  [switched to %s]%s\n", colorDim, m, colorReset)
+							router.SetResolved(tier, m)
+						}
+						return pt, ct, nil
+					}
+					// New key also failed — fall through to backoff retries.
+					err = err2
+					errStr = err.Error()
+					if !strings.Contains(errStr, "429") && !strings.Contains(errStr, "503") &&
+						!strings.Contains(errStr, "rate limit") && !strings.Contains(errStr, "overloaded") {
+						return 0, 0, err // different error, bail
+					}
+				}
+			}
+
+			// ── Exponential backoff retries ──
 			const maxRetries = 3
 			for attempt := 0; attempt < maxRetries; attempt++ {
 				wait := time.Duration(1<<uint(attempt)) * 2 * time.Second // 2s, 4s, 8s
@@ -4003,12 +4110,18 @@ func estimateConversationTokens(messages []interface{}) int {
 
 // compressIfNeeded proactively compresses conversation history when it gets too large.
 // Instead of waiting for a 400 error, it summarizes old turns at ~80% capacity.
-func compressIfNeeded(callerCtx context.Context, messages []interface{}, client *ollama.Client) []interface{} {
+// Uses the active model's context window to set a dynamic threshold.
+func compressIfNeeded(callerCtx context.Context, messages []interface{}, client *ollama.Client, activeModel string) []interface{} {
 	estimatedTokens := estimateConversationTokens(messages)
 
-	// Threshold: compress when conversation exceeds ~24K tokens (80% of 32K context).
-	// Most Ollama models have 32K-128K context; this is conservative.
-	const compressThreshold = 24000
+	// Dynamic threshold: compress at 75% of the model's context window.
+	// This leaves 25% headroom for the next response + system prompt overhead.
+	ctxWindow := router.ContextWindowFor(activeModel)
+	compressThreshold := int(float64(ctxWindow) * 0.75)
+	if compressThreshold < 8000 {
+		compressThreshold = 8000 // absolute floor for tiny models
+	}
+
 	if estimatedTokens < compressThreshold {
 		return messages
 	}
@@ -4024,13 +4137,14 @@ func compressIfNeeded(callerCtx context.Context, messages []interface{}, client 
 		}
 	}
 
-	// Keep last 6 messages (3 user+assistant pairs), summarize the rest.
-	if len(turns) <= 6 {
+	// Keep last 10 messages (5 user+assistant pairs) for better recency.
+	keepRecent := 10
+	if len(turns) <= keepRecent {
 		return messages // not enough to compress
 	}
 
-	oldTurns := turns[:len(turns)-6]
-	recentTurns := turns[len(turns)-6:]
+	oldTurns := turns[:len(turns)-keepRecent]
+	recentTurns := turns[len(turns)-keepRecent:]
 
 	// Build Acon-style structured summary (arXiv 2510.00615):
 	// Five distinct sections preserve different information types without merging them.
@@ -4047,24 +4161,34 @@ func compressIfNeeded(callerCtx context.Context, messages []interface{}, client 
 		if msg, ok := m.(ollama.Message); ok {
 			role := msg.Role
 			content := msg.Content
-			if len(content) > 500 {
-				content = content[:500] + "…"
+			// Adaptive truncation: allow more content for larger context windows.
+			// Base: 800 chars; up to 2000 for 128K+ models.
+			maxChars := 800 + (ctxWindow / 100)
+			if maxChars > 2000 {
+				maxChars = 2000
+			}
+			if len(content) > maxChars {
+				content = content[:maxChars] + "…"
 			}
 			summaryInput.WriteString(fmt.Sprintf("[%s]: %s\n\n", role, content))
 		}
 	}
 
-	// Use a fast model for summarization.
+	// Use a fast model for summarization with adequate context.
 	summaryModel := router.ModelFor(router.TierFast)
+	summaryCtxWindow := router.ContextWindowFor(summaryModel)
+	if summaryCtxWindow < 16384 {
+		summaryCtxWindow = 16384
+	}
 	summaryMsgs := []interface{}{
 		ollama.Message{Role: "system", Content: "You are a conversation compressor. Output exactly five labeled sections: FACTS, ACTIONS, STATE, PRECONDITIONS, NEXT. No preamble."},
 		ollama.Message{Role: "user", Content: summaryInput.String()},
 	}
 
 	var summaryBuf strings.Builder
-	ctx, cancel := context.WithTimeout(callerCtx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(callerCtx, 45*time.Second)
 	defer cancel()
-	_, _, err := client.StreamChat(ctx, summaryModel, summaryMsgs, &ollama.ModelOptions{Temperature: 0.3, NumCtx: 16384},
+	_, _, err := client.StreamChat(ctx, summaryModel, summaryMsgs, &ollama.ModelOptions{Temperature: 0.3, NumCtx: summaryCtxWindow},
 		func(chunk string) { summaryBuf.WriteString(chunk) })
 
 	if err != nil || strings.TrimSpace(summaryBuf.String()) == "" {
@@ -4072,7 +4196,8 @@ func compressIfNeeded(callerCtx context.Context, messages []interface{}, client 
 		return trimToMinimal(messages)
 	}
 
-	fmt.Printf("%s  [compressed %d turns → summary]%s\n", colorDim, len(oldTurns), colorReset)
+	fmt.Printf("%s  [compressed %d turns → summary (%dK→%dK tokens)]%s\n",
+		colorDim, len(oldTurns), estimatedTokens/1000, estimateConversationTokens(recentTurns)/1000+1, colorReset)
 
 	// Rebuild: system + summary + recent turns.
 	var compressed []interface{}
@@ -4081,11 +4206,11 @@ func compressIfNeeded(callerCtx context.Context, messages []interface{}, client 
 	}
 	compressed = append(compressed, ollama.Message{
 		Role:    "user",
-		Content: "[conversation summary]\n" + summaryBuf.String() + "\n[/conversation summary]",
+		Content: "[conversation summary — prior turns compressed]\n" + summaryBuf.String() + "\n[/conversation summary]",
 	})
 	compressed = append(compressed, ollama.Message{
 		Role:    "assistant",
-		Content: "Understood. I have the conversation context. How can I help?",
+		Content: "Understood. I have the full conversation context from the summary above.",
 	})
 	compressed = append(compressed, recentTurns...)
 	return compressed

@@ -102,6 +102,15 @@ func (el *EventLog) RecordSlashCommand(turn int, cmd string) {
 	el.Record(turn, "slash_command", map[string]string{"cmd": cmd})
 }
 
+// RecordCompaction logs a context compaction event.
+func (el *EventLog) RecordCompaction(turn, turnsCompressed, tokensBefore, tokensAfter int) {
+	el.Record(turn, "compaction", map[string]int{
+		"turns_compressed": turnsCompressed,
+		"tokens_before":    tokensBefore,
+		"tokens_after":     tokensAfter,
+	})
+}
+
 // ── Replay ────────────────────────────────────────────────────────────────────
 
 // ReplaySession reads EVENTS.jsonl and prints all events matching sessionID
@@ -157,6 +166,11 @@ func ReplaySession(mantisDir, sessionID string) {
 			var d map[string]string
 			_ = json.Unmarshal(ev.Data, &d)
 			fmt.Printf("\033[38;5;220m[%s turn%d] pipeline:\033[0m %s\n", ts, ev.Turn, d["summary"])
+		case "compaction":
+			var d map[string]int
+			_ = json.Unmarshal(ev.Data, &d)
+			fmt.Printf("\033[38;5;141m[%s turn%d] compacted:\033[0m %d turns (%dK → %dK tokens)\n",
+				ts, ev.Turn, d["turns_compressed"], d["tokens_before"]/1000, d["tokens_after"]/1000)
 		}
 		shown++
 	}

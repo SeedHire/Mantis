@@ -22,6 +22,7 @@ func (p *TypeScriptParser) Extensions() []string {
 // ParseFile parses a TypeScript/JavaScript file and extracts symbols and imports.
 func (p *TypeScriptParser) ParseFile(path string, content []byte) (*ParseResult, error) {
 	parser := sitter.NewParser()
+	defer parser.Close()
 	parser.SetLanguage(typescript.GetLanguage())
 
 	tree, err := parser.ParseCtx(context.Background(), nil, content)

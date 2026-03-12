@@ -37,36 +37,43 @@ func DisallowPatterns(rule config.LintRule) []string {
 }
 
 // matchesGlob matches path against a glob pattern, supporting ** wildcards.
+// ** matches zero or more directory segments (e.g. src/**/model.go matches
+// src/a/b/c/model.go). Uses segment-level recursive matching.
 func matchesGlob(pattern, path string) bool {
 	pattern = filepath.ToSlash(pattern)
 	path = filepath.ToSlash(path)
 
-	// Handle pattern ending with /**
-	if strings.HasSuffix(pattern, "/**") {
-		prefix := strings.TrimSuffix(pattern, "/**")
-		return strings.HasPrefix(path, prefix+"/")
-	}
+	return matchSegments(strings.Split(pattern, "/"), strings.Split(path, "/"))
+}
 
-	// Handle pattern ending with /*
-	if strings.HasSuffix(pattern, "/*") {
-		dir := strings.TrimSuffix(pattern, "/*")
-		return filepath.ToSlash(filepath.Dir(path)) == dir
-	}
-
-	// Standard glob
-	matched, err := filepath.Match(pattern, path)
-	if err == nil && matched {
-		return true
-	}
-
-	// If pattern contains **, try matching suffixes
-	if strings.Contains(pattern, "**") {
-		normalized := strings.ReplaceAll(pattern, "**", "*")
-		matched, err = filepath.Match(normalized, path)
-		if err == nil && matched {
-			return true
+// matchSegments recursively matches pattern segments against path segments.
+// A "**" segment matches zero or more path segments.
+func matchSegments(patSegs, pathSegs []string) bool {
+	for len(patSegs) > 0 {
+		seg := patSegs[0]
+		if seg == "**" {
+			patSegs = patSegs[1:]
+			// ** at end matches everything
+			if len(patSegs) == 0 {
+				return true
+			}
+			// Try matching the remaining pattern at every position
+			for i := 0; i <= len(pathSegs); i++ {
+				if matchSegments(patSegs, pathSegs[i:]) {
+					return true
+				}
+			}
+			return false
 		}
+		if len(pathSegs) == 0 {
+			return false
+		}
+		matched, err := filepath.Match(seg, pathSegs[0])
+		if err != nil || !matched {
+			return false
+		}
+		patSegs = patSegs[1:]
+		pathSegs = pathSegs[1:]
 	}
-
-	return false
+	return len(pathSegs) == 0
 }

@@ -44,6 +44,21 @@ func (e *FinishedError) Error() string   { return "agent finished: " + e.Summary
 func (e *FinishedError) Unwrap() error   { return ErrFinished }
 func (e *FinishedError) Is(t error) bool { return t == ErrFinished }
 
+// shellMetachars are characters that allow chaining arbitrary commands after
+// an allowed prefix. Any command containing these is rejected.
+var shellMetachars = []string{";", "&&", "||", "|", "$(", "`", "\n"}
+
+// containsShellMeta returns true if cmd contains shell metacharacters that
+// could be used to chain arbitrary commands after an allowed prefix.
+func containsShellMeta(cmd string) bool {
+	for _, mc := range shellMetachars {
+		if strings.Contains(cmd, mc) {
+			return true
+		}
+	}
+	return false
+}
+
 // allowedPrefixes is the bash command allowlist (prefix matching).
 // Covers build tools, package managers, Docker, Make, diagnostics, and VCS.
 var allowedPrefixes = []string{
@@ -154,15 +169,24 @@ func (t *AgentToolkit) WriteFile(path, content string) error {
 	if err != nil {
 		return err
 	}
+	t.fileMu.Lock()
+	defer t.fileMu.Unlock()
 	if err := t.checkStale(abs); err != nil {
 		return err
 	}
-	t.fileMu.Lock()
-	defer t.fileMu.Unlock()
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", filepath.Dir(abs), err)
 	}
-	return os.WriteFile(abs, []byte(content), 0o644)
+	if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
+		return err
+	}
+	// Update readTimes so the same worker can write again without stale-read error.
+	if info, statErr := os.Stat(abs); statErr == nil {
+		t.staleMu.Lock()
+		t.readTimes[abs] = info.ModTime()
+		t.staleMu.Unlock()
+	}
+	return nil
 }
 
 // serverPatterns are command prefixes that indicate long-running server processes.
@@ -208,6 +232,8 @@ func (t *AgentToolkit) RunBash(cmd string, timeoutSec int) (output string, exitC
 		if err := c.Start(); err != nil {
 			return fmt.Sprintf("error: failed to start background process: %v", err), 1
 		}
+		// Reap the child process in a background goroutine to prevent zombies.
+		go func() { _ = c.Wait() }()
 		return fmt.Sprintf("started in background (PID %d) — use 'ps' or logs to monitor", c.Process.Pid), 0
 	}
 
@@ -298,12 +324,16 @@ func (t *AgentToolkit) SearchCodebase(ctx context.Context, query, searchType str
 	case "path":
 		pattern := query
 		if !filepath.IsAbs(pattern) {
-			pattern = filepath.Join(t.projectRoot, "**", pattern)
+			// BUG-18: filepath.Glob does NOT support "**" double-star globs.
+			// Use filepath.WalkDir for recursive matching instead.
+			pattern = filepath.Join(t.projectRoot, pattern)
 		}
 		matches, err := filepath.Glob(pattern)
 		if err != nil || len(matches) == 0 {
-			// Try simpler join if double-star glob didn't work.
-			matches, _ = filepath.Glob(filepath.Join(t.projectRoot, pattern))
+			// Glob failed or returned nothing — try a recursive walk to find files
+			// matching the base pattern anywhere in the tree.
+			basePat := filepath.Base(query)
+			matches = walkGlob(t.projectRoot, basePat, limit)
 		}
 		var chunks []embeddings.Chunk
 		for i, m := range matches {
@@ -348,11 +378,11 @@ func (t *AgentToolkit) EditFile(path, oldString, newString string) error {
 	if err != nil {
 		return err
 	}
+	t.fileMu.Lock()
+	defer t.fileMu.Unlock()
 	if err := t.checkStale(abs); err != nil {
 		return err
 	}
-	t.fileMu.Lock()
-	defer t.fileMu.Unlock()
 
 	data, err := os.ReadFile(abs)
 	if err != nil {
@@ -366,7 +396,16 @@ func (t *AgentToolkit) EditFile(path, oldString, newString string) error {
 	if count > 1 {
 		return fmt.Errorf("edit_file: old_string matches %d times in %s — be more specific", count, path)
 	}
-	return os.WriteFile(abs, []byte(strings.Replace(content, oldString, newString, 1)), 0o644)
+	if err := os.WriteFile(abs, []byte(strings.Replace(content, oldString, newString, 1)), 0o644); err != nil {
+		return err
+	}
+	// Update readTimes so the same worker can write again without stale-read error.
+	if info, statErr := os.Stat(abs); statErr == nil {
+		t.staleMu.Lock()
+		t.readTimes[abs] = info.ModTime()
+		t.staleMu.Unlock()
+	}
+	return nil
 }
 
 // RunTests detects the project's test runner and executes tests, returning
@@ -378,8 +417,12 @@ func (t *AgentToolkit) RunTests(packages string, timeoutSec int) (string, int) {
 	}
 
 	// Scope to specific packages if requested.
+	// Sanitize packages to prevent command injection via shell metacharacters.
 	testCmd := cmd
 	if packages != "" {
+		if containsShellMeta(packages) {
+			return "error: packages parameter contains unsafe characters", 1
+		}
 		if runner == RunnerGo {
 			testCmd = "go test " + packages
 		} else {
@@ -1002,6 +1045,11 @@ func (t *AgentToolkit) safePath(rel string) (string, error) {
 // isAllowedCmd returns true if cmd starts with any of the allowed prefixes.
 func isAllowedCmd(cmd string) bool {
 	trimmed := strings.TrimSpace(cmd)
+	// Reject commands containing shell metacharacters that allow chaining
+	// arbitrary commands after an allowed prefix (e.g. "git diff; rm -rf /").
+	if containsShellMeta(trimmed) {
+		return false
+	}
 	for _, prefix := range allowedPrefixes {
 		if strings.HasPrefix(trimmed, prefix) {
 			// Block shell diagnostic commands targeting sensitive system paths
@@ -1031,6 +1079,34 @@ func blockSensitivePath(cmd string) bool {
 		}
 	}
 	return false
+}
+
+// walkGlob recursively walks root and returns up to maxResults files whose
+// base name matches the given glob pattern. This replaces the broken
+// filepath.Glob("**/pattern") which Go does not support (BUG-18).
+func walkGlob(root, pattern string, maxResults int) []string {
+	var results []string
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil // skip unreadable dirs
+		}
+		if d.IsDir() {
+			base := d.Name()
+			if base == ".git" || base == "node_modules" || base == "vendor" || base == ".mantis" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		matched, _ := filepath.Match(pattern, d.Name())
+		if matched {
+			results = append(results, path)
+			if len(results) >= maxResults {
+				return filepath.SkipAll
+			}
+		}
+		return nil
+	})
+	return results
 }
 
 // rawJSON converts a JSON string literal to json.RawMessage.

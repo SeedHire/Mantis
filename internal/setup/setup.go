@@ -49,9 +49,29 @@ const (
 
 // Credentials holds global user credentials persisted at ~/.mantis/credentials.json.
 type Credentials struct {
-	GitHubUser   string `json:"github_user"`
-	GitHubToken  string `json:"github_token,omitempty"`
-	OllamaAPIKey string `json:"ollama_api_key,omitempty"`
+	GitHubUser    string   `json:"github_user"`
+	GitHubToken   string   `json:"github_token,omitempty"`
+	OllamaAPIKey  string   `json:"ollama_api_key,omitempty"`
+	OllamaAPIKeys []string `json:"ollama_api_keys,omitempty"`
+}
+
+// AllKeys returns a deduplicated list of all configured API keys.
+// Merges OllamaAPIKeys with the legacy single OllamaAPIKey field.
+func (c *Credentials) AllKeys() []string {
+	seen := map[string]bool{}
+	var keys []string
+	for _, k := range c.OllamaAPIKeys {
+		k = strings.TrimSpace(k)
+		if k != "" && !seen[k] {
+			seen[k] = true
+			keys = append(keys, k)
+		}
+	}
+	// Backward compat: merge legacy single key if not already present.
+	if k := strings.TrimSpace(c.OllamaAPIKey); k != "" && !seen[k] {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 func credPath() string {
@@ -107,10 +127,13 @@ func IsLoggedIn(creds *Credentials) bool {
 }
 
 // ApplyToEnv sets OLLAMA_API_KEY in the process environment from saved credentials
-// (only if not already set by the user).
+// (only if not already set by the user). Uses the first key from AllKeys().
 func ApplyToEnv(creds *Credentials) {
-	if os.Getenv("OLLAMA_API_KEY") == "" && creds.OllamaAPIKey != "" {
-		os.Setenv("OLLAMA_API_KEY", creds.OllamaAPIKey)
+	if os.Getenv("OLLAMA_API_KEY") == "" {
+		keys := creds.AllKeys()
+		if len(keys) > 0 {
+			os.Setenv("OLLAMA_API_KEY", keys[0])
+		}
 	}
 }
 
@@ -167,8 +190,25 @@ func Run() (*Credentials, error) {
 
 	key := readSecret("  API key")
 	if key != "" {
-		creds.OllamaAPIKey = key
-		fmt.Printf("%s  ✓ Ollama Cloud configured%s\n\n", colorGreen, colorReset)
+		creds.OllamaAPIKeys = append(creds.OllamaAPIKeys, key)
+		creds.OllamaAPIKey = key // backward compat
+		fmt.Printf("%s  ✓ Ollama Cloud key #1 configured%s\n", colorGreen, colorReset)
+
+		// Allow adding additional keys.
+		for {
+			fmt.Printf("\n%s  Add another API key? (y/n):%s ", colorDim, colorReset)
+			answer, _ := reader.ReadString('\n')
+			answer = strings.TrimSpace(strings.ToLower(answer))
+			if answer != "y" && answer != "yes" {
+				break
+			}
+			extra := readSecret("  API key")
+			if extra != "" {
+				creds.OllamaAPIKeys = append(creds.OllamaAPIKeys, extra)
+				fmt.Printf("%s  ✓ Key #%d added%s\n", colorGreen, len(creds.OllamaAPIKeys), colorReset)
+			}
+		}
+		fmt.Printf("%s  ✓ %d API key(s) configured%s\n\n", colorGreen, len(creds.OllamaAPIKeys), colorReset)
 	} else {
 		fmt.Printf("%s  ✓ Using local Ollama — make sure `ollama serve` is running%s\n\n", colorDim, colorReset)
 	}

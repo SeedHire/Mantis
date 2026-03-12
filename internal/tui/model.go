@@ -113,58 +113,95 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.dashboard.width = m.width
 
 	case tea.KeyMsg:
-		switch {
-		case key.Matches(msg, Keys.Quit):
+		// Check if the active tab has a focused text input — if so, skip
+		// global keybindings (number keys, q, r) to allow typing.
+		inputFocused := (m.activeTab == tabSearch && m.search.input.Focused()) ||
+			(m.activeTab == tabImpact && m.impact.input.Focused())
+
+		if !inputFocused {
+			switch {
+			case key.Matches(msg, Keys.Quit):
+				return m, tea.Quit
+			case key.Matches(msg, Keys.Tab):
+				m.activeTab = (m.activeTab + 1) % tabCount
+			case key.Matches(msg, Keys.ShiftTab):
+				m.activeTab = (m.activeTab - 1 + tabCount) % tabCount
+			case key.Matches(msg, Keys.Tab1):
+				m.activeTab = tabDashboard
+			case key.Matches(msg, Keys.Tab2):
+				m.activeTab = tabSearch
+			case key.Matches(msg, Keys.Tab3):
+				m.activeTab = tabImpact
+			case key.Matches(msg, Keys.Tab4):
+				m.activeTab = tabLint
+			case key.Matches(msg, Keys.Tab5):
+				m.activeTab = tabDead
+			case key.Matches(msg, Keys.Tab6):
+				m.activeTab = tabHotspots
+			case key.Matches(msg, Keys.Tab7):
+				m.activeTab = tabTraces
+			case key.Matches(msg, Keys.Tab8):
+				m.activeTab = tabWorkspace
+			case key.Matches(msg, Keys.Tab9):
+				m.activeTab = tabBrain
+			case key.Matches(msg, Keys.Tab0):
+				m.activeTab = tabRouter
+			}
+		} else if key.Matches(msg, Keys.Quit) && msg.String() == "ctrl+c" {
+			// Always allow Ctrl+C to quit even when typing
 			return m, tea.Quit
-		case key.Matches(msg, Keys.Tab):
-			m.activeTab = (m.activeTab + 1) % tabCount
-		case key.Matches(msg, Keys.ShiftTab):
-			m.activeTab = (m.activeTab - 1 + tabCount) % tabCount
-		case key.Matches(msg, Keys.Tab1):
-			m.activeTab = tabDashboard
-		case key.Matches(msg, Keys.Tab2):
-			m.activeTab = tabSearch
-		case key.Matches(msg, Keys.Tab3):
-			m.activeTab = tabImpact
-		case key.Matches(msg, Keys.Tab4):
-			m.activeTab = tabLint
-		case key.Matches(msg, Keys.Tab5):
-			m.activeTab = tabDead
-		case key.Matches(msg, Keys.Tab6):
-			m.activeTab = tabHotspots
-		case key.Matches(msg, Keys.Tab7):
-			m.activeTab = tabTraces
-		case key.Matches(msg, Keys.Tab8):
-			m.activeTab = tabWorkspace
-		case key.Matches(msg, Keys.Tab9):
-			m.activeTab = tabBrain
-		case key.Matches(msg, Keys.Tab0):
-			m.activeTab = tabRouter
 		}
 	}
 
-	// Route messages to ALL screens (for background loads + window resize)
+	// Key messages go only to the active tab; other messages (WindowSize,
+	// custom background-load results) go to all tabs.
 	var c tea.Cmd
-	m.dashboard, c = m.dashboard.Update(msg)
-	cmds = append(cmds, c)
-	m.search, c = m.search.Update(msg)
-	cmds = append(cmds, c)
-	m.impact, c = m.impact.Update(msg)
-	cmds = append(cmds, c)
-	m.lint, c = m.lint.Update(msg)
-	cmds = append(cmds, c)
-	m.dead, c = m.dead.Update(msg)
-	cmds = append(cmds, c)
-	m.hotspots, c = m.hotspots.Update(msg)
-	cmds = append(cmds, c)
-	m.traces, c = m.traces.Update(msg)
-	cmds = append(cmds, c)
-	m.workspace, c = m.workspace.Update(msg)
-	cmds = append(cmds, c)
-	m.brain, c = m.brain.Update(msg)
-	cmds = append(cmds, c)
-	m.router, c = m.router.Update(msg)
-	cmds = append(cmds, c)
+	if _, isKey := msg.(tea.KeyMsg); isKey {
+		switch m.activeTab {
+		case tabDashboard:
+			m.dashboard, c = m.dashboard.Update(msg)
+		case tabSearch:
+			m.search, c = m.search.Update(msg)
+		case tabImpact:
+			m.impact, c = m.impact.Update(msg)
+		case tabLint:
+			m.lint, c = m.lint.Update(msg)
+		case tabDead:
+			m.dead, c = m.dead.Update(msg)
+		case tabHotspots:
+			m.hotspots, c = m.hotspots.Update(msg)
+		case tabTraces:
+			m.traces, c = m.traces.Update(msg)
+		case tabWorkspace:
+			m.workspace, c = m.workspace.Update(msg)
+		case tabBrain:
+			m.brain, c = m.brain.Update(msg)
+		case tabRouter:
+			m.router, c = m.router.Update(msg)
+		}
+		cmds = append(cmds, c)
+	} else {
+		m.dashboard, c = m.dashboard.Update(msg)
+		cmds = append(cmds, c)
+		m.search, c = m.search.Update(msg)
+		cmds = append(cmds, c)
+		m.impact, c = m.impact.Update(msg)
+		cmds = append(cmds, c)
+		m.lint, c = m.lint.Update(msg)
+		cmds = append(cmds, c)
+		m.dead, c = m.dead.Update(msg)
+		cmds = append(cmds, c)
+		m.hotspots, c = m.hotspots.Update(msg)
+		cmds = append(cmds, c)
+		m.traces, c = m.traces.Update(msg)
+		cmds = append(cmds, c)
+		m.workspace, c = m.workspace.Update(msg)
+		cmds = append(cmds, c)
+		m.brain, c = m.brain.Update(msg)
+		cmds = append(cmds, c)
+		m.router, c = m.router.Update(msg)
+		cmds = append(cmds, c)
+	}
 
 	return m, tea.Batch(cmds...)
 }

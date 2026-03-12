@@ -19,6 +19,7 @@ func (p *GoParser) Extensions() []string { return []string{".go"} }
 
 func (p *GoParser) ParseFile(path string, content []byte) (*ParseResult, error) {
 	parser := sitter.NewParser()
+	defer parser.Close()
 	parser.SetLanguage(golang.GetLanguage())
 
 	tree, err := parser.ParseCtx(context.Background(), nil, content)

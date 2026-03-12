@@ -40,6 +40,13 @@ var rootCmd = &cobra.Command{
 	// Allow a direct question as argument: mantis "why does X break?"
 	Args: cobra.ArbitraryArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// --api-key flags: set as comma-separated env var for REPL to pick up.
+		if len(replAPIKeys) > 0 {
+			// Set first key as OLLAMA_API_KEY for immediate client creation.
+			os.Setenv("OLLAMA_API_KEY", replAPIKeys[0])
+			// Set all keys for KeyRing.
+			os.Setenv("OLLAMA_API_KEYS", strings.Join(replAPIKeys, ","))
+		}
 		cfg := repl.Config{
 			ForceTier: replTier,
 			Budget:    replBudget,
@@ -62,6 +69,7 @@ var replImage string
 var replPlan bool
 var replContinue bool
 var replOffline bool
+var replAPIKeys []string
 
 // ── init ──────────────────────────────────────────────────────────────────────
 
@@ -1404,6 +1412,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&replPlan, "plan", false, "Plan mode: review plan before code execution")
 	rootCmd.Flags().BoolVar(&replContinue, "continue", false, "Resume most recent session")
 	rootCmd.Flags().BoolVar(&replOffline, "offline", false, "Skip GitHub auth gate — for local-only use without internet")
+	rootCmd.Flags().StringArrayVar(&replAPIKeys, "api-key", nil, "Ollama API key (can be specified multiple times for rotation)")
 
 	rootCmd.AddCommand(initCmd, contextCmd, watchCmd, findCmd, impactCmd, deadCmd, circularCmd, graphCmd, lintCmd, tuiCmd, handoffCmd, hotspotsCmd, riskyCmd, couplingCmd, intentCmd, todosCmd, specGapsCmd, workspaceCmd, traceCmd, mcpCmd, lspCmd)
 
