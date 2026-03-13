@@ -213,6 +213,11 @@ func Run(cfg Config) error {
 	activeKeyRing = keyRing
 	activeCreds = creds
 
+	// Sync client API key from the keyring so the first call uses the right key.
+	if keyRing != nil && keyRing.Current() != "" {
+		client.SetAPIKey(keyRing.Current())
+	}
+
 	// Single line: user · connection.
 	{
 		connStr := colorDim + "local Ollama" + colorReset
@@ -1315,6 +1320,24 @@ func runOnce(cfg Config, client *ollama.Client, sess *session.Session,
 	model := router.ModelFor(intent.Tier)
 	showRouting(intent, model, 1, pipeline.ShouldRun(intent, cfg.InitialQuery))
 
+	// Rebuild system prompt for the actual tier (initial default was TierCode).
+	var skillsBudget int
+	switch {
+	case intent.Tier <= router.TierFast:
+		skillsBudget = 0
+	case intent.Tier <= router.TierCode:
+		skillsBudget = 4000
+	default:
+		skillsBudget = 10000
+	}
+	brainCtx := ""
+	if b != nil {
+		brainCtx = b.LoadHot()
+	}
+	tierSkills := b.LoadSkillsForTask(string(intent.TaskType), skillsBudget)
+	sysPrompt := buildSystemPrompt(brainCtx, tierSkills, intent.Tier)
+	(*messages)[0] = ollama.Message{Role: "system", Content: sysPrompt}
+
 	var toolCtx string
 	if intent.NeedsGraph && dispatcher != nil {
 		for _, r := range dispatcher.Dispatch(cfg.InitialQuery) {
@@ -1341,7 +1364,55 @@ func runOnce(cfg Config, client *ollama.Client, sess *session.Session,
 	*messages = append(*messages, userMsg)
 
 	fmt.Println()
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+
+	// Route complex build requests through the pipeline (plan → code → tests).
+	root, _ := os.Getwd()
+	if pipeline.ShouldRun(intent, cfg.InitialQuery) {
+		brainCtx := ""
+		if b != nil {
+			brainCtx = b.LoadHot()
+		}
+		tierSkills := b.LoadSkillsForTask(string(intent.TaskType), 10000)
+		sysPrompt := buildSystemPrompt(brainCtx, tierSkills, router.TierCode)
+		pipelineCtx, pipelineCancel := context.WithTimeout(context.Background(), 20*time.Minute)
+		defer pipelineCancel()
+
+		pRes, pErr := pipeline.Run(pipelineCtx, client, cfg.InitialQuery, sysPrompt, pipeline.Options{
+			Root:            root,
+			OnRateLimit:     makeKeyRotationCallback(activeKeyRing),
+			ClarifyCallback: pipeline.RunSelector,
+		})
+
+		if pErr != nil {
+			if pRes != nil && len(pRes.CodeText) > 500 {
+				fmt.Printf("%s  [pipeline timed out — using %d chars of partial code]%s\n\n",
+					colorDim, len(pRes.CodeText), colorReset)
+				pErr = nil
+			} else {
+				fmt.Printf("%s  [pipeline failed: %v — falling back to single model]%s\n\n",
+					colorRed, pErr, colorReset)
+				// Fall through to single-model path below.
+				goto singleModel
+			}
+		}
+
+		if pErr == nil && pRes != nil {
+			response := pRes.Combined
+			if response == "" {
+				response = pRes.CodeText
+			}
+			if response != "" {
+				renderResponse(response)
+				sess.Add(model, intent.Tier, pRes.PromptTok, pRes.ComplTok, false)
+				_ = ut.Add(pRes.PromptTok+pRes.ComplTok, intent.Tier == router.TierHeavy, false)
+				fmt.Println(sess.Report())
+				return nil
+			}
+		}
+	}
+
+singleModel:
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	var rb strings.Builder
@@ -1353,7 +1424,22 @@ func runOnce(cfg Config, client *ollama.Client, sess *session.Session,
 				colorRed, colorReset)
 			return nil
 		}
-		return err
+		// Show user-friendly error instead of raw error dump.
+		errStr := err.Error()
+		if strings.Contains(errStr, "429") || strings.Contains(errStr, "rate limit") {
+			fmt.Printf("%s⚠ All API keys are rate limited. Wait a few minutes and try again.%s\n\n", colorRed, colorReset)
+			return nil
+		}
+		if strings.Contains(errStr, "prompt too long") || strings.Contains(errStr, "context length") {
+			fmt.Printf("%s⚠ Prompt too large for the model. Try a shorter query or use --model heavy.%s\n\n", colorRed, colorReset)
+			return nil
+		}
+		if strings.Contains(errStr, "deadline exceeded") || strings.Contains(errStr, "524") || strings.Contains(errStr, "502") || strings.Contains(errStr, "503") {
+			fmt.Printf("%s⚠ Request timed out. The model may be overloaded — try again in a moment.%s\n\n", colorRed, colorReset)
+			return nil
+		}
+		fmt.Printf("%s⚠ %s%s\n\n", colorRed, errStr, colorReset)
+		return nil
 	}
 	response := rb.String()
 	// Append assistant response so history persists across scanner turns.
@@ -2374,7 +2460,16 @@ func buildSystemPrompt(brainCtx, skillsCtx string, tier router.Tier) string {
 	var sb strings.Builder
 
 	// ── Core identity & reasoning guidance ────────────────────────────────
-	sb.WriteString(`You are Mantis, an expert AI coding assistant with deep knowledge of this project.
+	// For trivial/fast tiers, use a compact prompt to fit small model context windows.
+	if tier <= router.TierFast {
+		sb.WriteString(`You are Mantis, an expert AI coding assistant.
+- Be concise. Show code first, then explain briefly.
+- Format code with correct language tags.
+- Never invent function names — use exact signatures if known.
+- Never end with "Would you like me to..." — just answer and stop.
+`)
+	} else {
+		sb.WriteString(`You are Mantis, an expert AI coding assistant with deep knowledge of this project.
 
 ## How to think
 - Break complex problems into steps before answering.
@@ -2457,6 +2552,7 @@ Rules:
 - NEVER use indented code blocks (4-space indent) for files — they won't be written to disk.
 - After all files, confirm: "✓ Created X files: Makefile, src/app.py, ..."
 `)
+	}
 
 	// ── Retrieved memory grounding ────────────────────────────────────────────
 	sb.WriteString(`
@@ -2503,7 +2599,8 @@ Then give your final answer after </thinking>. Example:
 	}
 
 	// ── Project brain context (if available) ──────────────────────────────
-	if brainCtx != "" {
+	// Skip brain context for trivial/fast tiers — keep prompt compact for small models.
+	if brainCtx != "" && tier >= router.TierCode {
 		sb.WriteString("\n## Project context (from persistent memory)\n")
 		sb.WriteString(brainCtx)
 		sb.WriteString("\n")
@@ -4086,7 +4183,10 @@ func modelOptsForTier(tier router.Tier) *ollama.ModelOptions {
 	case router.TierHeavy, router.TierMax:
 		temp = 0.2 // complex code needs consistency
 	}
-	return &ollama.ModelOptions{Temperature: temp, NumCtx: 32768}
+	// Use model-aware context window instead of hardcoded 32K.
+	model := router.ModelFor(tier)
+	numCtx := router.ContextWindowFor(model)
+	return &ollama.ModelOptions{Temperature: temp, NumCtx: numCtx}
 }
 
 func streamWithFallback(ctx context.Context, client *ollama.Client, model string,
@@ -4127,7 +4227,7 @@ func streamWithFallback(ctx context.Context, client *ollama.Client, model string
 		}
 
 		// Rate limited or server overloaded — try key rotation first, then retry with backoff.
-		if strings.Contains(errStr, "429") || strings.Contains(errStr, "503") ||
+		if strings.Contains(errStr, "429") || strings.Contains(errStr, "503") || strings.Contains(errStr, "524") ||
 			strings.Contains(errStr, "rate limit") || strings.Contains(errStr, "overloaded") {
 
 			// ── Key rotation: try switching API key before retrying same model ──

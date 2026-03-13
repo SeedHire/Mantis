@@ -386,6 +386,10 @@ func ContextWindowFor(model string) int {
 		strings.Contains(lower, "deepseek-r1:32b"),
 		strings.Contains(lower, "llama3.3:70b"):
 		return 49152 // 48K
+	case strings.Contains(lower, "gemma3") && (strings.Contains(lower, ":1b") || strings.Contains(lower, ":4b")):
+		return 8192 // 8K — small models have limited context on cloud free tier
+	case strings.Contains(lower, "gemma3"):
+		return 16384 // 16K
 	default:
 		return 32768 // 32K — safe default for small local models
 	}

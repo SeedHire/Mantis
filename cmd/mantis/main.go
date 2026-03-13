@@ -33,10 +33,11 @@ import (
 var version = "dev"
 
 var rootCmd = &cobra.Command{
-	Use:     "mantis [question]",
-	Short:   "AI coding assistant — free, local-first",
-	Long:    `Mantis is a free AI coding assistant. Run with no args for interactive mode, or pass a question for a one-shot answer.`,
-	Version: version,
+	Use:          "mantis [question]",
+	Short:        "AI coding assistant — free, local-first",
+	Long:         `Mantis is a free AI coding assistant. Run with no args for interactive mode, or pass a question for a one-shot answer.`,
+	Version:      version,
+	SilenceUsage: true, // Don't dump full help text on runtime errors
 	// Allow a direct question as argument: mantis "why does X break?"
 	Args: cobra.ArbitraryArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
