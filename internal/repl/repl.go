@@ -37,6 +37,7 @@ import (
 	"github.com/seedhire/mantis/internal/pipeline"
 	"github.com/seedhire/mantis/internal/router"
 	"github.com/seedhire/mantis/internal/session"
+	"github.com/seedhire/mantis/internal/snapshot"
 	"github.com/seedhire/mantis/internal/setup"
 	"github.com/seedhire/mantis/internal/telemetry"
 	"github.com/seedhire/mantis/internal/truth"
@@ -315,6 +316,7 @@ func Run(cfg Config) error {
 	tlog := telemetry.New()
 	sessID := fmt.Sprintf("%d", time.Now().UnixMilli())
 	evLog := NewEventLog(mantisDir, sessID)       // event log: EVENTS.jsonl for /replay
+	snapStore := snapshot.NewStore(root)           // git stash-based snapshot/revert
 	if creds != nil && creds.GitHubUser != "" {
 		tlog.SetUser(creds.GitHubUser, "v0.3.0")
 	}
@@ -415,6 +417,9 @@ func Run(cfg Config) error {
 		readline.PcItem("/pr"),
 		readline.PcItem("/git-log"),
 		readline.PcItem("/undo"),
+		readline.PcItem("/snapshot"),
+		readline.PcItem("/snapshots"),
+		readline.PcItem("/revert"),
 		readline.PcItem("/keys"),
 		readline.PcItem("/quit"),
 	)
@@ -521,7 +526,7 @@ func Run(cfg Config) error {
 		// Slash commands.
 		if strings.HasPrefix(input, "/") {
 			evLog.RecordSlashCommand(turn, strings.Fields(input)[0])
-			if quit := handleSlashCommand(input, sess, b, &messages, client, &brainContext, &planMode, cfg, webFetcher, opLog, embStore); quit {
+			if quit := handleSlashCommand(input, sess, b, &messages, client, &brainContext, &planMode, cfg, webFetcher, opLog, embStore, snapStore); quit {
 				break
 			}
 			continue
@@ -701,6 +706,10 @@ func Run(cfg Config) error {
 				if target := extractImpactTarget(input, querier); target != "" {
 					if impact, err := intel.Impact(querier, target, 5); err == nil &&
 						agent.ShouldRunMultiAgent(impact) {
+						// Auto-snapshot before multi-agent run.
+						if snapID, snapErr := snapStore.Take("before multi-agent", true); snapErr == nil && snapID != "" {
+							fmt.Printf("%s  [snapshot %s saved]%s\n", colorDim, snapID, colorReset)
+						}
 						toolkit := agent.NewToolkit(root, querier, embStore)
 						// Wire approval gate so git ops inside sub-agents never panic on nil ApproveFunc.
 						toolkit.ApproveFunc = func(desc string) bool {
@@ -747,6 +756,10 @@ func Run(cfg Config) error {
 		// Detects "fix tests", "tests are failing", etc. and routes to the
 		// test loop instead of the generic fix agent.
 		if intent.TaskType == "fix" && intent.Tier == router.TierCode && isTestFixRequest(input) {
+			// Auto-snapshot before test-fix loop.
+			if snapID, snapErr := snapStore.Take("before test loop", true); snapErr == nil && snapID != "" {
+				fmt.Printf("%s  [snapshot %s saved]%s\n", colorDim, snapID, colorReset)
+			}
 			fmt.Printf("%s  ◆ test loop — running iterative test→fix cycle%s\n", colorDim, colorReset)
 			packages := extractTestPackage(input)
 			testRoot, _ := os.Getwd()
@@ -843,6 +856,10 @@ func Run(cfg Config) error {
 		// Triggered before the single-model path so complex tasks get:
 		//   plan (reason model) → code + tests (code model, parallel)
 		if pipeline.ShouldRun(intent, input) {
+			// Auto-snapshot before pipeline runs.
+			if snapID, snapErr := snapStore.Take("before pipeline", true); snapErr == nil && snapID != "" {
+				fmt.Printf("%s  [snapshot %s saved — /revert %s to undo]%s\n", colorDim, snapID, snapID, colorReset)
+			}
 			// Fix 8: snapshot existing files to distinguish new vs edited after pipeline.
 			preExisting := snapshotExistingFiles(root)
 			pipelineOpts := pipeline.Options{AvailableModels: availableModels, Root: root, PlanOnly: planMode}
@@ -1346,7 +1363,7 @@ func runOnce(cfg Config, client *ollama.Client, sess *session.Session,
 }
 
 func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
-	messages *[]interface{}, client *ollama.Client, brainContext *string, planMode *bool, cfg Config, webFetcher *web.Fetcher, oplog *OperationLog, embStore *embeddings.Store) (quit bool) {
+	messages *[]interface{}, client *ollama.Client, brainContext *string, planMode *bool, cfg Config, webFetcher *web.Fetcher, oplog *OperationLog, embStore *embeddings.Store, snapStore *snapshot.Store) (quit bool) {
 
 	parts := strings.Fields(input)
 	cmd := parts[0]
@@ -1620,6 +1637,75 @@ func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
 			}
 			fmt.Println()
 		}
+	case "/snapshot":
+		if snapStore == nil {
+			fmt.Printf("%s  snapshots not available in this mode%s\n\n", colorDim, colorReset)
+			break
+		}
+		label := "manual"
+		if len(parts) >= 2 {
+			label = strings.Join(parts[1:], " ")
+		}
+		id, err := snapStore.Take(label, false)
+		if err != nil {
+			fmt.Printf("%s  snapshot failed: %v%s\n\n", colorRed, err, colorReset)
+		} else if id == "" {
+			fmt.Printf("%s  no uncommitted changes to snapshot%s\n\n", colorDim, colorReset)
+		} else {
+			fmt.Printf("%s  ✓ snapshot %s saved (%s)%s\n\n", colorGreen, id, label, colorReset)
+		}
+	case "/snapshots":
+		if snapStore == nil {
+			fmt.Printf("%s  snapshots not available in this mode%s\n\n", colorDim, colorReset)
+			break
+		}
+		entries := snapStore.List()
+		if len(entries) == 0 {
+			fmt.Printf("%s  no snapshots%s\n\n", colorDim, colorReset)
+		} else {
+			fmt.Printf("%s◈ Snapshots (%d)%s\n", colorGold, len(entries), colorReset)
+			for _, e := range entries {
+				age := time.Since(e.Timestamp).Truncate(time.Minute)
+				autoTag := ""
+				if e.Auto {
+					autoTag = " [auto]"
+				}
+				fmt.Printf("  %s%s%s  %s  %s ago%s%s\n",
+					colorCopper, e.ID, colorReset, e.Label, age, autoTag, colorReset)
+			}
+			fmt.Println()
+		}
+	case "/revert":
+		if snapStore == nil {
+			fmt.Printf("%s  snapshots not available in this mode%s\n\n", colorDim, colorReset)
+			break
+		}
+		if len(parts) < 2 {
+			// Default: show snapshots and ask which to revert.
+			entries := snapStore.List()
+			if len(entries) == 0 {
+				fmt.Printf("%s  no snapshots to revert to%s\n\n", colorDim, colorReset)
+			} else {
+				fmt.Printf("%s  usage: /revert <snapshot-id>%s\n", colorDim, colorReset)
+				fmt.Printf("%s  available snapshots:%s\n", colorDim, colorReset)
+				for _, e := range entries {
+					fmt.Printf("    %s%s%s  %s\n", colorCopper, e.ID, colorReset, e.Label)
+				}
+				fmt.Println()
+			}
+		} else {
+			targetID := parts[1]
+			diff, err := snapStore.Restore(targetID)
+			if err != nil {
+				fmt.Printf("%s  revert failed: %v%s\n\n", colorRed, err, colorReset)
+			} else {
+				fmt.Printf("%s  ✓ reverted to snapshot %s%s\n", colorGreen, targetID, colorReset)
+				if diff != "" {
+					fmt.Printf("%s%s%s\n", colorDim, diff, colorReset)
+				}
+				fmt.Println()
+			}
+		}
 	case "/keys":
 		if activeKeyRing == nil || activeKeyRing.Count() == 0 {
 			fmt.Printf("%s◈ No API keys configured (using local Ollama)%s\n\n", colorDim, colorReset)
@@ -1792,7 +1878,7 @@ func checkUnfinishedProgress(mantisDir string, rl readliner) {
 	for _, f := range failed {
 		fmt.Printf("%s  [!] %s (failed)%s\n", colorRed, f, colorReset)
 	}
-	fmt.Printf("%s  Continue? [y/N]%s ", colorGold, colorReset)
+	rl.SetPrompt(fmt.Sprintf("%s  Continue? [y/N]%s ", colorGold, colorReset))
 	line, _ := rl.Readline()
 	if strings.TrimSpace(strings.ToLower(line)) != "y" {
 		fmt.Println()
@@ -3450,6 +3536,9 @@ func printHelp() {
 		{"/test [pkg]", "run tests → fix failures → repeat until green"},
 		{"/index", "index source code for semantic search"},
 		{"/undo", "revert all files written by the last AI response"},
+		{"/snapshot [label]", "save a git snapshot of current changes"},
+		{"/snapshots", "list all saved snapshots"},
+		{"/revert <id>", "restore working tree to a saved snapshot"},
 		{"/commit", "generate commit message, preview, commit"},
 		{"/pr", "push branch + generate PR title/body + create GitHub PR"},
 		{"/git-log", "show last 10 mantis auto-commits"},
@@ -4317,7 +4406,7 @@ func runWithScanner(cfg Config, client *ollama.Client, sess *session.Session,
 			continue
 		}
 		if strings.HasPrefix(input, "/") {
-			if quit := handleSlashCommand(input, sess, b, &messages, client, &scannerBrainCtx, &scannerPlanMode, cfg, webFetcher, nil, nil); quit {
+			if quit := handleSlashCommand(input, sess, b, &messages, client, &scannerBrainCtx, &scannerPlanMode, cfg, webFetcher, nil, nil, nil); quit {
 				break
 			}
 			continue

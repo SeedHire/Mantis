@@ -398,7 +398,10 @@ func promptWriteApproval(changes []pendingChange, rl readliner, cache *ApprovalC
 	}
 	fmt.Printf("%s└──%s\n", colorDim, colorReset)
 
-	fmt.Printf("Write %d file(s)? [Y/n]: ", len(changes))
+	// Use SetPrompt so readline displays the question correctly instead of
+	// the idle prompt overwriting a raw fmt.Printf.
+	prompt := fmt.Sprintf("Write %d file(s)? [Y/n]: ", len(changes))
+	rl.SetPrompt(prompt)
 	line, err := rl.Readline()
 	if err != nil {
 		return false // Ctrl+C or error
@@ -411,6 +414,7 @@ func promptWriteApproval(changes []pendingChange, rl readliner, cache *ApprovalC
 // Extracted as interface for testability.
 type readliner interface {
 	Readline() (string, error)
+	SetPrompt(p string)
 }
 
 // extractAndWriteFilesWithApproval collects changes, shows a diff preview,
