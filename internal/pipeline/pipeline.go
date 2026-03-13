@@ -1871,10 +1871,14 @@ Do NOT write any implementation code or file content — list file NAMES only.
 
 CRITICAL RULES:
 - Begin your response IMMEDIATELY with "### Overview" — no preamble, no "Let me...", no "The user is...", no analysis sentences before the header. Jump straight to the structured output.
-- NEVER ask "what framework?" — detect it from the manifest files and directory structure.
-- If no existing code or manifest files are present, you MAY include programming language as a clarifying question.
+- READ the "## Project Context (auto-scanned)" section CAREFULLY before deciding anything. It contains the ACTUAL files, directories, and manifest contents of the user's project. Use this to detect:
+  • Language: go.mod = Go, package.json = JS/TS, Cargo.toml = Rust, pyproject.toml = Python, etc.
+  • Framework: dependencies in the manifest (e.g. "express" = Express, "gin-gonic" = Gin, "react" = React)
+  • Existing structure: src/, internal/, lib/, app/ contents show what exists already
+- NEVER ask about language or framework when manifests exist — you already KNOW from the scan.
+- If no project files exist at all (empty directory), you MAY ask about language and major framework.
 - For MOST requests, do NOT ask questions — just produce the plan directly.
-- Only ask clarifying questions when the request has GENUINELY AMBIGUOUS high-impact architectural choices (e.g. "REST vs GraphQL", "PostgreSQL vs MongoDB") that cannot be inferred from the existing project. If you must ask, emit ONLY a clarify block (no plan headers) in this exact format:
+- Only ask clarifying questions for GENUINELY AMBIGUOUS high-impact choices the project context cannot answer (e.g. "REST vs GraphQL", "PostgreSQL vs MongoDB", authentication strategy). If you must ask, emit ONLY a clarify block (no plan headers) in this exact format:
 
 ` + "```" + `clarify
 [
@@ -1883,7 +1887,7 @@ CRITICAL RULES:
 ]
 ` + "```" + `
 
-Rules for clarify blocks: max 5 questions, 2-5 options each. Never ask about framework (detect from project). You may ask about programming language only when no existing code is detected.
+Rules for clarify blocks: max 5 questions, 2-5 options each. NEVER ask about language/framework when manifests exist. Only ask about ARCHITECTURAL choices the project context cannot answer. Make questions specific and actionable — not generic.
 
 Use these exact headers:
 ### Overview

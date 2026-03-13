@@ -9,7 +9,17 @@ import (
 	"golang.org/x/term"
 )
 
-// RunSelector launches an interactive Bubbletea program for the user to answer
+// Copper palette (matches TUI).
+const (
+	selCopper   = "\033[38;5;173m" // copper accent
+	selBold     = "\033[1m"
+	selDim      = "\033[38;5;244m"
+	selWhite    = "\033[38;5;255m"
+	selGreen    = "\033[38;5;114m"
+	selReset    = "\033[0m"
+)
+
+// RunSelector launches an interactive Bubbletea selector for the user to answer
 // clarifying questions. Returns nil if the user pressed Esc to skip.
 func RunSelector(questions []ClarifyQuestion) *ClarifyResult {
 	// Non-terminal: auto-select defaults.
@@ -25,13 +35,15 @@ func RunSelector(questions []ClarifyQuestion) *ClarifyResult {
 		questions: questions,
 		cursors:   make([]int, len(questions)),
 		answers:   make([]int, len(questions)),
+		confirmed: make([]bool, len(questions)),
 	}
 	// Set initial cursors to defaults.
 	for i, q := range questions {
 		m.cursors[i] = q.Default
 	}
 
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	// Inline mode — no alt-screen, so it renders in-place like Claude Code.
+	p := tea.NewProgram(m)
 	final, err := p.Run()
 	if err != nil {
 		return nil
@@ -45,9 +57,10 @@ func RunSelector(questions []ClarifyQuestion) *ClarifyResult {
 
 type selectorModel struct {
 	questions []ClarifyQuestion
-	current   int   // which question we're on
-	cursors   []int // cursor position per question
-	answers   []int // confirmed answer per question
+	current   int    // which question we're on
+	cursors   []int  // cursor position per question
+	answers   []int  // confirmed answer per question
+	confirmed []bool // whether each question has been answered
 	done      bool
 	escaped   bool
 }
@@ -75,8 +88,9 @@ func (m selectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursors[m.current]++
 			}
 
-		case "enter":
+		case "enter", " ":
 			m.answers[m.current] = m.cursors[m.current]
+			m.confirmed[m.current] = true
 			if m.current < len(m.questions)-1 {
 				m.current++
 			} else {
@@ -88,7 +102,22 @@ func (m selectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			idx := int(msg.String()[0]-'0') - 1
 			opts := m.questions[m.current].Options
 			if idx >= 0 && idx < len(opts) {
+				// Number key: select AND confirm immediately.
 				m.cursors[m.current] = idx
+				m.answers[m.current] = idx
+				m.confirmed[m.current] = true
+				if m.current < len(m.questions)-1 {
+					m.current++
+				} else {
+					m.done = true
+					return m, tea.Quit
+				}
+			}
+
+		case "left", "h":
+			// Go back to previous question.
+			if m.current > 0 {
+				m.current--
 			}
 		}
 	}
@@ -97,24 +126,51 @@ func (m selectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m selectorModel) View() string {
 	if m.done {
-		return ""
+		// Show final summary of choices.
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("\n  %s◈ Choices confirmed%s\n", selCopper, selReset))
+		for i, q := range m.questions {
+			ans := m.answers[i]
+			sb.WriteString(fmt.Sprintf("  %s%d.%s %s %s→ %s%s\n",
+				selDim, i+1, selReset,
+				q.Question,
+				selCopper, q.Options[ans], selReset))
+		}
+		sb.WriteString("\n")
+		return sb.String()
 	}
 
-	q := m.questions[m.current]
 	var sb strings.Builder
 
-	header := fmt.Sprintf("Clarifying Questions (%d/%d)", m.current+1, len(m.questions))
-	sb.WriteString(fmt.Sprintf("\n  \033[38;5;220m╭─ %s ─╮\033[0m\n\n", header))
-	sb.WriteString(fmt.Sprintf("  %s\n\n", q.Question))
+	// Header with progress.
+	sb.WriteString(fmt.Sprintf("\n  %s%s◈ Question %d of %d%s\n",
+		selCopper, selBold, m.current+1, len(m.questions), selReset))
 
+	// Show already-answered questions as compact summary.
+	for i := 0; i < m.current; i++ {
+		ans := m.answers[i]
+		sb.WriteString(fmt.Sprintf("  %s✓ %s → %s%s\n",
+			selGreen, m.questions[i].Question, m.questions[i].Options[ans], selReset))
+	}
+	if m.current > 0 {
+		sb.WriteString("\n")
+	}
+
+	// Current question.
+	q := m.questions[m.current]
+	sb.WriteString(fmt.Sprintf("  %s%s%s\n\n", selWhite, q.Question, selReset))
+
+	// Options with radio-button style.
 	for i, opt := range q.Options {
 		if i == m.cursors[m.current] {
-			sb.WriteString(fmt.Sprintf("  \033[38;5;220m> %d. %s\033[0m\n", i+1, opt))
+			sb.WriteString(fmt.Sprintf("  %s● %d  %s%s%s\n", selCopper, i+1, selBold, opt, selReset))
 		} else {
-			sb.WriteString(fmt.Sprintf("    %d. %s\n", i+1, opt))
+			sb.WriteString(fmt.Sprintf("  %s○ %d  %s%s\n", selDim, i+1, opt, selReset))
 		}
 	}
 
-	sb.WriteString(fmt.Sprintf("\n  \033[38;5;244m↑↓ navigate · enter select · esc skip\033[0m\n"))
+	// Footer hints.
+	sb.WriteString(fmt.Sprintf("\n  %s↑↓ move · 1-5 quick select · enter confirm · esc skip%s\n", selDim, selReset))
+
 	return sb.String()
 }

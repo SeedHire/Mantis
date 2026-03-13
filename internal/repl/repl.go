@@ -1397,17 +1397,33 @@ func runOnce(cfg Config, client *ollama.Client, sess *session.Session,
 		}
 
 		if pErr == nil && pRes != nil {
-			response := pRes.Combined
-			if response == "" {
-				response = pRes.CodeText
+			totalTok := pRes.PromptTok + pRes.ComplTok
+
+			// Save full output to .mantis/last-pipeline.md.
+			if root != "" {
+				if err := pipeline.SaveOutput(root, pRes.Combined); err != nil {
+					fmt.Printf("%s  ⚠ could not save pipeline output: %v%s\n", colorDim, err, colorReset)
+				}
 			}
-			if response != "" {
-				renderResponse(response)
-				sess.Add(model, intent.Tier, pRes.PromptTok, pRes.ComplTok, false)
-				_ = ut.Add(pRes.PromptTok+pRes.ComplTok, intent.Tier == router.TierHeavy, false)
-				fmt.Println(sess.Report())
-				return nil
+
+			// Show compact summary (not raw code).
+			fmt.Printf("%s◈ Mantis%s %s[pipeline · %d tokens]%s\n",
+				colorCopper+colorBold, colorReset, colorDim, totalTok, colorReset)
+			renderResponse(pipeline.CompactSummary(pRes))
+
+			// Print written files summary.
+			if len(pRes.WrittenFiles) > 0 {
+				var wf []WrittenFile
+				for _, p := range pRes.WrittenFiles {
+					wf = append(wf, WrittenFile{Path: p, Created: true})
+				}
+				printWrittenFilesCapped(wf, 5)
 			}
+
+			sess.Add(model, intent.Tier, pRes.PromptTok, pRes.ComplTok, false)
+			_ = ut.Add(totalTok, intent.Tier == router.TierHeavy, false)
+			fmt.Println(sess.Report())
+			return nil
 		}
 	}
 
