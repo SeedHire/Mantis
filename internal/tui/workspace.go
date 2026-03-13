@@ -158,7 +158,7 @@ func noWorkspaceView() string {
 	sb.WriteString("\n")
 	sb.WriteString(StyleWarning.Render("  ◈ No workspace configured") + "\n\n")
 	sb.WriteString(StyleMuted.Render("  Create a multi-repo workspace:") + "\n\n")
-	sb.WriteString(lipgloss.NewStyle().Foreground(colorGold).Render("    mantis workspace init ~/code/auth ~/code/api ~/code/shared") + "\n\n")
+	sb.WriteString(lipgloss.NewStyle().Foreground(colorCopperLight).Render("    mantis workspace init ~/code/auth ~/code/api ~/code/shared") + "\n\n")
 	sb.WriteString(StyleMuted.Render("  This creates ") +
 		lipgloss.NewStyle().Foreground(colorCopperLight).Render("mantis.workspace.yml") +
 		StyleMuted.Render(" for cross-repo analysis.") + "\n\n")
@@ -218,10 +218,10 @@ func renderWorkspace(repos []string, stats map[string]wsRepoStats, width int) st
 	sb.WriteString(StyleLabel.Render("  Cross-Repo Commands") + "\n")
 	sb.WriteString(StyleDivider.Render("  "+strings.Repeat("─", sepLen)) + "\n")
 	sb.WriteString(StyleMuted.Render("  ") +
-		lipgloss.NewStyle().Foreground(colorGold).Render("mantis workspace find <symbol>") +
+		lipgloss.NewStyle().Foreground(colorCopperLight).Render("mantis workspace find <symbol>") +
 		StyleMuted.Render("   — search across all repos") + "\n")
 	sb.WriteString(StyleMuted.Render("  ") +
-		lipgloss.NewStyle().Foreground(colorGold).Render("mantis workspace impact <symbol>") +
+		lipgloss.NewStyle().Foreground(colorCopperLight).Render("mantis workspace impact <symbol>") +
 		StyleMuted.Render(" — cross-repo blast radius") + "\n")
 
 	return sb.String()

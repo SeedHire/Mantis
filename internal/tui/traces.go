@@ -147,7 +147,7 @@ func noTraceDataView() string {
 	sb.WriteString("\n")
 	sb.WriteString(StyleWarning.Render("  ◈ No trace data ingested yet") + "\n\n")
 	sb.WriteString(StyleMuted.Render("  Ingest runtime traces to see hotpaths and cold code:") + "\n\n")
-	sb.WriteString(lipgloss.NewStyle().Foreground(colorGold).Render("    mantis trace ingest traces.json") + "\n\n")
+	sb.WriteString(lipgloss.NewStyle().Foreground(colorCopperLight).Render("    mantis trace ingest traces.json") + "\n\n")
 	sb.WriteString(StyleMuted.Render("  Supported formats:") + "\n")
 	sb.WriteString(StyleLabel.Render("    OTLP JSON  ") + StyleMuted.Render("— OpenTelemetry export (Jaeger, otel-cli)") + "\n")
 	sb.WriteString(StyleLabel.Render("    Go pprof   ") + StyleMuted.Render("— go tool pprof -text output") + "\n")
@@ -186,7 +186,7 @@ func renderTraces(hot, cold []intel.TraceStats, totalCalls, unique, width int) s
 		rank := lipgloss.NewStyle().Foreground(colorError).Bold(true).Width(4).Render(fmt.Sprintf("#%d", i+1))
 		pct := float64(t.CallCount) / float64(maxCalls) * 100
 		bar := renderBar(pct, 15)
-		calls := lipgloss.NewStyle().Foreground(colorGold).Bold(true).Width(8).Render(fmt.Sprintf("%dx", t.CallCount))
+		calls := lipgloss.NewStyle().Foreground(colorCopperLight).Bold(true).Width(8).Render(fmt.Sprintf("%dx", t.CallCount))
 		dur := lipgloss.NewStyle().Foreground(colorCopperLight).Width(10).Render(fmtDuration(t.AvgDuration))
 		name := StyleMuted.Render(t.Name)
 		sb.WriteString(fmt.Sprintf("  %s %s %s %s  %s\n", rank, bar, calls, dur, name))

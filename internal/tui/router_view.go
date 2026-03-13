@@ -128,7 +128,7 @@ func renderRouter(summary map[string]string, width int) string {
 		{"Trivial", "💬", "Greetings, simple acknowledgments", "\"hi\", \"thanks\", \"yes\"", colorSuccess},
 		{"Fast", "⚡", "Quick explanations, factual questions", "\"explain mutex\", \"what is a goroutine\"", colorCopperLight},
 		{"Code", "💻", "Code generation, implementation tasks", "\"implement JWT refresh\", \"write tests\"", colorCopper},
-		{"Reason", "🧠", "Analysis, comparison, trade-offs", "\"compare Redis vs Memcached\"", colorGold},
+		{"Reason", "🧠", "Analysis, comparison, trade-offs", "\"compare Redis vs Memcached\"", colorCopperLight},
 		{"Heavy", "🏗", "Large refactoring, multi-file changes", "\"refactor the auth module\"", colorWarning},
 		{"Max", "🔮", "Architecture design, 3-model ensemble", "\"redesign the payment system\"", colorError},
 		{"Vision", "👁", "Image analysis, diagram understanding", "(requires image input)", colorFgMuted},
@@ -152,7 +152,7 @@ func renderRouter(summary map[string]string, width int) string {
 		var modelLabel string
 		if ok && model != "" {
 			modelLabel = lipgloss.NewStyle().
-				Foreground(colorGold).
+				Foreground(colorCopperLight).
 				Bold(true).
 				Render(model)
 			assigned++
@@ -198,7 +198,7 @@ func renderRouter(summary map[string]string, width int) string {
 	}{
 		{"\"what does this function do?\"", "Fast", colorCopperLight},
 		{"\"implement a binary search tree\"", "Code", colorCopper},
-		{"\"compare microservices vs monolith\"", "Reason", colorGold},
+		{"\"compare microservices vs monolith\"", "Reason", colorCopperLight},
 		{"\"redesign the database schema\"", "Max", colorError},
 		{"\"thanks!\"", "Trivial", colorSuccess},
 	}

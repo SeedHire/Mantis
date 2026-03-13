@@ -108,7 +108,7 @@ var (
 			Padding(0, 1)
 
 	StyleHighlight = lipgloss.NewStyle().
-			Foreground(colorGold).
+			Foreground(colorCopperLight).
 			Bold(true)
 
 	StyleSelected = lipgloss.NewStyle().
@@ -125,7 +125,7 @@ var (
 
 	StyleStatNumber = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(colorGold)
+			Foreground(colorCopperLight)
 
 	StyleStatLabel = lipgloss.NewStyle().
 			Foreground(colorFgMuted)

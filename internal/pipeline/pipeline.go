@@ -14,6 +14,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"io"
 	"math/rand"
 	"os"
 	"os/exec"
@@ -25,11 +26,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/term"
-
 	"github.com/seedhire/mantis/internal/agent"
 	"github.com/seedhire/mantis/internal/autofix"
 	"github.com/seedhire/mantis/internal/ollama"
+	"github.com/seedhire/mantis/internal/render"
 	"github.com/seedhire/mantis/internal/router"
 )
 
@@ -117,9 +117,9 @@ func progressTicker(stage string) (incr func(), stop func() time.Duration) {
 	var count int64
 	done := make(chan struct{})
 	start := time.Now()
+	ar := render.New()
 
-	// Suppress spinner when stdout is not a terminal.
-	if !term.IsTerminal(int(os.Stdout.Fd())) {
+	if !ar.IsTTY() {
 		incr = func() { atomic.AddInt64(&count, 1) }
 		stop = func() time.Duration { return time.Since(start) }
 		return
@@ -136,13 +136,16 @@ func progressTicker(stage string) (incr func(), stop func() time.Duration) {
 		for {
 			select {
 			case <-done:
-				fmt.Printf("\r\033[K")
+				ar.Clear()
 				return
 			case <-ticker.C:
 				n := atomic.LoadInt64(&count)
 				elapsed := time.Since(start).Seconds()
-				fmt.Printf("\r%s  %s %s  %d tokens · %.1fs%s", pColorDim, frames[i%len(frames)], stage, n, elapsed, pColorReset)
+				frame := i
 				i++
+				ar.Render(func(w io.Writer) {
+					fmt.Fprintf(w, "%s  %s %s  %d tokens · %.1fs%s\n", pColorDim, frames[frame%len(frames)], stage, n, elapsed, pColorReset)
+				})
 			}
 		}
 	}()
@@ -170,7 +173,8 @@ type Options struct {
 	TaskTimeout     time.Duration     // per-task timeout (default 8m); 0 = no individual deadline
 	EditorModel     string            // 7.2: lighter model for validating/cleaning diff blocks; empty = skip editor pass
 	TDDFirst        bool              // 7.8: generate tests before code (tests-as-specification)
-	OnRateLimit     OnRateLimitFunc   // called on 429 to rotate API key; nil = no rotation
+	OnRateLimit     OnRateLimitFunc                  // called on 429 to rotate API key; nil = no rotation
+	ClarifyCallback func([]ClarifyQuestion) *ClarifyResult // interactive question selector; nil = skip
 }
 
 // Result holds aggregated pipeline output and token counts.
@@ -276,6 +280,33 @@ func Run(
 	res.PromptTok += pt
 	res.ComplTok += ct
 	fmt.Printf("%s  ✓ plan ready  %s(%.1fs · %d tokens)%s\n", pColorGold, pColorDim, planElapsed.Seconds(), pt+ct, pColorReset)
+
+	// ── Clarify: detect interactive questions from the model ─────────────────
+	if clarifyQs, hasClarify := parseClarifyBlock(res.PlanText); hasClarify && opts.ClarifyCallback != nil {
+		fmt.Printf("%s  ◆ %d clarifying question(s) detected%s\n", pColorDim, len(clarifyQs), pColorReset)
+		if answers := opts.ClarifyCallback(clarifyQs); answers != nil {
+			// Re-run plan stage with user answers injected.
+			answerText := formatAnswers(answers)
+			planMsgs = append(planMsgs,
+				ollama.Message{Role: "assistant", Content: res.PlanText},
+				ollama.Message{Role: "user", Content: answerText},
+			)
+			var replanBuf strings.Builder
+			replanIncr, replanStop := progressTicker("re-planning")
+			rpt, rct, rerr := streamWithRetry(ctx, client, planModel, planMsgs, planOpts, func(c string) { replanBuf.WriteString(c); replanIncr() }, onRL)
+			replanElapsed := replanStop()
+			if rerr == nil && strings.TrimSpace(replanBuf.String()) != "" {
+				res.PlanText = replanBuf.String()
+				res.PromptTok += rpt
+				res.ComplTok += rct
+				fmt.Printf("%s  ✓ plan updated  %s(%.1fs · %d tokens)%s\n", pColorGold, pColorDim, replanElapsed.Seconds(), rpt+rct, pColorReset)
+			} else if rerr != nil {
+				fmt.Printf("%s  ⚠ re-plan failed, using original plan%s\n", pColorDim, pColorReset)
+			}
+		} else {
+			fmt.Printf("%s  ○ questions skipped — using model defaults%s\n", pColorDim, pColorReset)
+		}
+	}
 
 	// Plan Mode: stop after PLAN stage for user review.
 	if opts.PlanOnly {
@@ -1840,8 +1871,19 @@ Do NOT write any implementation code or file content — list file NAMES only.
 
 CRITICAL RULES:
 - Begin your response IMMEDIATELY with "### Overview" — no preamble, no "Let me...", no "The user is...", no analysis sentences before the header. Jump straight to the structured output.
-- NEVER ask clarifying questions. You have the full project structure provided below — use it to determine the language, framework, directory layout, and existing patterns.
-- NEVER ask "what language?" or "what framework?" — detect it from the manifest files and directory structure provided in the Project Context section.
+- NEVER ask "what framework?" — detect it from the manifest files and directory structure.
+- If no existing code or manifest files are present, you MAY include programming language as a clarifying question.
+- For MOST requests, do NOT ask questions — just produce the plan directly.
+- Only ask clarifying questions when the request has GENUINELY AMBIGUOUS high-impact architectural choices (e.g. "REST vs GraphQL", "PostgreSQL vs MongoDB") that cannot be inferred from the existing project. If you must ask, emit ONLY a clarify block (no plan headers) in this exact format:
+
+` + "```" + `clarify
+[
+  {"id":1,"question":"Which API style?","options":["REST","GraphQL","gRPC"],"default":0},
+  {"id":2,"question":"Which database?","options":["PostgreSQL","MongoDB","SQLite"],"default":0}
+]
+` + "```" + `
+
+Rules for clarify blocks: max 5 questions, 2-5 options each. Never ask about framework (detect from project). You may ask about programming language only when no existing code is detected.
 
 Use these exact headers:
 ### Overview

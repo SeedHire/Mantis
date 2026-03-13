@@ -47,19 +47,35 @@ const (
 	colorBold   = "\033[1m"
 )
 
+// TaggedKey is an API key with an optional user-assigned label.
+type TaggedKey struct {
+	Key string `json:"key"`
+	Tag string `json:"tag,omitempty"`
+}
+
 // Credentials holds global user credentials persisted at ~/.mantis/credentials.json.
 type Credentials struct {
-	GitHubUser    string   `json:"github_user"`
-	GitHubToken   string   `json:"github_token,omitempty"`
-	OllamaAPIKey  string   `json:"ollama_api_key,omitempty"`
-	OllamaAPIKeys []string `json:"ollama_api_keys,omitempty"`
+	GitHubUser       string      `json:"github_user"`
+	GitHubToken      string      `json:"github_token,omitempty"`
+	OllamaAPIKey     string      `json:"ollama_api_key,omitempty"`
+	OllamaAPIKeys    []string    `json:"ollama_api_keys,omitempty"`
+	OllamaTaggedKeys []TaggedKey `json:"ollama_tagged_keys,omitempty"`
 }
 
 // AllKeys returns a deduplicated list of all configured API keys.
-// Merges OllamaAPIKeys with the legacy single OllamaAPIKey field.
+// Merges OllamaTaggedKeys, OllamaAPIKeys, and the legacy single OllamaAPIKey field.
 func (c *Credentials) AllKeys() []string {
 	seen := map[string]bool{}
 	var keys []string
+	// Tagged keys first (newest format).
+	for _, tk := range c.OllamaTaggedKeys {
+		k := strings.TrimSpace(tk.Key)
+		if k != "" && !seen[k] {
+			seen[k] = true
+			keys = append(keys, k)
+		}
+	}
+	// Legacy array.
 	for _, k := range c.OllamaAPIKeys {
 		k = strings.TrimSpace(k)
 		if k != "" && !seen[k] {
@@ -67,11 +83,47 @@ func (c *Credentials) AllKeys() []string {
 			keys = append(keys, k)
 		}
 	}
-	// Backward compat: merge legacy single key if not already present.
+	// Legacy single key.
 	if k := strings.TrimSpace(c.OllamaAPIKey); k != "" && !seen[k] {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+// AllTaggedKeys returns all keys with tags. Untagged legacy keys get auto-generated labels.
+func (c *Credentials) AllTaggedKeys() []TaggedKey {
+	seen := map[string]bool{}
+	var out []TaggedKey
+	for _, tk := range c.OllamaTaggedKeys {
+		k := strings.TrimSpace(tk.Key)
+		if k != "" && !seen[k] {
+			seen[k] = true
+			tag := tk.Tag
+			if tag == "" {
+				tag = fmt.Sprintf("key #%d", len(out)+1)
+			}
+			out = append(out, TaggedKey{Key: k, Tag: tag})
+		}
+	}
+	for _, k := range c.OllamaAPIKeys {
+		k = strings.TrimSpace(k)
+		if k != "" && !seen[k] {
+			seen[k] = true
+			out = append(out, TaggedKey{Key: k, Tag: fmt.Sprintf("key #%d", len(out)+1)})
+		}
+	}
+	if k := strings.TrimSpace(c.OllamaAPIKey); k != "" && !seen[k] {
+		out = append(out, TaggedKey{Key: k, Tag: fmt.Sprintf("key #%d", len(out)+1)})
+	}
+	return out
+}
+
+// SetTaggedKeys replaces all keys with the given tagged keys, clears legacy fields, and saves.
+func (c *Credentials) SetTaggedKeys(keys []TaggedKey) error {
+	c.OllamaTaggedKeys = keys
+	c.OllamaAPIKeys = nil
+	c.OllamaAPIKey = ""
+	return c.Save()
 }
 
 func credPath() string {

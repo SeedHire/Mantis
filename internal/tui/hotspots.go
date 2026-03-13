@@ -142,7 +142,7 @@ func renderHotspots(hotspots, risky []intel.FileChurn, coupling []intel.CoupledF
 		sb.WriteString(StyleMuted.Render("  No file changes found.\n"))
 	}
 	for i, f := range hotspots {
-		rank := lipgloss.NewStyle().Foreground(colorGold).Bold(true).Width(4).Render(fmt.Sprintf("#%d", i+1))
+		rank := lipgloss.NewStyle().Foreground(colorCopperLight).Bold(true).Width(4).Render(fmt.Sprintf("#%d", i+1))
 		churnBar := renderBar(f.ChurnScore, 20)
 		path := StyleMuted.Render(truncPath(f.Path, 40))
 		commits := lipgloss.NewStyle().Foreground(colorCopperLight).Render(fmt.Sprintf("%dc", f.Commits))
@@ -180,7 +180,7 @@ func renderHotspots(hotspots, risky []intel.FileChurn, coupling []intel.CoupledF
 		sb.WriteString(StyleMuted.Render("  No coupling patterns detected.\n"))
 	}
 	for _, c := range shown {
-		score := lipgloss.NewStyle().Foreground(colorGold).Bold(true).Render(fmt.Sprintf("%.0f%%", c.Coupling*100))
+		score := lipgloss.NewStyle().Foreground(colorCopperLight).Bold(true).Render(fmt.Sprintf("%.0f%%", c.Coupling*100))
 		a := StyleMuted.Render(truncPath(c.FileA, 30))
 		b := StyleMuted.Render(truncPath(c.FileB, 30))
 		arrow := lipgloss.NewStyle().Foreground(colorCopper).Render(" ⟷ ")
@@ -210,7 +210,7 @@ func riskBadge(score int) string {
 		return StyleWarning.Render("HIGH")
 	}
 	if score >= 5 {
-		return lipgloss.NewStyle().Foreground(colorGold).Render(" MED")
+		return lipgloss.NewStyle().Foreground(colorCopperLight).Render(" MED")
 	}
 	return StyleSuccess.Render(" LOW")
 }

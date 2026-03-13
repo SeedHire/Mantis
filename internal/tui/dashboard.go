@@ -132,7 +132,7 @@ func (m DashboardModel) View() string {
 	} else if m.err != nil {
 		body = StyleError.Render("  ✗  "+m.err.Error()) +
 			"\n\n" + StyleMuted.Render("  Run  ") +
-			lipgloss.NewStyle().Foreground(colorGold).Render("mantis init --lang ts") +
+			lipgloss.NewStyle().Foreground(colorCopperLight).Render("mantis init --lang ts") +
 			StyleMuted.Render("  to index your project.")
 	} else {
 		d := m.data
@@ -194,7 +194,7 @@ func statCard(label, value, icon string) string {
 		Render(icon + "  " + label)
 	num := lipgloss.NewStyle().
 		Bold(true).
-		Foreground(colorGold).
+		Foreground(colorCopperLight).
 		Render(value)
 	return StyleStatCard.Render(top + "\n" + num)
 }

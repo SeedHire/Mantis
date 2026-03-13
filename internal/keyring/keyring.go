@@ -36,6 +36,24 @@ func NewKeyRing(keys []string) *KeyRing {
 	return &KeyRing{keys: entries, active: 0}
 }
 
+// NewKeyRingLabeled creates a KeyRing from keys and their corresponding labels.
+// If labels is shorter than keys, auto-generates labels for the extras.
+// Returns nil if no keys are provided.
+func NewKeyRingLabeled(keys []string, labels []string) *KeyRing {
+	if len(keys) == 0 {
+		return nil
+	}
+	entries := make([]keyEntry, len(keys))
+	for i, k := range keys {
+		lbl := fmt.Sprintf("key #%d", i+1)
+		if i < len(labels) && labels[i] != "" {
+			lbl = labels[i]
+		}
+		entries[i] = keyEntry{Key: k, Label: lbl}
+	}
+	return &KeyRing{keys: entries, active: 0}
+}
+
 // Current returns the current active key.
 func (kr *KeyRing) Current() string {
 	if kr == nil || len(kr.keys) == 0 {
@@ -118,6 +136,7 @@ func (kr *KeyRing) Available() int {
 type KeyStatus struct {
 	Index       int
 	MaskedKey   string
+	Label       string
 	IsActive    bool
 	IsAvailable bool
 	CoolRemain  time.Duration
@@ -143,6 +162,7 @@ func (kr *KeyRing) Status() []KeyStatus {
 		out[i] = KeyStatus{
 			Index:       i + 1,
 			MaskedKey:   masked,
+			Label:       k.Label,
 			IsActive:    i == kr.active,
 			IsAvailable: avail,
 			CoolRemain:  remain,

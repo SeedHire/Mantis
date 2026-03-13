@@ -142,7 +142,7 @@ func noBrainView() string {
 	sb.WriteString("\n")
 	sb.WriteString(StyleWarning.Render("  ◈ No project brain found") + "\n\n")
 	sb.WriteString(StyleMuted.Render("  Start a Mantis REPL session to initialize the brain:") + "\n\n")
-	sb.WriteString(lipgloss.NewStyle().Foreground(colorGold).Render("    mantis \"explain this project\"") + "\n\n")
+	sb.WriteString(lipgloss.NewStyle().Foreground(colorCopperLight).Render("    mantis \"explain this project\"") + "\n\n")
 	sb.WriteString(StyleMuted.Render("  The brain accumulates across sessions:") + "\n")
 	sb.WriteString(StyleLabel.Render("    BRAIN.md         ") + StyleMuted.Render("— rolling project summary") + "\n")
 	sb.WriteString(StyleLabel.Render("    DECISIONS.log    ") + StyleMuted.Render("— timestamped architectural choices") + "\n")

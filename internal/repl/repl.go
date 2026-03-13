@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -59,6 +60,9 @@ const (
 
 // activeKeyRing is set during Run() so streamWithFallback can rotate keys.
 var activeKeyRing *keyring.KeyRing
+
+// activeCreds is set during Run() so /keys can persist changes.
+var activeCreds *setup.Credentials
 
 // makeKeyRotationCallback returns a pipeline.OnRateLimitFunc that rotates keys
 // using the given KeyRing. Returns nil if kr is nil or has only one key.
@@ -197,8 +201,17 @@ func Run(cfg Config) error {
 			allKeys = append([]string{envKey}, allKeys...)
 		}
 	}
-	keyRing := keyring.NewKeyRing(allKeys)
+	// Build labeled keyring from tagged keys when available.
+	var keyLabels []string
+	if creds != nil {
+		tagged := creds.AllTaggedKeys()
+		for _, tk := range tagged {
+			keyLabels = append(keyLabels, tk.Tag)
+		}
+	}
+	keyRing := keyring.NewKeyRingLabeled(allKeys, keyLabels)
 	activeKeyRing = keyRing
+	activeCreds = creds
 
 	// Single line: user · connection.
 	{
@@ -237,53 +250,6 @@ func Run(cfg Config) error {
 		if err == nil && len(models) > 0 {
 			availableModels = models
 			router.ResolveAll(models)
-			summary := router.ResolvedSummary()
-
-			// Build set of available model names for quick lookup.
-			available := map[string]bool{}
-			for _, m := range models {
-				available[m.Name] = true
-				// Also match without tag suffix (e.g. "glm-5" matches "glm-5:cloud").
-				if idx := strings.Index(m.Name, ":"); idx > 0 {
-					available[m.Name[:idx]] = true
-				}
-			}
-
-			// Check each tier's preferred model against what resolved.
-			var downgradedTiers []string
-			keyTiers := []router.Tier{router.TierCode, router.TierReason, router.TierHeavy, router.TierMax}
-			for _, tier := range keyTiers {
-				preferred := router.PreferredModels(tier)
-				resolved := summary[tier.String()]
-				if len(preferred) > 0 && preferred[0] != resolved {
-					downgradedTiers = append(downgradedTiers, fmt.Sprintf("%s → %s%s%s (preferred: %s)",
-						tier, colorGold, resolved, colorReset, preferred[0]))
-				}
-			}
-			if len(downgradedTiers) > 0 {
-				fmt.Printf("%s● running on local fallback models (preferred tier unavailable)%s\n", colorGold, colorReset)
-				for _, d := range downgradedTiers {
-					// Strip the "(preferred: X)" suffix — not actionable for the user.
-					line := d
-					if idx := strings.Index(line, " (preferred:"); idx > 0 {
-						line = line[:idx]
-					}
-					fmt.Printf("%s  %s%s\n", colorDim, line, colorReset)
-				}
-				fmt.Printf("%s  set MANTIS_CLOUD_KEY to unlock cloud tier%s\n", colorDim, colorReset)
-			}
-
-			// Legacy warning: tiers sharing the same model (very limited installs).
-			modelFreq := map[string]int{}
-			for _, m := range summary {
-				modelFreq[m]++
-			}
-			for _, count := range modelFreq {
-				if count >= 5 {
-					fmt.Printf("%s● models: very limited install — most tiers share one model%s\n", colorGold, colorReset)
-					break
-				}
-			}
 		}
 	}
 
@@ -898,7 +864,8 @@ func Run(cfg Config) error {
 			// Fix 8: snapshot existing files to distinguish new vs edited after pipeline.
 			preExisting := snapshotExistingFiles(root)
 			pipelineOpts := pipeline.Options{AvailableModels: availableModels, Root: root, PlanOnly: planMode,
-				OnRateLimit: makeKeyRotationCallback(keyRing),
+				OnRateLimit:     makeKeyRotationCallback(keyRing),
+				ClarifyCallback: pipeline.RunSelector,
 			}
 			pipelineCtx, pipelineCancel := context.WithTimeout(turnCtx, 20*time.Minute)
 			sysPrompt := buildSystemPrompt(brainContext, tierSkills, router.TierCode)
@@ -1752,28 +1719,181 @@ func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
 			}
 		}
 	case "/keys":
-		if activeKeyRing == nil || activeKeyRing.Count() == 0 {
-			fmt.Printf("%s◈ No API keys configured (using local Ollama)%s\n\n", colorDim, colorReset)
-		} else {
-			statuses := activeKeyRing.Status()
-			fmt.Printf("%s◈ API Keys (%d configured)%s\n", colorGold, len(statuses), colorReset)
-			for _, s := range statuses {
-				switch {
-				case s.IsActive:
-					fmt.Printf("  %s● key #%d [%s] — active%s\n", colorGreen, s.Index, s.MaskedKey, colorReset)
-				case s.IsAvailable:
-					fmt.Printf("  %s○ key #%d [%s] — available%s\n", colorDim, s.Index, s.MaskedKey, colorReset)
-				default:
-					fmt.Printf("  %s✗ key #%d [%s] — rate limited (cooldown: %dm remaining)%s\n",
-						colorRed, s.Index, s.MaskedKey, int(s.CoolRemain.Minutes())+1, colorReset)
-				}
-			}
-			fmt.Println()
-		}
+		handleKeysCommand()
 	default:
 		fmt.Printf("%sunknown command '%s' — type /help for available commands%s\n\n", colorDim, cmd, colorReset)
 	}
 	return false
+}
+
+// handleKeysCommand runs the interactive /keys manager.
+func handleKeysCommand() {
+	scanner := bufio.NewScanner(os.Stdin)
+
+	for {
+		// Display current keys.
+		if activeKeyRing == nil || activeKeyRing.Count() == 0 {
+			fmt.Printf("\n%s◈ API Keys (none configured)%s\n", colorDim, colorReset)
+		} else {
+			statuses := activeKeyRing.Status()
+			fmt.Printf("\n%s◈ API Keys (%d configured)%s\n", colorCopper, len(statuses), colorReset)
+			for _, s := range statuses {
+				icon, statusText, clr := "○", "available", colorDim
+				if s.IsActive {
+					icon, statusText, clr = "●", "active", colorGreen
+				} else if !s.IsAvailable {
+					icon = "✗"
+					statusText = fmt.Sprintf("rate limited (%dm left)", int(s.CoolRemain.Minutes())+1)
+					clr = colorRed
+				}
+				label := s.Label
+				if label == "" {
+					label = fmt.Sprintf("key #%d", s.Index)
+				}
+				fmt.Printf("  %s%s [%s]  %-14s — %s%s\n", clr, icon, s.MaskedKey, label, statusText, colorReset)
+			}
+		}
+
+		fmt.Printf("\n%s  [a]dd  [d]elete  [t]ag  [q]uit%s\n", colorDim, colorReset)
+		fmt.Printf("%s  > %s", colorCopper, colorReset)
+
+		if !scanner.Scan() {
+			return
+		}
+		choice := strings.TrimSpace(strings.ToLower(scanner.Text()))
+
+		switch choice {
+		case "a", "add":
+			fmt.Printf("%s  Paste new API key: %s", colorDim, colorReset)
+			if !scanner.Scan() {
+				return
+			}
+			newKey := strings.TrimSpace(scanner.Text())
+			if newKey == "" {
+				fmt.Printf("  %s✗ empty key, skipped%s\n", colorRed, colorReset)
+				continue
+			}
+			fmt.Printf("%s  Tag (e.g. personal, work): %s", colorDim, colorReset)
+			if !scanner.Scan() {
+				return
+			}
+			tag := strings.TrimSpace(scanner.Text())
+			if tag == "" {
+				tag = fmt.Sprintf("key #%d", activeKeyRing.Count()+1)
+			}
+			// Persist.
+			if activeCreds != nil {
+				tagged := activeCreds.AllTaggedKeys()
+				tagged = append(tagged, setup.TaggedKey{Key: newKey, Tag: tag})
+				if err := activeCreds.SetTaggedKeys(tagged); err != nil {
+					fmt.Printf("  %s✗ save error: %v%s\n", colorRed, err, colorReset)
+					continue
+				}
+				reloadKeyRing()
+				fmt.Printf("  %s✓ key added (%s)%s\n", colorGreen, tag, colorReset)
+			}
+
+		case "d", "delete":
+			if activeKeyRing == nil || activeKeyRing.Count() == 0 {
+				fmt.Printf("  %sno keys to delete%s\n", colorDim, colorReset)
+				continue
+			}
+			fmt.Printf("%s  Key number to delete (1-%d): %s", colorDim, activeKeyRing.Count(), colorReset)
+			if !scanner.Scan() {
+				return
+			}
+			numStr := strings.TrimSpace(scanner.Text())
+			num, err := strconv.Atoi(numStr)
+			if err != nil || num < 1 {
+				fmt.Printf("  %s✗ invalid number%s\n", colorRed, colorReset)
+				continue
+			}
+			if activeCreds != nil {
+				tagged := activeCreds.AllTaggedKeys()
+				if num > len(tagged) {
+					fmt.Printf("  %s✗ invalid number%s\n", colorRed, colorReset)
+					continue
+				}
+				removed := tagged[num-1]
+				tagged = append(tagged[:num-1], tagged[num:]...)
+				if err := activeCreds.SetTaggedKeys(tagged); err != nil {
+					fmt.Printf("  %s✗ save error: %v%s\n", colorRed, err, colorReset)
+					continue
+				}
+				reloadKeyRing()
+				fmt.Printf("  %s✓ removed key %s (%s)%s\n", colorGreen, removed.Tag, maskKeyShort(removed.Key), colorReset)
+			}
+
+		case "t", "tag":
+			if activeKeyRing == nil || activeKeyRing.Count() == 0 {
+				fmt.Printf("  %sno keys to tag%s\n", colorDim, colorReset)
+				continue
+			}
+			fmt.Printf("%s  Key number to tag (1-%d): %s", colorDim, activeKeyRing.Count(), colorReset)
+			if !scanner.Scan() {
+				return
+			}
+			numStr := strings.TrimSpace(scanner.Text())
+			num, err := strconv.Atoi(numStr)
+			if err != nil || num < 1 {
+				fmt.Printf("  %s✗ invalid number%s\n", colorRed, colorReset)
+				continue
+			}
+			if activeCreds != nil {
+				tagged := activeCreds.AllTaggedKeys()
+				if num > len(tagged) {
+					fmt.Printf("  %s✗ invalid number%s\n", colorRed, colorReset)
+					continue
+				}
+				fmt.Printf("%s  New tag: %s", colorDim, colorReset)
+				if !scanner.Scan() {
+					return
+				}
+				newTag := strings.TrimSpace(scanner.Text())
+				if newTag == "" {
+					fmt.Printf("  %s✗ empty tag, skipped%s\n", colorRed, colorReset)
+					continue
+				}
+				tagged[num-1].Tag = newTag
+				if err := activeCreds.SetTaggedKeys(tagged); err != nil {
+					fmt.Printf("  %s✗ save error: %v%s\n", colorRed, err, colorReset)
+					continue
+				}
+				reloadKeyRing()
+				fmt.Printf("  %s✓ tagged key #%d as \"%s\"%s\n", colorGreen, num, newTag, colorReset)
+			}
+
+		case "q", "quit", "":
+			fmt.Println()
+			return
+
+		default:
+			fmt.Printf("  %sunknown action '%s'%s\n", colorDim, choice, colorReset)
+		}
+	}
+}
+
+// reloadKeyRing rebuilds the active keyring from the current credentials.
+func reloadKeyRing() {
+	if activeCreds == nil {
+		return
+	}
+	tagged := activeCreds.AllTaggedKeys()
+	keys := make([]string, len(tagged))
+	labels := make([]string, len(tagged))
+	for i, tk := range tagged {
+		keys[i] = tk.Key
+		labels[i] = tk.Tag
+	}
+	activeKeyRing = keyring.NewKeyRingLabeled(keys, labels)
+}
+
+// maskKeyShort returns the last 4 chars of a key for display.
+func maskKeyShort(key string) string {
+	if len(key) <= 4 {
+		return key
+	}
+	return "..." + key[len(key)-4:]
 }
 
 // estimateTokens returns a rough token count using word-count heuristic.
@@ -3598,7 +3718,7 @@ func printHelp() {
 		{"/models", "show available models and current routing"},
 		{"/reject <reason>", "log last suggestion as rejected approach"},
 		{"/decision <text>", "log an architecture decision"},
-		{"/keys", "show API key status and rotation info"},
+		{"/keys", "manage API keys (add/delete/tag)"},
 		{"/telemetry on|off", "enable / disable anonymous usage upload"},
 		{"/version", "show current version"},
 		{"/quit", "exit  (also Ctrl+C)"},
@@ -3611,7 +3731,7 @@ func printHelp() {
 }
 
 func printFooter() {
-	fmt.Printf("\n%s  /help  /cost  /brain  /quit%s\n\n", colorDim, colorReset)
+	fmt.Printf("\n%s  /help · /file · /test · /brain · /quit%s\n\n", colorDim, colorReset)
 }
 
 // tierColors maps each tier to a terminal color code for the routing badge.

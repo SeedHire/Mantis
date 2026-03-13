@@ -3,13 +3,14 @@ package pipeline
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/term"
+	"github.com/seedhire/mantis/internal/render"
 )
 
 // taskRenderer owns all stdout output for the task region.
@@ -17,11 +18,10 @@ import (
 // preventing the text-overlap bugs caused by per-line ANSI cursor math.
 type taskRenderer struct {
 	mu        sync.Mutex
-	tasks     []Task     // shared reference — caller must not resize
-	warnings  []string   // edit block warnings, shown in summary
-	lineCount int        // lines currently on screen (for erase)
+	ar        *render.AtomicRenderer
+	tasks     []Task   // shared reference — caller must not resize
+	warnings  []string // edit block warnings, shown in summary
 	spinFrame int
-	isTTY     bool
 	// lastStatus tracks per-task status for non-TTY append-only mode.
 	lastStatus []string
 }
@@ -29,8 +29,8 @@ type taskRenderer struct {
 // newTaskRenderer creates a renderer bound to the given task slice.
 func newTaskRenderer(tasks []Task) *taskRenderer {
 	r := &taskRenderer{
+		ar:         render.New(),
 		tasks:      tasks,
-		isTTY:      term.IsTerminal(int(os.Stdout.Fd())),
 		lastStatus: make([]string, len(tasks)),
 	}
 	for i := range tasks {
@@ -42,68 +42,58 @@ func newTaskRenderer(tasks []Task) *taskRenderer {
 // render erases the previous output and redraws the full task region.
 // Must be called with r.mu held.
 func (r *taskRenderer) render() {
-	if !r.isTTY {
+	if !r.ar.IsTTY() {
 		r.renderNonTTY()
 		return
 	}
 
-	var buf bytes.Buffer
+	r.ar.Render(func(w io.Writer) {
+		var buf bytes.Buffer
 
-	// Erase previous output: move cursor up lineCount lines and clear to end of screen.
-	if r.lineCount > 0 {
-		fmt.Fprintf(&buf, "\033[%dA", r.lineCount)
-	}
-	buf.WriteString("\033[J") // clear from cursor to end of screen
+		tw := render.TermWidth()
 
-	w := termWidth()
+		// Header
+		fmt.Fprintf(&buf, "  %s── tasks ──%s\n", pColorDim, pColorReset)
 
-	// Header
-	fmt.Fprintf(&buf, "  %s── tasks ──%s\n", pColorDim, pColorReset)
-	lines := 1
+		// Task lines
+		for i := range r.tasks {
+			icon, iconColor, titleColor := taskIcon(r.tasks[i].Status, r.spinFrame)
+			title := truncateTitle(r.tasks[i].Title, tw)
+			suffix := taskSuffix(&r.tasks[i])
+			fmt.Fprintf(&buf, "  %s%s %s%s%s%s\n", iconColor, icon, titleColor, title, pColorReset, suffix)
 
-	// Task lines
-	for i := range r.tasks {
-		icon, iconColor, titleColor := taskIcon(r.tasks[i].Status, r.spinFrame)
-		title := truncateTitle(r.tasks[i].Title, w)
-		suffix := taskSuffix(&r.tasks[i])
-		fmt.Fprintf(&buf, "  %s%s %s%s%s%s\n", iconColor, icon, titleColor, title, pColorReset, suffix)
-		lines++
-
-		// Sub-message (retry info, stuck message, skip reason)
-		if r.tasks[i].SubMessage != "" {
-			fmt.Fprintf(&buf, "     %s↳ %s%s\n", pColorDim, r.tasks[i].SubMessage, pColorReset)
-			lines++
+			// Sub-message (retry info, stuck message, skip reason)
+			if r.tasks[i].SubMessage != "" {
+				fmt.Fprintf(&buf, "     %s↳ %s%s\n", pColorDim, r.tasks[i].SubMessage, pColorReset)
+			}
 		}
-	}
 
-	// Footer: progress count
-	done := 0
-	totalFiles := 0
-	totalTokens := 0
-	for j := range r.tasks {
-		if r.tasks[j].Status == "done" {
-			done++
+		// Footer: progress count
+		done := 0
+		totalFiles := 0
+		totalTokens := 0
+		for j := range r.tasks {
+			if r.tasks[j].Status == "done" {
+				done++
+			}
+			totalFiles += r.tasks[j].FileCount
+			totalTokens += r.tasks[j].Tokens
+			if r.tasks[j].Status == "running" {
+				totalTokens += int(atomic.LoadInt64(&r.tasks[j].streamTok))
+			}
 		}
-		totalFiles += r.tasks[j].FileCount
-		totalTokens += r.tasks[j].Tokens
-		if r.tasks[j].Status == "running" {
-			totalTokens += int(atomic.LoadInt64(&r.tasks[j].streamTok))
+		buf.WriteString("\n")
+		fmt.Fprintf(&buf, "  %s%d/%d done", pColorDim, done, len(r.tasks))
+		if totalFiles > 0 {
+			fmt.Fprintf(&buf, " · %d files", totalFiles)
 		}
-	}
-	buf.WriteString("\n")
-	lines++
-	fmt.Fprintf(&buf, "  %s%d/%d done", pColorDim, done, len(r.tasks))
-	if totalFiles > 0 {
-		fmt.Fprintf(&buf, " · %d files", totalFiles)
-	}
-	if totalTokens > 0 {
-		fmt.Fprintf(&buf, " · %d tokens", totalTokens)
-	}
-	fmt.Fprintf(&buf, "%s\n", pColorReset)
-	lines++
+		if totalTokens > 0 {
+			fmt.Fprintf(&buf, " · %d tokens", totalTokens)
+		}
+		fmt.Fprintf(&buf, "%s\n", pColorReset)
 
-	os.Stdout.Write(buf.Bytes())
-	r.lineCount = lines
+		w.Write(buf.Bytes())
+	})
 }
 
 // renderNonTTY prints append-only log lines when stdout is not a terminal (CI/pipes).
@@ -219,7 +209,7 @@ func (r *taskRenderer) initialRender() {
 	r.render()
 }
 
-// ── Helpers (moved from pipeline.go) ─────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────────────────────
 
 // taskIcon returns the display icon, icon color, and title color for a task status.
 func taskIcon(status string, spinFrame int) (string, string, string) {
@@ -269,15 +259,6 @@ func taskSuffix(t *Task) string {
 	default:
 		return ""
 	}
-}
-
-// termWidth returns the current terminal width, defaulting to 80.
-func termWidth() int {
-	w, _, err := term.GetSize(int(os.Stdout.Fd()))
-	if err != nil || w <= 0 {
-		return 80
-	}
-	return w
 }
 
 // truncateTitle shortens a task title so the full line fits in one terminal row.
