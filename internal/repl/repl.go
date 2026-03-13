@@ -60,6 +60,26 @@ const (
 // activeKeyRing is set during Run() so streamWithFallback can rotate keys.
 var activeKeyRing *keyring.KeyRing
 
+// makeKeyRotationCallback returns a pipeline.OnRateLimitFunc that rotates keys
+// using the given KeyRing. Returns nil if kr is nil or has only one key.
+func makeKeyRotationCallback(kr *keyring.KeyRing) pipeline.OnRateLimitFunc {
+	if kr == nil || kr.Count() <= 1 {
+		return nil
+	}
+	return func(client *ollama.Client) bool {
+		fromIdx := kr.ActiveIndex()
+		kr.MarkRateLimited(15 * time.Minute)
+		newKey, toIdx, ok := kr.Rotate()
+		if !ok {
+			return false
+		}
+		client.SetAPIKey(newKey)
+		fmt.Printf("%s  [key #%d rate limited — switching to key #%d]%s\n",
+			colorDim, fromIdx, toIdx, colorReset)
+		return true
+	}
+}
+
 // routerEmbedAdapter adapts *embeddings.Store to satisfy router.EmbedStore.
 // The router package defines a minimal interface to avoid importing embeddings.
 type routerEmbedAdapter struct{ store *embeddings.Store }
@@ -405,6 +425,7 @@ func Run(cfg Config) error {
 		readline.PcItem("/reject"),
 		readline.PcItem("/decision"),
 		readline.PcItem("/plan"),
+		readline.PcItem("/build"),
 		readline.PcItem("/context"),
 		readline.PcItem("/fetch"),
 		readline.PcItem("/search"),
@@ -496,6 +517,16 @@ func Run(cfg Config) error {
 
 	turn := 0
 	planMode := cfg.PlanMode
+	planPrompt := "\033[38;5;141m[PLAN]\033[0m " + idlePrompt
+	buildPrompt := idlePrompt
+	setPlanPrompt := func() {
+		if planMode {
+			rl.SetPrompt(planPrompt)
+		} else {
+			rl.SetPrompt(buildPrompt)
+		}
+	}
+	setPlanPrompt()
 	// autoReadFiles tracks files already injected into context this session.
 	// Prevents re-reading the same file on every turn once it's in the history.
 	autoReadFiles := map[string]bool{}
@@ -529,6 +560,7 @@ func Run(cfg Config) error {
 			if quit := handleSlashCommand(input, sess, b, &messages, client, &brainContext, &planMode, cfg, webFetcher, opLog, embStore, snapStore); quit {
 				break
 			}
+			setPlanPrompt()
 			continue
 		}
 
@@ -581,6 +613,9 @@ func Run(cfg Config) error {
 		}
 		tierSkills := b.LoadSkillsForTask(string(intent.TaskType), skillsBudget)
 		tierPrompt := buildSystemPrompt(brainContext, tierSkills, intent.Tier)
+		if planMode {
+			tierPrompt += "\n\n## PLAN MODE (active)\nYou are in read-only exploration mode. Analyze, explain, and suggest plans — but do NOT write code blocks meant for file creation. If the user asks you to implement something, outline the plan (files to change, approach, risks) and tell them to run /build to switch to build mode."
+		}
 		if len(messages) > 0 {
 			messages[0] = ollama.Message{Role: "system", Content: tierPrompt}
 		}
@@ -700,7 +735,7 @@ func Run(cfg Config) error {
 		// across 2+ packages. Workers run in parallel goroutines; each uses the
 		// full AgentToolkit (read/write/bash/search/finish).
 		// BUG-02: guard dispatcher nil before calling IsAvailable().
-		if (intent.Tier == router.TierHeavy || intent.Tier == router.TierCode) &&
+		if !planMode && (intent.Tier == router.TierHeavy || intent.Tier == router.TierCode) &&
 			dispatcher != nil && dispatcher.IsAvailable() {
 			if querier := dispatcher.Querier(); querier != nil {
 				if target := extractImpactTarget(input, querier); target != "" {
@@ -755,7 +790,7 @@ func Run(cfg Config) error {
 		// ── Iterative test loop for test-related fix requests ────────────────
 		// Detects "fix tests", "tests are failing", etc. and routes to the
 		// test loop instead of the generic fix agent.
-		if intent.TaskType == "fix" && intent.Tier == router.TierCode && isTestFixRequest(input) {
+		if !planMode && intent.TaskType == "fix" && intent.Tier == router.TierCode && isTestFixRequest(input) {
 			// Auto-snapshot before test-fix loop.
 			if snapID, snapErr := snapStore.Take("before test loop", true); snapErr == nil && snapID != "" {
 				fmt.Printf("%s  [snapshot %s saved]%s\n", colorDim, snapID, colorReset)
@@ -773,7 +808,7 @@ func Run(cfg Config) error {
 		// Gives the model run_command + read_file tools so it can investigate
 		// and fix build/deployment errors autonomously, without the multi-agent gate.
 		// Also triggers on deploy/docker/make mentions regardless of task type.
-		needsAgent := intent.TaskType == "fix" && intent.Tier == router.TierCode
+		needsAgent := !planMode && intent.TaskType == "fix" && intent.Tier == router.TierCode
 		if !needsAgent && intent.Tier == router.TierCode {
 			lo := strings.ToLower(input)
 			for _, kw := range []string{"docker", "makefile", "make build", "deploy", "dockerfile", "compose", "kubernetes", "kubectl"} {
@@ -855,14 +890,16 @@ func Run(cfg Config) error {
 		// ── Multi-stage SWE pipeline for complex build/implement requests ─────
 		// Triggered before the single-model path so complex tasks get:
 		//   plan (reason model) → code + tests (code model, parallel)
-		if pipeline.ShouldRun(intent, input) {
+		if !planMode && pipeline.ShouldRun(intent, input) {
 			// Auto-snapshot before pipeline runs.
 			if snapID, snapErr := snapStore.Take("before pipeline", true); snapErr == nil && snapID != "" {
 				fmt.Printf("%s  [snapshot %s saved — /revert %s to undo]%s\n", colorDim, snapID, snapID, colorReset)
 			}
 			// Fix 8: snapshot existing files to distinguish new vs edited after pipeline.
 			preExisting := snapshotExistingFiles(root)
-			pipelineOpts := pipeline.Options{AvailableModels: availableModels, Root: root, PlanOnly: planMode}
+			pipelineOpts := pipeline.Options{AvailableModels: availableModels, Root: root, PlanOnly: planMode,
+				OnRateLimit: makeKeyRotationCallback(keyRing),
+			}
 			pipelineCtx, pipelineCancel := context.WithTimeout(turnCtx, 20*time.Minute)
 			sysPrompt := buildSystemPrompt(brainContext, tierSkills, router.TierCode)
 			pRes, pErr := pipeline.Run(
@@ -922,7 +959,7 @@ func Run(cfg Config) error {
 				pRes, pErr = pipeline.ContinuePlan(
 					contCtx, client, input, pRes.PlanText,
 					sysPrompt,
-					pipeline.Options{AvailableModels: availableModels, Root: root},
+					pipeline.Options{AvailableModels: availableModels, Root: root, OnRateLimit: makeKeyRotationCallback(activeKeyRing)},
 				)
 				contCancel()
 				if pErr != nil {
@@ -1083,8 +1120,8 @@ func Run(cfg Config) error {
 			continue
 		}
 
-		// Reset prompt back to plain ❯ after response.
-		rl.SetPrompt(idlePrompt)
+		// Reset prompt back to normal (respecting plan mode) after response.
+		setPlanPrompt()
 
 		// Render the full response as formatted markdown.
 		turnTok := promptTok + completionTok
@@ -1096,6 +1133,13 @@ func Run(cfg Config) error {
 		renderResponse(stripInternalBlocks(stripFileBlocks(rb.String())))
 
 		// Write any file code blocks from the response to disk.
+		// In plan mode, skip file writes — read-only exploration only.
+		if planMode {
+			messages = append(messages, ollama.Message{Role: "assistant", Content: rb.String()})
+			sess.Add(model, intent.Tier, promptTok, completionTok, hasImage)
+			turnCancel()
+			continue
+		}
 		// Append a system note so future turns know what's already written.
 		wf := extractAndWriteFilesWithApproval(rb.String(), root, rl, approvalCache, opLog)
 		if len(wf) > 0 {
@@ -1494,12 +1538,13 @@ func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
 			fmt.Printf("%s● decision logged%s\n\n", colorGold, colorReset)
 		}
 	case "/plan":
-		*planMode = !*planMode
-		if *planMode {
-			fmt.Printf("%s● plan mode ON — pipeline will pause for approval before coding%s\n\n", colorGold, colorReset)
-		} else {
-			fmt.Printf("%s● plan mode OFF — pipeline runs end-to-end%s\n\n", colorGold, colorReset)
-		}
+		*planMode = true
+		fmt.Printf("%s● plan mode ON — read-only exploration, no file writes%s\n\n", colorGold, colorReset)
+		return false
+	case "/build":
+		*planMode = false
+		fmt.Printf("%s● build mode ON — full tool access, file writes enabled%s\n\n", colorGold, colorReset)
+		return false
 	case "/context":
 		handleContextCommand(sess, *messages, *brainContext)
 	case "/fetch":
@@ -3542,7 +3587,8 @@ func printHelp() {
 		{"/commit", "generate commit message, preview, commit"},
 		{"/pr", "push branch + generate PR title/body + create GitHub PR"},
 		{"/git-log", "show last 10 mantis auto-commits"},
-		{"/plan", "toggle plan mode (review before code)"},
+		{"/plan", "enter plan mode — read-only exploration, no file writes"},
+		{"/build", "exit plan mode — full tool access, file writes enabled"},
 		{"/context", "show context window token breakdown"},
 		{"/reset", "clear conversation (brain memory kept)"},
 		{"/cost", "token savings report"},

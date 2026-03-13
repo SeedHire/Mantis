@@ -40,6 +40,31 @@ const (
 	pColorDim   = "\033[38;5;244m"
 )
 
+// streamWithRetry wraps client.StreamChat with automatic key rotation on 429.
+// If onRL is nil, behaves identically to client.StreamChat.
+func streamWithRetry(
+	ctx context.Context,
+	client *ollama.Client,
+	model string,
+	msgs []interface{},
+	opts *ollama.ModelOptions,
+	onChunk func(string),
+	onRL OnRateLimitFunc,
+) (int, int, error) {
+	pt, ct, err := client.StreamChat(ctx, model, msgs, opts, onChunk)
+	if err == nil {
+		return pt, ct, nil
+	}
+	errStr := err.Error()
+	if onRL != nil && (strings.Contains(errStr, "429") || strings.Contains(errStr, "rate limit")) {
+		if onRL(client) {
+			// Key rotated — retry once with new key.
+			return client.StreamChat(ctx, model, msgs, opts, onChunk)
+		}
+	}
+	return pt, ct, err
+}
+
 // optsFor returns model options with temperature and a context window tuned to the model.
 // Picks up MANTIS_DRAFT_MODEL for speculative decoding when set.
 func optsFor(model string, temperature float64) *ollama.ModelOptions {
@@ -130,16 +155,22 @@ func progressTicker(stage string) (incr func(), stop func() time.Duration) {
 	return
 }
 
+// OnRateLimitFunc is called when a 429/rate-limit is encountered.
+// It should rotate the API key on the client and return true if a new key
+// was activated, or false if all keys are exhausted.
+type OnRateLimitFunc func(client *ollama.Client) bool
+
 // Options controls pipeline execution behaviour.
 type Options struct {
 	AvailableModels []ollama.ModelInfo
-	SkipTests       bool          // skip test generation for faster turnaround
-	Root            string        // project root for build verification; empty = skip
-	MaxRetries      int           // max CODE stage retries on build failure (default 3)
-	PlanOnly        bool          // stop after PLAN stage and return for user approval
-	TaskTimeout     time.Duration // per-task timeout (default 8m); 0 = no individual deadline
-	EditorModel     string        // 7.2: lighter model for validating/cleaning diff blocks; empty = skip editor pass
-	TDDFirst        bool          // 7.8: generate tests before code (tests-as-specification)
+	SkipTests       bool              // skip test generation for faster turnaround
+	Root            string            // project root for build verification; empty = skip
+	MaxRetries      int               // max CODE stage retries on build failure (default 3)
+	PlanOnly        bool              // stop after PLAN stage and return for user approval
+	TaskTimeout     time.Duration     // per-task timeout (default 8m); 0 = no individual deadline
+	EditorModel     string            // 7.2: lighter model for validating/cleaning diff blocks; empty = skip editor pass
+	TDDFirst        bool              // 7.8: generate tests before code (tests-as-specification)
+	OnRateLimit     OnRateLimitFunc   // called on 429 to rotate API key; nil = no rotation
 }
 
 // Result holds aggregated pipeline output and token counts.
@@ -203,6 +234,7 @@ func Run(
 	// BUG-1: local options — no package-level mutation.
 	planOpts := optsFor(planModel, 0.3)
 	codeOpts := optsFor(codeModel, 0.15)
+	onRL := opts.OnRateLimit // key rotation callback (nil = disabled)
 	res := &Result{}
 
 	// 7.9: Model-aware edit format selection.
@@ -217,13 +249,16 @@ func Run(
 	// ── Stage 1: PLAN ─────────────────────────────────────────────────────────
 	fmt.Printf("%s  ◆ planning   [%s]%s\n", pColorDim, planModel, pColorReset)
 
+	// Scan project structure so the model knows the language/framework/layout.
+	projCtx := projectScanContext(opts.Root)
+
 	planMsgs := []interface{}{
 		ollama.Message{Role: "system", Content: systemPrompt + effPlanSuffix},
-		ollama.Message{Role: "user", Content: planUserPrompt(userRequest)},
+		ollama.Message{Role: "user", Content: planUserPrompt(userRequest) + projCtx},
 	}
 	var planBuf strings.Builder
 	planIncr, planStop := progressTicker("planning")
-	pt, ct, err := client.StreamChat(ctx, planModel, planMsgs, planOpts, func(c string) { planBuf.WriteString(c); planIncr() })
+	pt, ct, err := streamWithRetry(ctx, client, planModel, planMsgs, planOpts, func(c string) { planBuf.WriteString(c); planIncr() }, onRL)
 	planElapsed := planStop()
 	if err != nil {
 		// Plan model unavailable — fall back to code model so the pipeline still runs.
@@ -231,7 +266,7 @@ func Run(
 		fmt.Printf("\n%s  ⚠ plan model unavailable, falling back to %s%s\n", pColorDim, codeModel, pColorReset)
 		planBuf.Reset()
 		planIncr2, planStop2 := progressTicker("planning")
-		pt, ct, err = client.StreamChat(ctx, codeModel, planMsgs, codeOpts, func(c string) { planBuf.WriteString(c); planIncr2() })
+		pt, ct, err = streamWithRetry(ctx, client, codeModel, planMsgs, codeOpts, func(c string) { planBuf.WriteString(c); planIncr2() }, onRL)
 		planElapsed = planStop2()
 		if err != nil {
 			return nil, fmt.Errorf("plan stage: %w", err)
@@ -258,7 +293,7 @@ func Run(
 		}
 		var tddBuf strings.Builder
 		tddIncr, tddStop := progressTicker("tdd-tests")
-		pt, ct, err := client.StreamChat(ctx, codeModel, tddMsgs, codeOpts, func(c string) { tddBuf.WriteString(c); tddIncr() })
+		pt, ct, err := streamWithRetry(ctx, client, codeModel, tddMsgs, codeOpts, func(c string) { tddBuf.WriteString(c); tddIncr() }, onRL)
 		tddElapsed := tddStop()
 		if err == nil && strings.TrimSpace(tddBuf.String()) != "" {
 			res.TestText = tddBuf.String()
@@ -292,7 +327,7 @@ func Run(
 		// Task-based execution: each task gets its own focused prompt.
 		fmt.Printf("%s  ◆ coding   [%s] — %d tasks%s\n", pColorDim, codeModel, len(tasks), pColorReset)
 		codeStart := time.Now()
-		runTaskBased(ctx, client, codeModel, systemPrompt, userRequest, res.PlanText, tasks, res, opts.Root, opts.TaskTimeout, codeOpts)
+		runTaskBased(ctx, client, codeModel, systemPrompt, userRequest, res.PlanText, tasks, res, opts.Root, opts.TaskTimeout, codeOpts, onRL)
 		codeElapsed := time.Since(codeStart)
 
 		done := 0
@@ -330,7 +365,7 @@ func Run(
 		for attempt := 0; attempt <= maxRetries; attempt++ {
 			var codeBuf strings.Builder
 			codeIncr, codeStop := progressTicker("coding")
-			pt, ct, err := client.StreamChat(ctx, codeModel, codeMsgs, codeOpts, func(c string) { codeBuf.WriteString(c); codeIncr() })
+			pt, ct, err := streamWithRetry(ctx, client, codeModel, codeMsgs, codeOpts, func(c string) { codeBuf.WriteString(c); codeIncr() }, onRL)
 			codeStop()
 			if partial := codeBuf.String(); strings.TrimSpace(partial) != "" {
 				res.CodeText = partial
@@ -414,7 +449,7 @@ func Run(
 	// the code model is different from the editor model (no point validating with itself).
 	if editorModel != "" && editorModel != codeModel && res.CodeText != "" {
 		fmt.Printf("%s  ◆ editor pass   [%s]%s\n", pColorDim, editorModel, pColorReset)
-		res.CodeText = editorValidate(ctx, client, editorModel, res.CodeText)
+		res.CodeText = editorValidate(ctx, client, editorModel, res.CodeText, onRL)
 		// Re-apply validated code to disk.
 		if opts.Root != "" {
 			_, eacWarns := extractAndApplyChanges(res.CodeText, opts.Root)
@@ -452,7 +487,7 @@ func Run(
 		}
 		var buf strings.Builder
 		testIncr, testStop := progressTicker("testing")
-		pt, ct, err := client.StreamChat(ctx, codeModel, msgs, codeOpts, func(c string) { buf.WriteString(c); testIncr() })
+		pt, ct, err := streamWithRetry(ctx, client, codeModel, msgs, codeOpts, func(c string) { buf.WriteString(c); testIncr() }, onRL)
 		testElapsed := testStop()
 		testCh <- stageOut{buf.String(), pt, ct, testElapsed, err}
 	}()
@@ -502,6 +537,7 @@ func ContinuePlan(
 	res := &Result{PlanText: planText}
 	codeModel := router.ModelFor(router.TierCode)
 	codeOpts := optsFor(codeModel, 0.15) // BUG-1: local opts, no package-level mutation
+	onRL := opts.OnRateLimit
 	effTestNaming := langTestNaming(detectLang(opts.Root))
 	effCodeSuffix := codeStageSuffixFor(router.EditFormatForTier(router.TierCode))
 
@@ -526,7 +562,7 @@ func ContinuePlan(
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		var codeBuf strings.Builder
 		codeIncr, codeStop := progressTicker("coding")
-		pt, ct, err := client.StreamChat(ctx, codeModel, codeMsgs, codeOpts, func(c string) { codeBuf.WriteString(c); codeIncr() })
+		pt, ct, err := streamWithRetry(ctx, client, codeModel, codeMsgs, codeOpts, func(c string) { codeBuf.WriteString(c); codeIncr() }, onRL)
 		codeStop()
 		if partial := codeBuf.String(); strings.TrimSpace(partial) != "" {
 			res.CodeText = partial
@@ -620,7 +656,7 @@ func ContinuePlan(
 		}
 		var buf strings.Builder
 		testIncr, testStop := progressTicker("testing")
-		pt, ct, err := client.StreamChat(ctx, codeModel, msgs, codeOpts, func(c string) { buf.WriteString(c); testIncr() })
+		pt, ct, err := streamWithRetry(ctx, client, codeModel, msgs, codeOpts, func(c string) { buf.WriteString(c); testIncr() }, onRL)
 		testElapsed := testStop()
 		testCh <- stageOut{buf.String(), pt, ct, testElapsed, err}
 	}()
@@ -742,6 +778,7 @@ func runTaskBased(
 	root string,
 	taskTimeout time.Duration,
 	codeOpts *ollama.ModelOptions,
+	onRL OnRateLimitFunc,
 ) {
 	// Atomic renderer owns all stdout for the task region.
 	r := newTaskRenderer(tasks)
@@ -794,10 +831,10 @@ func runTaskBased(
 		}
 
 		var buf strings.Builder
-		pt, ct, err := client.StreamChat(taskCtx, codeModel, msgs, codeOpts, func(c string) {
+		pt, ct, err := streamWithRetry(taskCtx, client, codeModel, msgs, codeOpts, func(c string) {
 			buf.WriteString(c)
 			atomic.AddInt64(&tasks[i].streamTok, 1)
-		})
+		}, onRL)
 
 		mu.Lock()
 		defer mu.Unlock()
@@ -885,10 +922,10 @@ func runTaskBased(
 				}
 
 				var retryBuf strings.Builder
-				rpt, rct, rerr := client.StreamChat(taskCtx, codeModel, retryMsgs, codeOpts, func(c string) {
+				rpt, rct, rerr := streamWithRetry(taskCtx, client, codeModel, retryMsgs, codeOpts, func(c string) {
 					retryBuf.WriteString(c)
 					atomic.AddInt64(&tasks[i].streamTok, 1)
-				})
+				}, onRL)
 				if rerr != nil || strings.TrimSpace(retryBuf.String()) == "" {
 					break // stream failed, keep what we have
 				}
@@ -1321,6 +1358,7 @@ func editorValidate(
 	client *ollama.Client,
 	editorModel string,
 	codeText string,
+	onRL OnRateLimitFunc,
 ) string {
 	editorPrompt := `You are an edit validator. Your ONLY job is to verify and clean code blocks.
 
@@ -1347,7 +1385,7 @@ Output ONLY the corrected code blocks. No explanation.`
 	editorCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
-	_, _, err := client.StreamChat(editorCtx, editorModel, msgs, editorOpts, func(c string) { buf.WriteString(c) })
+	_, _, err := streamWithRetry(editorCtx, client, editorModel, msgs, editorOpts, func(c string) { buf.WriteString(c) }, onRL)
 	if err != nil {
 		fmt.Printf("%s  ⚠ editor pass failed (%v) — using architect output directly%s\n", pColorDim, err, pColorReset)
 		return codeText
@@ -1800,7 +1838,10 @@ const planStageSuffix = `
 Analyze the development request and produce a structured implementation plan.
 Do NOT write any implementation code or file content — list file NAMES only.
 
-CRITICAL: Begin your response IMMEDIATELY with "### Overview" — no preamble, no "Let me...", no "The user is...", no analysis sentences before the header. Jump straight to the structured output.
+CRITICAL RULES:
+- Begin your response IMMEDIATELY with "### Overview" — no preamble, no "Let me...", no "The user is...", no analysis sentences before the header. Jump straight to the structured output.
+- NEVER ask clarifying questions. You have the full project structure provided below — use it to determine the language, framework, directory layout, and existing patterns.
+- NEVER ask "what language?" or "what framework?" — detect it from the manifest files and directory structure provided in the Project Context section.
 
 Use these exact headers:
 ### Overview
@@ -2012,6 +2053,79 @@ CRITICAL: Begin your response IMMEDIATELY with the first ` + "```lang:filepath" 
 
 // detectLang sniffs the project root for well-known manifest files.
 // Returns "go", "typescript", "python", "rust", or "unknown".
+// projectScanContext scans the project directory and returns a concise summary
+// of the project structure so the model never needs to ask "what language/framework?"
+func projectScanContext(root string) string {
+	if root == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n## Project Context (auto-scanned)\n")
+
+	// 1. Show top-level directory listing.
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return ""
+	}
+	b.WriteString("### Top-level files and directories\n```\n")
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, ".") {
+			continue // skip hidden
+		}
+		if e.IsDir() {
+			b.WriteString(name + "/\n")
+		} else {
+			b.WriteString(name + "\n")
+		}
+	}
+	b.WriteString("```\n")
+
+	// 2. Show manifest file contents (small files that define the project).
+	manifests := []string{
+		"package.json", "go.mod", "Cargo.toml", "pyproject.toml",
+		"requirements.txt", "setup.py", "pom.xml", "build.gradle",
+		"Makefile", "docker-compose.yml", "Dockerfile",
+	}
+	for _, mf := range manifests {
+		p := filepath.Join(root, mf)
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		content := string(data)
+		// Cap at 2000 chars to avoid blowing up context.
+		if len(content) > 2000 {
+			content = content[:2000] + "\n... (truncated)"
+		}
+		b.WriteString(fmt.Sprintf("\n### %s\n```\n%s\n```\n", mf, content))
+	}
+
+	// 3. Show src/ or internal/ or lib/ sub-directory listing (1 level deep).
+	srcDirs := []string{"src", "internal", "lib", "app", "cmd", "pkg", "api"}
+	for _, sd := range srcDirs {
+		sdPath := filepath.Join(root, sd)
+		subs, err := os.ReadDir(sdPath)
+		if err != nil {
+			continue
+		}
+		b.WriteString(fmt.Sprintf("\n### %s/ directory\n```\n", sd))
+		for _, s := range subs {
+			if strings.HasPrefix(s.Name(), ".") {
+				continue
+			}
+			if s.IsDir() {
+				b.WriteString(s.Name() + "/\n")
+			} else {
+				b.WriteString(s.Name() + "\n")
+			}
+		}
+		b.WriteString("```\n")
+	}
+
+	return b.String()
+}
+
 func detectLang(root string) string {
 	if root == "" {
 		return "unknown"
