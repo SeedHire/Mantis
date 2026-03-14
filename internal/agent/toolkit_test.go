@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -204,6 +205,7 @@ func TestEditFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "hello.go"), []byte(original), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	tk.ReadFile("hello.go", 0, 0) // 7J: read before write
 
 	if err := tk.EditFile("hello.go", "\"world\"", "\"mantis\""); err != nil {
 		t.Fatalf("EditFile: %v", err)
@@ -223,6 +225,7 @@ func TestEditFile_OldStringNotFound(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "f.go"), []byte("package main\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	tk.ReadFile("f.go", 0, 0) // 7J: read before write
 	err := tk.EditFile("f.go", "nonexistent", "replacement")
 	if err == nil {
 		t.Error("expected error when old_string not found")
@@ -235,6 +238,7 @@ func TestEditFile_AmbiguousMatch(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "f.txt"), []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	tk.ReadFile("f.txt", 0, 0) // 7J: read before write
 	err := tk.EditFile("f.txt", "foo", "baz")
 	if err == nil {
 		t.Error("expected error when old_string matches multiple times")
@@ -254,6 +258,10 @@ func TestDispatch_EditFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "src.go"), []byte("return 1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// 7J: must read file before editing (read-before-write gate).
+	if _, err := tk.ReadFile("src.go", 0, 0); err != nil {
+		t.Fatalf("ReadFile before edit: %v", err)
+	}
 	args, _ := json.Marshal(map[string]string{
 		"path":       "src.go",
 		"old_string": "return 1",
@@ -269,6 +277,101 @@ func TestDispatch_EditFile(t *testing.T) {
 	b, _ := os.ReadFile(filepath.Join(root, "src.go"))
 	if string(b) != "return 42\n" {
 		t.Errorf("file content after dispatch = %q", b)
+	}
+}
+
+func TestEditFile_ReadBeforeWriteGate(t *testing.T) {
+	tk, root := newTestToolkit(t)
+	if err := os.WriteFile(filepath.Join(root, "gate.go"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Edit without reading first should fail.
+	err := tk.EditFile("gate.go", "hello", "world")
+	if err == nil {
+		t.Fatal("expected error when editing without reading first")
+	}
+	if !strings.Contains(err.Error(), "must read_file") {
+		t.Errorf("unexpected error: %v", err)
+	}
+	// After reading, edit should succeed.
+	if _, readErr := tk.ReadFile("gate.go", 0, 0); readErr != nil {
+		t.Fatalf("ReadFile: %v", readErr)
+	}
+	if err := tk.EditFile("gate.go", "hello", "world"); err != nil {
+		t.Fatalf("EditFile after read: %v", err)
+	}
+}
+
+func TestWriteFile_ReadBeforeWriteGate(t *testing.T) {
+	tk, root := newTestToolkit(t)
+	// New file — should succeed without reading.
+	if err := tk.WriteFile("new.go", "package main\n"); err != nil {
+		t.Fatalf("WriteFile new file: %v", err)
+	}
+	// Existing file — should fail without reading.
+	err := tk.WriteFile("new.go", "overwrite\n")
+	if err == nil {
+		t.Fatal("expected error when overwriting without reading")
+	}
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("unexpected error: %v", err)
+	}
+	// After reading, overwrite should succeed.
+	if _, readErr := tk.ReadFile("new.go", 0, 0); readErr != nil {
+		t.Fatalf("ReadFile: %v", readErr)
+	}
+	if err := tk.WriteFile("new.go", "overwrite\n"); err != nil {
+		t.Fatalf("WriteFile after read: %v", err)
+	}
+	b, _ := os.ReadFile(filepath.Join(root, "new.go"))
+	if string(b) != "overwrite\n" {
+		t.Errorf("content = %q, want overwrite", b)
+	}
+}
+
+func TestIsDestructiveGit(t *testing.T) {
+	// Destructive commands should be blocked.
+	for _, cmd := range []string{
+		"git push --force origin main",
+		"git reset --hard HEAD~1",
+		"git clean -fdx",
+		"git checkout .",
+		"git branch -D feature",
+	} {
+		blocked, msg := isDestructiveGit(cmd)
+		if !blocked {
+			t.Errorf("%q: expected blocked, got allowed", cmd)
+		}
+		if !strings.Contains(msg, "destructive") {
+			t.Errorf("%q: expected destructive message, got: %s", cmd, msg)
+		}
+	}
+	// Safe git commands should not be blocked.
+	for _, cmd := range []string{
+		"git status",
+		"git diff",
+		"git log --oneline",
+		"git add src/main.go",
+		"git commit -m 'fix bug'",
+	} {
+		blocked, _ := isDestructiveGit(cmd)
+		if blocked {
+			t.Errorf("%q: should not be blocked", cmd)
+		}
+	}
+	// Warning-only patterns.
+	for _, cmd := range []string{
+		"git commit --amend",
+		"git add -A",
+		"git commit --no-verify",
+	} {
+		blocked, msg := isDestructiveGit(cmd)
+		if blocked {
+			t.Errorf("%q: should warn, not block", cmd)
+		}
+		if msg == "" {
+			t.Errorf("%q: expected warning message", cmd)
+		}
 	}
 }
 

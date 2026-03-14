@@ -1933,6 +1933,9 @@ const codeStageSuffix = `
 
 ## Your role: IMPLEMENTER
 Write the complete implementation based on the plan. Requirements:
+- Only implement what the plan specifies — do NOT add extra features, helpers, or abstractions
+- Do NOT add docstrings, comments, or type annotations beyond what is needed
+- Three similar lines of code is BETTER than an unnecessary abstraction
 - Every function body has real logic — no stubs, no TODOs, no placeholder returns
 - Errors surfaced to callers — no silent swallowing. Every catch block must re-throw, return an error response, or explicitly handle the failure. NEVER catch (e) { console.log(e) }.
 - No debugging prints (console.log / fmt.Println / print) left in
@@ -2016,6 +2019,9 @@ const codeStageWholeFile = `
 
 ## Your role: IMPLEMENTER
 Write the complete implementation based on the plan. Requirements:
+- Only implement what the plan specifies — do NOT add extra features, helpers, or abstractions
+- Do NOT add docstrings, comments, or type annotations beyond what is needed
+- Three similar lines of code is BETTER than an unnecessary abstraction
 - Every function body has real logic — no stubs, no TODOs, no placeholder returns
 - Errors surfaced to callers — no silent swallowing. Every catch block must re-throw, return an error response, or explicitly handle the failure. NEVER catch (e) { console.log(e) }.
 - No debugging prints left in

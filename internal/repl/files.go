@@ -585,6 +585,8 @@ func stripInternalBlocks(s string) string {
 	if idx := strings.Index(s, "\nWould you like to"); idx != -1 {
 		s = strings.TrimRight(s[:idx], "\n ")
 	}
+	// 7N: Strip filler preambles that waste tokens and annoy users.
+	s = stripFillerPreamble(s)
 	// Warn user if model left stubs — this shouldn't happen with new system prompt
 	// but we surface it so they know to re-ask.
 	stubPatterns := []string{"// TODO:", "# TODO:", "// FIXME:", "// ... rest", "# ... rest", "pass  # implement", "raise NotImplementedError"}
@@ -595,6 +597,53 @@ func stripInternalBlocks(s string) string {
 		}
 	}
 	return strings.TrimSpace(s) + "\n"
+}
+
+// fillerPrefixes are common filler phrases models prepend before the actual answer.
+var fillerPrefixes = []string{
+	"Sure!", "Sure,", "Sure thing!",
+	"Of course!", "Of course,",
+	"Absolutely!", "Absolutely,",
+	"Great question!", "Great question,",
+	"Good question!", "Good question,",
+	"I'd be happy to", "I'd be happy to help",
+	"I would be happy to",
+	"Let me help you with that.",
+	"Let me help with that.",
+	"I'll help you", "I'll help with",
+	"Here's what", "Here is what",
+	"I apologize for", "I apologize,",
+	"Sorry for the confusion",
+	"No problem!", "No problem,",
+	"Thanks for", "Thank you for",
+}
+
+// stripFillerPreamble removes common filler phrases from the start of model responses.
+// Only strips if the response starts with a filler — never modifies mid-response content.
+func stripFillerPreamble(s string) string {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return s
+	}
+	lower := strings.ToLower(trimmed)
+	for _, prefix := range fillerPrefixes {
+		lp := strings.ToLower(prefix)
+		if strings.HasPrefix(lower, lp) {
+			// Find the end of the filler line — remove up to first newline or period+space.
+			rest := trimmed[len(prefix):]
+			// If filler is the whole first line, skip to next line.
+			if idx := strings.Index(rest, "\n"); idx != -1 && idx < 80 {
+				rest = strings.TrimSpace(rest[idx+1:])
+			} else {
+				rest = strings.TrimSpace(rest)
+			}
+			if rest != "" {
+				return rest
+			}
+			break
+		}
+	}
+	return s
 }
 
 // snapshotExistingFiles walks root and returns a set of absolute paths for all regular files.

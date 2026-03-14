@@ -59,6 +59,48 @@ func containsShellMeta(cmd string) bool {
 	return false
 }
 
+// destructiveGitPatterns are git commands that can cause data loss.
+// These are blocked even though they match allowedPrefixes.
+var destructiveGitPatterns = []string{
+	"git push --force", "git push -f ",
+	"git reset --hard",
+	"git checkout .", "git checkout -- .",
+	"git restore .", "git restore --staged .",
+	"git clean -f", "git clean -fd", "git clean -fdx",
+	"git branch -D ",
+	"git stash drop",
+}
+
+// gitWarningPatterns trigger a warning message (not a hard block).
+var gitWarningPatterns = []string{
+	"--no-verify",
+	"--amend",
+	"git add -A", "git add .",
+}
+
+// isDestructiveGit returns (blocked, warning) for a git command.
+func isDestructiveGit(cmd string) (bool, string) {
+	trimmed := strings.TrimSpace(cmd)
+	for _, p := range destructiveGitPatterns {
+		if strings.Contains(trimmed, p) {
+			return true, fmt.Sprintf("error: destructive git command blocked: %q — this can cause data loss. Use a safer alternative.", cmd)
+		}
+	}
+	for _, p := range gitWarningPatterns {
+		if strings.Contains(trimmed, p) {
+			switch {
+			case strings.Contains(trimmed, "--no-verify"):
+				return false, "warning: --no-verify skips pre-commit hooks. Fix the hook issue instead."
+			case strings.Contains(trimmed, "--amend"):
+				return false, "warning: --amend rewrites the previous commit. If a hook just failed, the commit didn't happen — use a NEW commit instead of amending."
+			case strings.Contains(trimmed, "git add -A") || strings.Contains(trimmed, "git add ."):
+				return false, "warning: 'git add -A' / 'git add .' may stage sensitive files (.env, credentials). Prefer adding specific files by name."
+			}
+		}
+	}
+	return false, ""
+}
+
 // allowedPrefixes is the bash command allowlist (prefix matching).
 // Covers build tools, package managers, Docker, Make, diagnostics, and VCS.
 var allowedPrefixes = []string{
@@ -104,6 +146,8 @@ type AgentToolkit struct {
 	staleMu        sync.Mutex            // guards readTimes
 	bashFailCount  int                   // 7.3: consecutive bash failure counter
 	bashFailMu     sync.Mutex            // guards bashFailCount
+	readFiles      map[string]bool       // 7J: tracks which files have been read (read-before-write gate)
+	readFilesMu    sync.Mutex            // guards readFiles
 }
 
 // NewToolkit creates a toolkit bound to the given project root.
@@ -119,6 +163,7 @@ func NewToolkit(projectRoot string, querier *graph.Querier, embStore *embeddings
 		querier:     querier,
 		embStore:    embStore,
 		readTimes:   make(map[string]time.Time),
+		readFiles:   make(map[string]bool),
 	}
 }
 
@@ -143,6 +188,10 @@ func (t *AgentToolkit) ReadFile(path string, startLine, endLine int) (string, er
 		t.readTimes[abs] = fi.ModTime()
 		t.staleMu.Unlock()
 	}
+	// 7J: Track that this file has been read (read-before-write gate).
+	t.readFilesMu.Lock()
+	t.readFiles[abs] = true
+	t.readFilesMu.Unlock()
 
 	var sb strings.Builder
 	scanner := bufio.NewScanner(f)
@@ -168,6 +217,16 @@ func (t *AgentToolkit) WriteFile(path, content string) error {
 	abs, err := t.safePath(path)
 	if err != nil {
 		return err
+	}
+	// 7J: read-before-write gate — if the file already exists, must read it first.
+	// New files (don't exist yet) are allowed without reading.
+	if _, statErr := os.Stat(abs); statErr == nil {
+		t.readFilesMu.Lock()
+		hasRead := t.readFiles[abs]
+		t.readFilesMu.Unlock()
+		if !hasRead {
+			return fmt.Errorf("write_file: file %q already exists — use read_file first to see its contents, then use edit_file for targeted changes", path)
+		}
 	}
 	t.fileMu.Lock()
 	defer t.fileMu.Unlock()
@@ -220,6 +279,13 @@ func isServerCmd(cmd string) bool {
 func (t *AgentToolkit) RunBash(cmd string, timeoutSec int) (output string, exitCode int) {
 	if !isAllowedCmd(cmd) {
 		return fmt.Sprintf("error: command not in allowlist: %q", cmd), 1
+	}
+	// 7L: Block destructive git commands that can cause data loss.
+	if blocked, msg := isDestructiveGit(cmd); blocked {
+		return msg, 1
+	} else if msg != "" {
+		// Non-blocking warning — prepend to output so model sees it.
+		defer func() { output = msg + "\n" + output }()
 	}
 	if timeoutSec <= 0 {
 		timeoutSec = defaultTimeout
@@ -377,6 +443,13 @@ func (t *AgentToolkit) EditFile(path, oldString, newString string) error {
 	abs, err := t.safePath(path)
 	if err != nil {
 		return err
+	}
+	// 7J: read-before-write gate — must read file first to know its actual contents.
+	t.readFilesMu.Lock()
+	hasRead := t.readFiles[abs]
+	t.readFilesMu.Unlock()
+	if !hasRead {
+		return fmt.Errorf("edit_file: you must read_file(%q) first before editing it — read the file to see its actual contents", path)
 	}
 	t.fileMu.Lock()
 	defer t.fileMu.Unlock()
