@@ -62,84 +62,96 @@ type Intent struct {
 
 // ── Model preference lists ────────────────────────────────────────────────────
 // Each tier lists models in priority order (cloud first, local fallback).
-// Cloud model names require the ":cloud" or ":Nb-cloud" suffix for Ollama Cloud API.
+// Cloud models are those available on Ollama Cloud (ollama.com/search?c=cloud).
 //
-// SWE-bench Verified scores (March 2026):
-//   glm-5 77.8% · glm-4.7 73.8% · devstral-2 72.2% · kimi-k2-thinking 71.3%
-//   qwen3-coder 480B 69.6% · devstral-small-2 68.0%
+// Current Ollama Cloud models (March 2026):
+//   glm-5, glm-4.7, glm-4.6, devstral-2, devstral-small-2, qwen3.5 (0.8b-122b),
+//   qwen3-coder-next, qwen3-next, qwen3-vl, kimi-k2.5, minimax-m2.5, minimax-m2,
+//   minimax-m2.1, cogito-2.1, nemotron-3-super, nemotron-3-nano, deepseek-v3.2,
+//   ministral-3, rnj-1, gemini-3-flash-preview
+//
+// SWE-bench Verified scores:
+//   glm-5 77.8% · glm-4.7 73.8% · qwen3.5:122b 72.4% · devstral-2 72.2%
+//   devstral-small-2 68.0% · qwen3.5:35b ~65%
+//
+// Tool use (BFCL-V4): qwen3.5:122b 72.2% (best open-source for agents)
 //
 // Context windows:
-//   gemini-3-flash-preview 1M · qwen3-coder 256K (1M extrap.) · kimi-k2-thinking 256K
-//   devstral-2 256K · glm-5 198K · glm-4.7 200K · mistral-large-3 256K
+//   gemini-3-flash-preview 1M · qwen3.5 262K (1M extrap.) · qwen3-vl 262K
+//   devstral-2 256K · kimi-k2.5 256K · glm-5 198K · glm-4.7 200K
 var preferredModels = map[Tier][]string{
 	TierTrivial: {
 		// cloud — small fast models, good for definitions/lookups
-		"gemma3:4b", "ministral-3:3b", "rnj-1:8b", "gemma3:1b",
+		"qwen3.5:4b", "ministral-3:3b", "rnj-1:8b", "qwen3.5:2b",
 		// local
 		"qwen2.5-coder:1.5b", "qwen2.5-coder:0.5b", "llama3.2:1b", "phi3:mini", "gemma2:2b",
 	},
 	TierFast: {
 		// cloud — mid-size, good for short code questions
-		// devstral-small-2 = 68% SWE-bench at 24B, 256K ctx — best fast coding model
-		"devstral-small-2:24b-cloud", "gemma3:12b", "gpt-oss:20b-cloud",
-		"ministral-3:8b", "qwen3-coder-next:cloud",
+		// qwen3.5:27b: 72.4% SWE-bench at 27B MoE, 262K ctx, strong tool use
+		// devstral-small-2: 68% SWE-bench at 24B, 256K ctx
+		"qwen3.5:27b", "devstral-small-2:24b-cloud", "nemotron-3-nano:30b",
+		"qwen3.5:9b", "ministral-3:8b", "qwen3-coder-next:cloud",
 		// local
 		"qwen2.5-coder:7b", "llama3.2:3b", "phi3:3.8b", "gemma2:9b",
 	},
 	TierCode: {
-		// cloud — coding-specialist models ranked by SWE-bench Verified score
+		// cloud — coding-specialist models ranked by SWE-bench + tool use
 		// glm-5: 77.8% SWE-bench (#1 open model), 198K ctx, 744B/40B active MoE
+		// qwen3.5:122b: 72.4% SWE-bench, 72.2% BFCL-V4 (best tool use), 262K ctx
 		// devstral-2: 72.2% SWE-bench, 256K ctx, 123B dense, agentic multi-file
-		// qwen3-coder: 69.6% SWE-bench, 256K ctx (1M extrap.), 480B/35B active MoE
-		"glm-5:cloud", "devstral-2:123b-cloud", "qwen3-coder:480b-cloud",
-		"glm-4.7:cloud", "kimi-k2.5:cloud", "gpt-oss:120b-cloud",
+		"glm-5:cloud", "qwen3.5:122b", "devstral-2:123b-cloud",
+		"glm-4.7:cloud", "kimi-k2.5:cloud", "qwen3.5:35b",
 		"minimax-m2.5:cloud", "qwen3-coder-next:cloud",
 		// local fallbacks (bare names)
-		"glm-5", "devstral-2:123b", "qwen3-coder:480b", "deepseek-v3.1:671b",
+		"glm-5", "devstral-2:123b", "deepseek-v3.1:671b",
 		// local
 		"qwen2.5-coder:32b", "qwen2.5-coder:14b", "deepseek-coder-v2:16b",
 		"deepseek-coder:6.7b", "codellama:13b",
 	},
 	TierReason: {
 		// cloud — reasoning/chain-of-thought models
-		// kimi-k2-thinking: 99% HumanEval, 44.9% HLE, 256K ctx, 200+ sequential tool calls
-		// gpt-oss:120b: matches o4-mini on MMLU/HLE/TauBench
+		// cogito-2.1: 671B, strong reasoning (Llama-based + deep thinking)
+		// qwen3.5:122b: 85.5% GPQA-Diamond, 86.1% MMLU-Pro
 		// glm-5: 92.7% AIME 2026, 86.0% GPQA-Diamond
-		"kimi-k2-thinking:cloud", "gpt-oss:120b-cloud", "glm-5:cloud",
-		"kimi-k2.5:cloud", "qwen3-next:80b-cloud", "deepseek-v3.1:671b-cloud",
+		"glm-5:cloud", "cogito-2.1:671b", "qwen3.5:122b",
+		"kimi-k2.5:cloud", "qwen3-next:80b-cloud", "deepseek-v3.2:cloud",
+		"nemotron-3-super:120b",
 		// local fallbacks
-		"kimi-k2-thinking", "deepseek-v3.1:671b",
+		"deepseek-v3.1:671b",
 		// local
 		"deepseek-r1:14b", "deepseek-r1:8b", "llama3.1:70b", "mixtral:8x7b", "llama3.3:70b",
 	},
 	TierHeavy: {
 		// cloud — largest models for hard multi-file tasks
+		// glm-5: 77.8% SWE-bench, 198K ctx — strongest open coding model
+		// qwen3.5:122b: 72.4% SWE-bench + best tool use (BFCL-V4 72.2%), 262K ctx
 		// glm-4.7: 73.8% SWE-bench, 30B/3B active MoE (fast!), 200K ctx
-		// mistral-large-3: 92% HumanEval pass@1, 256K ctx, 675B/41B active MoE
-		// minimax-m2.5: within 0.6% of Claude Opus on SWE-bench, cost-efficient
-		"glm-4.7:cloud", "mistral-large-3:675b-cloud", "devstral-2:123b-cloud",
-		"qwen3-coder:480b-cloud", "kimi-k2-thinking:cloud", "minimax-m2.5:cloud",
-		"kimi-k2.5:cloud", "glm-5:cloud",
+		"glm-5:cloud", "qwen3.5:122b", "glm-4.7:cloud",
+		"devstral-2:123b-cloud", "minimax-m2.5:cloud",
+		"kimi-k2.5:cloud", "cogito-2.1:671b", "deepseek-v3.2:cloud",
 		// local fallbacks
-		"devstral-2:123b", "qwen3-coder:480b", "deepseek-v3.1:671b",
+		"devstral-2:123b", "deepseek-v3.1:671b",
 		// local
 		"deepseek-r1:32b", "qwen2.5-coder:72b", "llama3.3:70b",
 	},
 	// TierMax uses ensemblePools — see EnsembleModels()
 	TierMax: {
 		// Single-model fallback when ensemble unavailable — use top all-round model
-		"glm-5:cloud", "kimi-k2-thinking:cloud", "qwen3-coder:480b-cloud",
-		"devstral-2:123b-cloud", "mistral-large-3:675b-cloud", "gpt-oss:120b-cloud",
-		"minimax-m2.5:cloud", "qwen3-coder-next:cloud",
+		"glm-5:cloud", "qwen3.5:122b", "devstral-2:123b-cloud",
+		"cogito-2.1:671b", "minimax-m2.5:cloud", "kimi-k2.5:cloud",
+		"qwen3-coder-next:cloud", "deepseek-v3.2:cloud",
 		// local fallbacks
-		"glm-5", "kimi-k2-thinking", "qwen3-coder:480b", "devstral-2:123b",
+		"glm-5", "devstral-2:123b",
 	},
 	TierVision: {
 		// cloud — multimodal models
 		// gemini-3-flash-preview: 1M ctx, 90.4% GPQA-Diamond — best vision on Ollama Cloud
-		// qwen3-vl: 256K ctx (1M extrap.), OS World SOTA, vision + tool use
+		// qwen3-vl: 262K ctx (1M extrap.), OS World SOTA, vision + tool use
+		// qwen3.5: native multimodal (unified vision-language), 262K ctx
 		// kimi-k2.5: native multimodal, vision-based coding
-		"gemini-3-flash-preview:cloud", "qwen3-vl:235b-cloud", "kimi-k2.5:cloud",
+		"gemini-3-flash-preview:cloud", "qwen3-vl:235b-cloud", "qwen3.5:122b",
+		"kimi-k2.5:cloud",
 		// local fallbacks
 		"qwen3-vl:235b",
 		// local
@@ -151,19 +163,19 @@ var preferredModels = map[Tier][]string{
 // Pool 1 = coding specialist, Pool 2 = reasoning, Pool 3 = large general.
 var ensemblePools = [][]string{
 	// Pool 1: coding specialists — ranked by SWE-bench Verified
-	{"glm-5:cloud", "devstral-2:123b-cloud", "qwen3-coder:480b-cloud", "glm-4.7:cloud", "qwen2.5-coder:32b"},
+	{"glm-5:cloud", "devstral-2:123b-cloud", "qwen3.5:122b", "glm-4.7:cloud", "qwen2.5-coder:32b"},
 	// Pool 2: reasoning / chain-of-thought
-	{"kimi-k2-thinking:cloud", "gpt-oss:120b-cloud", "deepseek-v3.1:671b-cloud", "kimi-k2-thinking", "llama3.3:70b"},
+	{"cogito-2.1:671b", "glm-5:cloud", "deepseek-v3.2:cloud", "nemotron-3-super:120b", "llama3.3:70b"},
 	// Pool 3: large general-purpose
-	{"mistral-large-3:675b-cloud", "minimax-m2.5:cloud", "kimi-k2.5:cloud", "glm-5", "gemma3:27b"},
+	{"qwen3.5:122b", "minimax-m2.5:cloud", "kimi-k2.5:cloud", "glm-5", "gemma3:27b"},
 }
 
 var defaultModels = map[Tier]string{
-	TierTrivial: "gemma3:4b",
-	TierFast:    "devstral-small-2:24b-cloud",  // 68% SWE-bench at 24B, 256K ctx
+	TierTrivial: "qwen3.5:4b",                  // fast, available on cloud
+	TierFast:    "qwen3.5:27b",                  // 72.4% SWE-bench at 27B MoE, 262K ctx
 	TierCode:    "glm-5:cloud",                  // 77.8% SWE-bench (#1 open model), 198K ctx
-	TierReason:  "kimi-k2-thinking:cloud",       // 99% HumanEval, 44.9% HLE, 256K ctx
-	TierHeavy:   "glm-4.7:cloud",               // 73.8% SWE-bench, 30B/3B active MoE, 200K ctx
+	TierReason:  "glm-5:cloud",                  // 92.7% AIME 2026, 86.0% GPQA-Diamond
+	TierHeavy:   "qwen3.5:122b",                // 72.4% SWE, 72.2% BFCL-V4 (best tool use), 262K ctx
 	TierMax:     "glm-5:cloud",                  // best all-round: 77.8% SWE + 92.7% AIME
 	TierVision:  "gemini-3-flash-preview:cloud", // 1M ctx, 90.4% GPQA-Diamond
 }
@@ -376,10 +388,13 @@ func ContextWindowFor(model string) int {
 		return 131072 // 128K — practical cap even though model supports 1M
 	case strings.Contains(lower, "devstral-2"),
 		strings.Contains(lower, "qwen3-coder"),
+		strings.Contains(lower, "qwen3.5"),
+		strings.Contains(lower, "qwen3-vl"),
 		strings.Contains(lower, "kimi-k2"),
-		strings.Contains(lower, "mistral-large-3"),
-		strings.Contains(lower, "deepseek-v3.1"):
-		return 65536 // 64K — these support 256K but 64K balances RAM/speed
+		strings.Contains(lower, "cogito-2.1"),
+		strings.Contains(lower, "deepseek-v3"),
+		strings.Contains(lower, "nemotron-3"):
+		return 65536 // 64K — these support 256K+ but 64K balances RAM/speed
 	case strings.Contains(lower, "glm-5"),
 		strings.Contains(lower, "glm-4.7"),
 		strings.Contains(lower, "deepseek-r1:70b"),
