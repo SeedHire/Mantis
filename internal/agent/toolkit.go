@@ -101,6 +101,41 @@ func isDestructiveGit(cmd string) (bool, string) {
 	return false, ""
 }
 
+// suggestDedicatedTool detects bash commands that should use dedicated tools.
+// Returns a suggestion string if a better tool exists, empty string otherwise.
+func suggestDedicatedTool(cmd string) string {
+	trimmed := strings.TrimSpace(cmd)
+	lower := strings.ToLower(trimmed)
+
+	// File reading — use read_file instead.
+	for _, prefix := range []string{"cat ", "head ", "tail "} {
+		if strings.HasPrefix(lower, prefix) {
+			return "⚡ HINT: Use read_file instead of " + strings.Fields(trimmed)[0] + " for better results. read_file handles line ranges and path safety."
+		}
+	}
+	// File editing — use edit_file instead.
+	for _, prefix := range []string{"sed ", "awk "} {
+		if strings.HasPrefix(lower, prefix) {
+			return "⚡ HINT: Use edit_file or multi_edit_file instead of " + strings.Fields(trimmed)[0] + ". Dedicated tools are atomic, reversible, and validated."
+		}
+	}
+	// File writing — use write_file instead.
+	if strings.Contains(lower, "echo ") && strings.Contains(lower, ">") {
+		return "⚡ HINT: Use write_file instead of echo redirection. write_file creates directories and is tracked by the undo system."
+	}
+	if strings.Contains(lower, "heredoc") || strings.Contains(lower, "<<") {
+		return "⚡ HINT: Use write_file instead of heredoc. write_file is tracked and reversible."
+	}
+	// File search — use search_codebase instead.
+	if strings.HasPrefix(lower, "grep ") || strings.HasPrefix(lower, "rg ") {
+		return "⚡ HINT: Use search_codebase with search_type='symbol' or 'path' instead of grep/rg. It supports semantic search."
+	}
+	if strings.HasPrefix(lower, "find ") && !strings.Contains(lower, "-exec") {
+		return "⚡ HINT: Use search_codebase with search_type='path' instead of find. It filters ignored paths automatically."
+	}
+	return ""
+}
+
 // allowedPrefixes is the bash command allowlist (prefix matching).
 // Covers build tools, package managers, Docker, Make, diagnostics, and VCS.
 var allowedPrefixes = []string{
@@ -279,6 +314,10 @@ func isServerCmd(cmd string) bool {
 func (t *AgentToolkit) RunBash(cmd string, timeoutSec int) (output string, exitCode int) {
 	if !isAllowedCmd(cmd) {
 		return fmt.Sprintf("error: command not in allowlist: %q", cmd), 1
+	}
+	// 7O: Suggest dedicated tools when bash is used for file operations.
+	if suggestion := suggestDedicatedTool(cmd); suggestion != "" {
+		defer func() { output = suggestion + "\n" + output }()
 	}
 	// 7L: Block destructive git commands that can cause data loss.
 	if blocked, msg := isDestructiveGit(cmd); blocked {

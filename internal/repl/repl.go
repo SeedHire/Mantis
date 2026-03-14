@@ -34,6 +34,7 @@ import (
 	"github.com/seedhire/mantis/internal/keyring"
 	"github.com/seedhire/mantis/internal/parser"
 	"github.com/seedhire/mantis/internal/nl"
+	"github.com/seedhire/mantis/internal/notify"
 	"github.com/seedhire/mantis/internal/ollama"
 	"github.com/seedhire/mantis/internal/pipeline"
 	"github.com/seedhire/mantis/internal/router"
@@ -303,6 +304,8 @@ func Run(cfg Config) error {
 	sess := session.New()
 	approvalCache := NewApprovalCache()           // permission caching: remembers approved dirs across turns
 	permMode := ModeDefault                       // 7D: permission mode (default/auto-edit/plan)
+	effortLevel := EffortMedium                   // 7G: thinking/effort control
+	notifier := notify.New()                      // 7P: desktop notifications for slow tasks
 	opLog := NewOperationLog(mantisDir)           // operation log: enables /undo across turns
 	usageTracker := usage.New()
 	tlog := telemetry.New()
@@ -415,6 +418,8 @@ func Run(cfg Config) error {
 		readline.PcItem("/revert"),
 		readline.PcItem("/keys"),
 		readline.PcItem("/mode"),
+		readline.PcItem("/effort"),
+		readline.PcItem("/notify"),
 		readline.PcItem("/quit"),
 	)
 
@@ -530,7 +535,7 @@ func Run(cfg Config) error {
 		// Slash commands.
 		if strings.HasPrefix(input, "/") {
 			evLog.RecordSlashCommand(turn, strings.Fields(input)[0])
-			if quit := handleSlashCommand(input, sess, b, &messages, client, &brainContext, &planMode, cfg, webFetcher, opLog, embStore, snapStore, &permMode, rl); quit {
+			if quit := handleSlashCommand(input, sess, b, &messages, client, &brainContext, &planMode, cfg, webFetcher, opLog, embStore, snapStore, &permMode, rl, &effortLevel, notifier); quit {
 				break
 			}
 			setPlanPrompt()
@@ -842,10 +847,16 @@ func Run(cfg Config) error {
 					printWrittenFiles(wf)
 				}
 				messages = append(messages, ollama.Message{Role: "assistant", Content: agentResp})
-				// Skip verifyAndFix: the fix agent already investigated the build error
-				// using tools. Calling autofix.Check here detects project type from the
-				// directory (e.g. package.json in a Node project even when the error was
-				// in a Makefile) and triggers unrelated checks that compound bad edits.
+				// Quick post-fix verification: re-run the build command to check if
+				// the fix actually worked. We skip autofix.Check (which can misdetect
+				// project type), but still confirm the build passes.
+				if len(wf) > 0 {
+					if postCheck := postFixVerify(root); postCheck != "" {
+						fmt.Printf("%s  ⚠ build still failing after fix — %s%s\n", colorGold, postCheck, colorReset)
+					} else {
+						fmt.Printf("%s  ✓ build passing%s\n", colorGreen, colorReset)
+					}
+				}
 				sess.Add(model, intent.Tier, agentPT, agentCT, hasImage)
 
 				var writtenPaths []string
@@ -1531,7 +1542,7 @@ singleModel:
 }
 
 func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
-	messages *[]interface{}, client *ollama.Client, brainContext *string, planMode *bool, cfg Config, webFetcher *web.Fetcher, oplog *OperationLog, embStore *embeddings.Store, snapStore *snapshot.Store, permMode *PermissionMode, rl *readline.Instance) (quit bool) {
+	messages *[]interface{}, client *ollama.Client, brainContext *string, planMode *bool, cfg Config, webFetcher *web.Fetcher, oplog *OperationLog, embStore *embeddings.Store, snapStore *snapshot.Store, permMode *PermissionMode, rl *readline.Instance, effort *EffortLevel, notif *notify.Notifier) (quit bool) {
 
 	parts := strings.Fields(input)
 	cmd := parts[0]
@@ -1585,6 +1596,46 @@ func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
 					rl.SetPrompt(newPrompt)
 				}
 				fmt.Printf("  %s● mode set to %s%s\n\n", colorGold, *permMode, colorReset)
+			}
+		}
+	case "/effort":
+		if len(parts) < 2 {
+			fmt.Printf("  current effort: \033[1m%s\033[0m\n", *effort)
+			fmt.Println("  usage: /effort <low|medium|high>")
+			fmt.Println("    low    — fast models, skip thinking, quick responses")
+			fmt.Println("    medium — default routing (recommended)")
+			fmt.Println("    high   — reasoning models, extended thinking")
+			fmt.Println()
+		} else {
+			level, ok := ParseEffortLevel(parts[1])
+			if !ok {
+				fmt.Printf("  unknown effort %q — use low, medium, or high\n\n", parts[1])
+			} else {
+				*effort = level
+				fmt.Printf("  %s● effort set to %s%s\n\n", colorGold, *effort, colorReset)
+			}
+		}
+	case "/notify":
+		if notif == nil {
+			fmt.Printf("  %snotifications not available in this mode%s\n\n", colorDim, colorReset)
+		} else if len(parts) < 2 {
+			state := "off"
+			if notif.IsEnabled() {
+				state = "on"
+			}
+			fmt.Printf("  notifications: \033[1m%s\033[0m\n", state)
+			fmt.Println("  usage: /notify on|off")
+			fmt.Println()
+		} else {
+			switch strings.ToLower(parts[1]) {
+			case "on", "true", "1":
+				notif.SetEnabled(true)
+				fmt.Printf("  %s● notifications enabled%s\n\n", colorGold, colorReset)
+			case "off", "false", "0":
+				notif.SetEnabled(false)
+				fmt.Printf("  %s● notifications disabled%s\n\n", colorDim, colorReset)
+			default:
+				fmt.Printf("  unknown value %q — use on or off\n\n", parts[1])
 			}
 		}
 	case "/cost":
@@ -3053,6 +3104,65 @@ func captureBuildError(input, root string) string {
 	return fmt.Sprintf("[Mantis auto-ran `%s` and captured this error output]\n```\n%s\n```", cmdToRun, strings.TrimSpace(output))
 }
 
+// postFixVerify detects the project type and runs the appropriate build command
+// to check if the fix agent's changes actually resolved the error. Returns ""
+// if the build passes or the project type can't be detected, otherwise returns
+// a short error summary.
+func postFixVerify(root string) string {
+	// Detect project type by checking for common files.
+	checks := []struct {
+		file string
+		cmd  string
+	}{
+		{"go.mod", "go build ./..."},
+		{"package.json", "npm run build --if-present 2>&1 || true"},
+		{"Cargo.toml", "cargo check"},
+		{"Makefile", "make build"},
+		{"requirements.txt", "python -c \"import importlib; print('ok')\""},
+		{"pyproject.toml", "python -c \"import importlib; print('ok')\""},
+	}
+
+	var cmdToRun string
+	for _, c := range checks {
+		if _, err := os.Stat(filepath.Join(root, c.file)); err == nil {
+			cmdToRun = c.cmd
+			break
+		}
+	}
+	if cmdToRun == "" {
+		return ""
+	}
+
+	// For Python projects, try to actually run the entry point.
+	if strings.HasPrefix(cmdToRun, "python") {
+		// Check for common entry points.
+		for _, entry := range []string{"run.py", "app.py", "main.py", "manage.py"} {
+			if _, err := os.Stat(filepath.Join(root, entry)); err == nil {
+				cmdToRun = fmt.Sprintf("python %s --help 2>&1 || python -c \"exec(open('%s').read())\" 2>&1", entry, entry)
+				break
+			}
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sh", "-c", cmdToRun)
+	cmd.Dir = root
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		output := out.String()
+		// Extract just the last error line for a concise message.
+		lines := strings.Split(strings.TrimSpace(output), "\n")
+		if len(lines) > 3 {
+			lines = lines[len(lines)-3:]
+		}
+		return strings.Join(lines, " | ")
+	}
+	return ""
+}
+
 // fixAgentTools returns a minimal set of tools for the single-agent fix loop.
 func fixAgentTools() []ollama.Tool {
 	return []ollama.Tool{
@@ -3142,6 +3252,11 @@ func fixAgentAllowedCmd(cmd string) bool {
 		// Shell diagnostics
 		"cat ", "head ", "tail ", "ls ", "find ", "grep ",
 		"pwd", "which ", "echo ", "wc ", "env",
+		// Virtual environment
+		"pip install -r", "pip3 install -r",
+		"source ", ". ",
+		// cd prefix (cmd.Dir handles cwd, but models chain cd && ...)
+		"cd ",
 	}
 	for _, prefix := range allowed {
 		if strings.HasPrefix(trimmed, prefix) {
@@ -3294,8 +3409,8 @@ func dispatchFixTool(root, toolName string, argsRaw json.RawMessage) string {
 		cmd.Stderr = &out
 		err := cmd.Run()
 		output := out.String()
-		if len(output) > 4000 {
-			output = output[:4000] + "\n… (truncated)"
+		if len(output) > 8000 {
+			output = output[:8000] + "\n… (truncated)"
 		}
 		if err != nil {
 			return fmt.Sprintf("exit code: non-zero\n%s", output)
@@ -3376,8 +3491,8 @@ func dispatchFixTool(root, toolName string, argsRaw json.RawMessage) string {
 		output := out.String()
 		// Make paths relative to root.
 		output = strings.ReplaceAll(output, root+"/", "")
-		if len(output) > 4000 {
-			output = output[:4000] + "\n… (truncated)"
+		if len(output) > 8000 {
+			output = output[:8000] + "\n… (truncated)"
 		}
 		if output == "" {
 			return "no matches found"
@@ -3420,11 +3535,16 @@ WORKFLOW:
 KEY RULES:
 - NEVER tell the user to run a command. Run it yourself.
 - NEVER ask for more information. Investigate with tools.
+- If a ModuleNotFoundError or "cannot find module" appears, install the missing package FIRST:
+  Python: run_command pip install <package> (or pip install -r requirements.txt)
+  Node: run_command npm install <package> (or npm install)
+  Then re-run the build to verify.
 - If a package can't be installed (network error), replace it with a built-in alternative.
 - After each fix, ALWAYS re-run the build to verify.
 - Use edit_file for surgical changes to existing files.
 - Use write_file to create new files that are missing.
 - Use search_files to find imports, usages, and definitions.
+- Read requirements.txt / package.json early to understand project dependencies.
 - After creating Node/TS projects, ALWAYS run ` + "`npm install`" + ` then ` + "`npm run build`" + ` to verify.
 
 ANTI-BLOAT RULES — follow strictly:
@@ -3549,7 +3669,9 @@ Available tools:
 IMPORTANT: Always run the failing command first to see the actual error, then read relevant files, then apply the fix.
 IMPORTANT: After fixing, run the build command AGAIN to check if there are more errors. Keep iterating until the build passes.
 IMPORTANT: Use edit_file to modify existing files (targeted old→new replacement). Use write_file to create new files.
-IMPORTANT: If a dependency can't be installed, replace it with built-in alternatives (e.g. fetch instead of axios, native WebSocket instead of socket.io).
+IMPORTANT: If the error is ModuleNotFoundError or "cannot find module", install the missing package FIRST with run_command: pip install <pkg> or npm install <pkg>. Check requirements.txt / package.json early.
+IMPORTANT: If a dependency can't be installed (network error), replace it with built-in alternatives (e.g. fetch instead of axios, native WebSocket instead of socket.io).
+IMPORTANT: Use read_file instead of cat/head/tail. Use edit_file instead of sed/awk. Use search_files instead of grep. Use write_file instead of echo redirection. Only use run_command for build/test/install commands that REQUIRE shell execution.
 After investigation, provide corrected files using edit_file/write_file calls or fenced code blocks with the filepath: ` + "```lang:filepath"
 
 	agentMsgs := make([]interface{}, 0, len(messages)+3)
@@ -4141,6 +4263,8 @@ func printHelp() {
 		{"/decision <text>", "log an architecture decision"},
 		{"/keys", "manage API keys (add/delete/tag)"},
 		{"/mode [mode]", "set permission mode (default|auto-edit|plan)"},
+		{"/effort [level]", "set thinking effort (low|medium|high)"},
+		{"/notify on|off", "toggle desktop notifications for slow tasks"},
 		{"/telemetry on|off", "enable / disable anonymous usage upload"},
 		{"/version", "show current version"},
 		{"/quit", "exit  (also Ctrl+C)"},
@@ -5076,7 +5200,8 @@ func runWithScanner(cfg Config, client *ollama.Client, sess *session.Session,
 		}
 		if strings.HasPrefix(input, "/") {
 			scannerPermMode := ModeDefault
-			if quit := handleSlashCommand(input, sess, b, &messages, client, &scannerBrainCtx, &scannerPlanMode, cfg, webFetcher, nil, nil, nil, &scannerPermMode, nil); quit {
+			scannerEffort := EffortMedium
+			if quit := handleSlashCommand(input, sess, b, &messages, client, &scannerBrainCtx, &scannerPlanMode, cfg, webFetcher, nil, nil, nil, &scannerPermMode, nil, &scannerEffort, nil); quit {
 				break
 			}
 			continue

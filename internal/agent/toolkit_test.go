@@ -439,6 +439,35 @@ func TestMultiEditFile_ReadBeforeWriteGate(t *testing.T) {
 	}
 }
 
+// ── suggestDedicatedTool ──────────────────────────────────────────────────────
+
+func TestSuggestDedicatedTool(t *testing.T) {
+	cases := []struct {
+		cmd      string
+		hasSugg  bool
+	}{
+		{"cat main.go", true},
+		{"head -20 file.py", true},
+		{"sed -i 's/old/new/' file.go", true},
+		{"grep -r TODO .", true},
+		{"rg pattern src/", true},
+		{"find . -name '*.go'", true},
+		{"echo 'data' > file.txt", true},
+		{"go test ./...", false},
+		{"git status", false},
+		{"npm run build", false},
+	}
+	for _, tc := range cases {
+		got := suggestDedicatedTool(tc.cmd)
+		if tc.hasSugg && got == "" {
+			t.Errorf("suggestDedicatedTool(%q) = empty, want suggestion", tc.cmd)
+		}
+		if !tc.hasSugg && got != "" {
+			t.Errorf("suggestDedicatedTool(%q) = %q, want empty", tc.cmd, got)
+		}
+	}
+}
+
 // ── ShouldRunMultiAgent ───────────────────────────────────────────────────────
 
 func TestShouldRunMultiAgent(t *testing.T) {
