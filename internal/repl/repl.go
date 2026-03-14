@@ -257,6 +257,8 @@ func Run(cfg Config) error {
 		if err == nil && len(models) > 0 {
 			availableModels = models
 			router.ResolveAll(models)
+			// Show discovered model assignments.
+			printModelSummary()
 		}
 	}
 
@@ -4400,6 +4402,28 @@ func printBanner() {
 		fmt.Println(l)
 	}
 	fmt.Printf("%s  AI coding assistant · free · local-first%s\n\n", colorDim, colorReset)
+}
+
+// printModelSummary shows a compact one-line summary of resolved models.
+func printModelSummary() {
+	summary := router.ResolvedSummary()
+	// Show key tiers: code, heavy, fast, vision
+	pairs := []struct{ label, tier string }{
+		{"code", "code"}, {"heavy", "heavy"}, {"fast", "fast"}, {"vision", "vision"},
+	}
+	var parts []string
+	seen := map[string]bool{}
+	for _, p := range pairs {
+		m := summary[p.tier]
+		if m == "" || seen[m] {
+			continue
+		}
+		seen[m] = true
+		parts = append(parts, fmt.Sprintf("%s (%s)", m, p.label))
+	}
+	if len(parts) > 0 {
+		fmt.Printf("\033[38;5;244m● models: %s\033[0m\n", strings.Join(parts, " · "))
+	}
 }
 
 func printHelp() {

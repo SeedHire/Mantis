@@ -197,12 +197,25 @@ var (
 )
 
 // ResolveAll picks the best available model for every tier from a live model list.
+// Phase 1: trait-based auto-discovery scores models by benchmarks per tier.
+// Phase 2: legacy preference lists fill any gaps as fallback.
 func ResolveAll(available []ollama.ModelInfo) {
 	set := buildSet(available)
 	allTiers := []Tier{TierTrivial, TierFast, TierCode, TierReason, TierHeavy, TierMax, TierVision}
 	resolvedModelsMu.Lock()
 	defer resolvedModelsMu.Unlock()
+
+	// Phase 1: trait-based auto-discovery (primary).
+	discovered := DiscoverBest(available)
+	for tier, model := range discovered {
+		resolvedModels[tier] = model
+	}
+
+	// Phase 2: fill gaps with legacy preference lists (secondary fallback).
 	for _, tier := range allTiers {
+		if resolvedModels[tier] != "" {
+			continue
+		}
 		if chosen := pickFromPrefs(preferredModels[tier], set, available); chosen != "" {
 			resolvedModels[tier] = chosen
 		} else if chosen := pickBySize(available, tier); chosen != "" {
@@ -379,9 +392,14 @@ func SetResolved(tier Tier, model string) {
 }
 
 // ContextWindowFor returns the recommended NumCtx for the given model name.
-// Models with large advertised context windows get larger NumCtx values.
-// Defaults to 32768 for unknown/small models.
+// First checks the traits database for a known PracticalCtx, then falls back
+// to hardcoded string matching. Defaults to 32768 for unknown/small models.
 func ContextWindowFor(model string) int {
+	// Check traits database first — auto-covers new model families.
+	if traits := matchTraits(model); traits != nil && traits.PracticalCtx > 0 {
+		return traits.PracticalCtx
+	}
+	// Legacy string-matching fallback.
 	lower := strings.ToLower(model)
 	switch {
 	case strings.Contains(lower, "gemini-3-flash"):

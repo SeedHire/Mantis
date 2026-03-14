@@ -1,0 +1,109 @@
+name: Update Model Registry
+
+on:
+  schedule:
+    # Run every Monday at 06:00 UTC — catches weekly model changes
+    - cron: "0 6 * * 1"
+  workflow_dispatch: # Allow manual trigger
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check-models:
+    name: Check Ollama Cloud Models
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+
+      - name: Fetch current Ollama Cloud model list
+        id: fetch
+        run: |
+          # Fetch the Ollama Cloud search page and extract model names.
+          # The /api/tags endpoint is only available with a running Ollama server,
+          # so we scrape the public search page for cloud models instead.
+          curl -sL "https://ollama.com/search?c=cloud" -o /tmp/cloud_page.html
+
+          # Extract model names from the page (href="/library/MODEL_NAME")
+          grep -oP 'href="/library/\K[^"]+' /tmp/cloud_page.html | sort -u > /tmp/cloud_models.txt
+
+          echo "=== Current Ollama Cloud Models ==="
+          cat /tmp/cloud_models.txt
+
+          # Extract known families from models.go
+          grep -oP "Family:\s*\"\K[^\"]+" internal/router/models.go | sort -u > /tmp/known_families.txt
+
+          echo ""
+          echo "=== Known Model Families ==="
+          cat /tmp/known_families.txt
+
+          # Find cloud models not covered by any known family prefix
+          missing=""
+          while IFS= read -r model; do
+            matched=false
+            while IFS= read -r family; do
+              if [[ "$model" == "$family"* ]]; then
+                matched=true
+                break
+              fi
+            done < /tmp/known_families.txt
+            if [ "$matched" = "false" ]; then
+              missing="$missing $model"
+            fi
+          done < /tmp/cloud_models.txt
+
+          missing=$(echo "$missing" | xargs) # trim whitespace
+          echo ""
+          echo "=== Unmatched Cloud Models ==="
+          echo "${missing:-none}"
+
+          if [ -n "$missing" ]; then
+            echo "has_new=true" >> "$GITHUB_OUTPUT"
+            echo "new_models=$missing" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_new=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create issue for new models
+        if: steps.fetch.outputs.has_new == 'true'
+        run: |
+          MODELS="${{ steps.fetch.outputs.new_models }}"
+          BODY="The following Ollama Cloud models are not covered by any known family in \`internal/router/models.go\`:
+
+          \`\`\`
+          $MODELS
+          \`\`\`
+
+          **Action needed**: Add \`ModelTraits\` entries for these model families so they can be auto-discovered by the router.
+
+          Each entry needs: Family prefix, SWE-bench %, BFCL-V4 tool-use %, GPQA-Diamond %, context window, and whether it's multimodal.
+
+          _This issue was auto-created by the update-models workflow._"
+
+          # Check if a similar issue already exists
+          EXISTING=$(gh issue list --label "model-registry" --state open --json number --jq '.[0].number' || echo "")
+          if [ -n "$EXISTING" ]; then
+            echo "Updating existing issue #$EXISTING"
+            gh issue comment "$EXISTING" --body "$BODY"
+          else
+            gh issue create \
+              --title "New Ollama Cloud models need traits: $MODELS" \
+              --body "$BODY" \
+              --label "model-registry,automated"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify build still passes
+        run: |
+          go build ./...
+          go vet ./...
+          go test ./internal/router/...
