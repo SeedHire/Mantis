@@ -617,10 +617,17 @@ func Run(cfg Config) error {
 					userContent = userContent + "\n\n" + captured
 				}
 			}
-			// Inject build config files for any task that mentions build tools.
+			// Inject build config files (always includes manifests).
 			if buildFiles := injectBuildFiles(input, root); buildFiles != "" {
 				fmt.Printf("%s  ◉ loaded project files%s\n", colorDim, colorReset)
 				userContent = userContent + "\n\n" + buildFiles
+			}
+			// Auto-read source files mentioned in error messages.
+			if intent.TaskType == "fix" || strings.Contains(strings.ToLower(input), "error") || strings.Contains(strings.ToLower(input), "traceback") {
+				if errFiles := injectErrorSourceFiles(input, root); errFiles != "" {
+					fmt.Printf("%s  ● reading: %s%s\n", colorDim, extractFileNames(errFiles), colorReset)
+					userContent = userContent + "\n\n" + errFiles
+				}
 			}
 		}
 
@@ -779,8 +786,10 @@ func Run(cfg Config) error {
 		// Gives the model run_command + read_file tools so it can investigate
 		// and fix build/deployment errors autonomously, without the multi-agent gate.
 		// Also triggers on deploy/docker/make mentions regardless of task type.
-		needsAgent := !planMode && intent.TaskType == "fix" && intent.Tier == router.TierCode
-		if !needsAgent && intent.Tier == router.TierCode {
+		// Fix agent: activate for fix tasks at any tier (not just TierCode).
+		// Small models at TierFast can't fix errors well — they need file access.
+		needsAgent := !planMode && intent.TaskType == "fix"
+		if !needsAgent && intent.Tier >= router.TierCode {
 			lo := strings.ToLower(input)
 			for _, kw := range []string{"docker", "makefile", "make build", "deploy", "dockerfile", "compose", "kubernetes", "kubectl"} {
 				if strings.Contains(lo, kw) {
@@ -795,10 +804,15 @@ func Run(cfg Config) error {
 			needsAgent = false
 		}
 		if needsAgent {
-			fmt.Printf("%s  ◆ fix agent [%s] — investigating with tools%s\n", colorDim, model, colorReset)
+			// Use at least code-tier model for fix agent — fast-tier models can't use tools well.
+			fixModel := model
+			if intent.Tier < router.TierCode {
+				fixModel = router.ModelFor(router.TierCode)
+			}
+			fmt.Printf("%s  ◆ fix agent [%s] — investigating with tools%s\n", colorDim, fixModel, colorReset)
 			stopSpin := startSpinner(string(intent.TaskType))
 			agentCtx, agentCancel := context.WithTimeout(turnCtx, 10*time.Minute)
-			agentResp, agentPT, agentCT, agentOK := runFixAgent(agentCtx, client, model, messages, root)
+			agentResp, agentPT, agentCT, agentOK := runFixAgent(agentCtx, client, fixModel, messages, root)
 			agentCancel()
 			elapsed := stopSpin()
 
@@ -2478,17 +2492,24 @@ func buildSystemPrompt(brainCtx, skillsCtx string, tier router.Tier) string {
 	// ── Core identity & reasoning guidance ────────────────────────────────
 	// For trivial/fast tiers, use a compact prompt to fit small model context windows.
 	if tier <= router.TierFast {
-		sb.WriteString(`You are Mantis, an expert AI coding assistant.
+		sb.WriteString(`You are Mantis, an expert AI coding assistant working inside the user's project directory.
+- You have full knowledge of the project files — they are injected into your context automatically.
+- Read the injected project context carefully before answering. Never say "I can't read files" or ask the user to paste file contents.
+- If project manifest files (package.json, go.mod, requirements.txt, etc.) are present in context, use them to determine the language, framework, and how to run the project.
+- When fixing errors, look at ALL the injected source files to identify every problem at once — don't fix one issue at a time.
 - Be concise. Show code first, then explain briefly.
 - Format code with correct language tags.
 - Never invent function names — use exact signatures if known.
 - Never end with "Would you like me to..." — just answer and stop.
 `)
 	} else {
-		sb.WriteString(`You are Mantis, an expert AI coding assistant with deep knowledge of this project.
+		sb.WriteString(`You are Mantis, an expert AI coding assistant working inside the user's project directory.
+You have direct access to the project files — they are injected into your context automatically.
+NEVER say "I can't read files" or ask the user to paste file contents. You already have them.
 
 ## How to think
 - Break complex problems into steps before answering.
+- Read the injected project context (manifests, source files, README) carefully before answering.
 - State your assumptions explicitly.
 - When modifying code, explain what breaks if you're wrong.
 - If you are unsure about a function name or API, say so — never guess.
@@ -2634,7 +2655,10 @@ func contextMessageFor(ctx context.Context, input, root string, brainContext str
 	isProjectQ := strings.Contains(lower, "project") || strings.Contains(lower, "what is") ||
 		strings.Contains(lower, "what does") || strings.Contains(lower, "what are") ||
 		strings.Contains(lower, "overview") || strings.Contains(lower, "purpose") ||
-		strings.Contains(lower, "about this") || strings.Contains(lower, "describe")
+		strings.Contains(lower, "about this") || strings.Contains(lower, "describe") ||
+		strings.Contains(lower, "how to run") || strings.Contains(lower, "how do i run") ||
+		strings.Contains(lower, "how to start") || strings.Contains(lower, "how to setup") ||
+		strings.Contains(lower, "how to install")
 	isCodeQ := strings.Contains(lower, "function") || strings.Contains(lower, "symbol") ||
 		strings.Contains(lower, "import") || strings.Contains(lower, "package") ||
 		strings.Contains(lower, "implement") || strings.Contains(lower, "write") ||
@@ -2762,23 +2786,43 @@ func contextMessageFor(ctx context.Context, input, root string, brainContext str
 func injectBuildFiles(input, root string) string {
 	lower := strings.ToLower(input)
 
-	// Map of keyword → files to read if that keyword appears in the input.
+	// Always inject manifest files so the model knows the project language/framework.
+	manifests := []string{
+		"package.json", "go.mod", "Cargo.toml", "pyproject.toml",
+		"requirements.txt", "setup.py", "pom.xml", "build.gradle",
+		"Makefile", "docker-compose.yml",
+	}
+
+	// Additional keyword-triggered files.
 	type fileSet struct {
 		keywords []string
 		files    []string
 	}
 	sets := []fileSet{
-		{[]string{"make", "makefile"}, []string{"Makefile", "GNUmakefile", "makefile"}},
-		{[]string{"docker", "dockerfile", "compose", "container"}, []string{"Dockerfile", "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml", ".dockerignore"}},
-		{[]string{"npm", "node", "yarn", "pnpm", "package", "typescript", "tsc"}, []string{"package.json", "tsconfig.json"}},
-		{[]string{"go build", "go test", "go mod"}, []string{"go.mod"}},
-		{[]string{"cargo", "rust"}, []string{"Cargo.toml"}},
-		{[]string{"pip", "python", "requirements"}, []string{"requirements.txt", "setup.py", "pyproject.toml"}},
+		{[]string{"docker", "dockerfile", "compose", "container"}, []string{"Dockerfile", "docker-compose.yaml", "compose.yml", "compose.yaml", ".dockerignore"}},
+		{[]string{"npm", "node", "yarn", "pnpm", "package", "typescript", "tsc"}, []string{"tsconfig.json"}},
 		{[]string{"deploy", "kubernetes", "kubectl", "k8s"}, []string{"k8s/", "deployment.yaml", "service.yaml"}},
 	}
 
 	seen := make(map[string]bool)
 	var parts []string
+
+	// 1. Always inject manifest files that exist.
+	for _, f := range manifests {
+		seen[f] = true
+		path := filepath.Join(root, f)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		content := string(data)
+		if len(content) > 3000 {
+			content = content[:3000] + "\n… (truncated)"
+		}
+		parts = append(parts, fmt.Sprintf("[file: %s]\n```\n%s\n```", f, strings.TrimSpace(content)))
+	}
+
+	// 2. Keyword-triggered additional files.
 	for _, s := range sets {
 		matched := false
 		for _, kw := range s.keywords {
@@ -3446,6 +3490,93 @@ func readFileSnippet(path string, maxChars int) string {
 		return s[:maxChars] + "\n… (truncated)"
 	}
 	return s
+}
+
+// injectErrorSourceFiles extracts file paths from error messages (tracebacks, import errors, etc.)
+// and reads their content so the model can see what's actually in those files.
+func injectErrorSourceFiles(input, root string) string {
+	// Patterns that extract file paths from common error formats.
+	patterns := []*regexp.Regexp{
+		// Python: File "/path/to/file.py", line N
+		regexp.MustCompile(`File "([^"]+\.py)"`),
+		// Python: from module import X → resolve to module.py
+		regexp.MustCompile(`from\s+(\w+)\s+import`),
+		// Python: ImportError: cannot import name 'X' from 'module' (/path/to/file.py)
+		regexp.MustCompile(`from '(\w+)' \(([^)]+\.py)\)`),
+		// Go: /path/to/file.go:42:
+		regexp.MustCompile(`([^\s]+\.go):\d+:`),
+		// Node: at /path/to/file.js:42
+		regexp.MustCompile(`at\s+[^\s]*\(([^)]+\.[jt]sx?)`),
+		// Generic: src/something.ext or internal/something.ext
+		regexp.MustCompile(`((?:src|internal|lib|app)/[^\s:]+\.\w+)`),
+	}
+
+	seen := make(map[string]bool)
+	var files []string
+
+	for _, pat := range patterns {
+		matches := pat.FindAllStringSubmatch(input, -1)
+		for _, m := range matches {
+			for i := 1; i < len(m); i++ {
+				f := m[i]
+				if f == "" || seen[f] {
+					continue
+				}
+				seen[f] = true
+
+				// Try multiple resolution strategies.
+				var content string
+				for _, candidate := range resolveFilePath(f, root) {
+					if data, err := os.ReadFile(candidate); err == nil {
+						content = string(data)
+						if len(content) > 4000 {
+							content = content[:4000] + "\n… (truncated)"
+						}
+						break
+					}
+				}
+				if content != "" {
+					files = append(files, fmt.Sprintf("[source: %s]\n```\n%s\n```", f, strings.TrimSpace(content)))
+				}
+			}
+		}
+	}
+
+	if len(files) == 0 {
+		return ""
+	}
+	return "[Mantis auto-read these source files referenced in the error]\n" + strings.Join(files, "\n\n")
+}
+
+// resolveFilePath returns candidate absolute paths for a file reference.
+func resolveFilePath(f, root string) []string {
+	var candidates []string
+	// Absolute path.
+	if filepath.IsAbs(f) {
+		candidates = append(candidates, f)
+	}
+	// Relative to project root.
+	candidates = append(candidates, filepath.Join(root, f))
+	// Python module name → src/module.py, module.py.
+	if !strings.Contains(f, "/") && !strings.Contains(f, ".") {
+		candidates = append(candidates, filepath.Join(root, "src", f+".py"))
+		candidates = append(candidates, filepath.Join(root, f+".py"))
+	}
+	return candidates
+}
+
+// extractFileNames returns a comma-separated list of filenames from injected source content.
+func extractFileNames(injected string) string {
+	re := regexp.MustCompile(`\[source: ([^\]]+)\]`)
+	matches := re.FindAllStringSubmatch(injected, -1)
+	var names []string
+	for _, m := range matches {
+		names = append(names, m[1])
+	}
+	if len(names) == 0 {
+		return "source files"
+	}
+	return strings.Join(names, ", ")
 }
 
 func endSession(sess *session.Session, b *brain.Brain, messages []interface{}, embStore *embeddings.Store) {
