@@ -272,6 +272,55 @@ func (b *Brain) ReadBrain() string {
 	return b.readFile("BRAIN.md")
 }
 
+// IsBrainEmpty returns true if BRAIN.md is still the placeholder template.
+func (b *Brain) IsBrainEmpty() bool {
+	content := b.ReadBrain()
+	return content == "" ||
+		strings.Contains(content, "(Mantis will fill this in after your first session)") ||
+		strings.Contains(content, "(unknown — tell Mantis your stack")
+}
+
+// AutoPopulateBrain fills in BRAIN.md with detected project info if it's still
+// the placeholder template. Called on session start so the model always has context.
+func (b *Brain) AutoPopulateBrain(lang, framework, entryPoint, runCmd string) {
+	if !b.IsBrainEmpty() {
+		return
+	}
+	if lang == "" {
+		return // nothing detected — leave as-is
+	}
+
+	var sb strings.Builder
+	sb.WriteString("# BRAIN.md — Mantis Project Memory\n")
+	sb.WriteString(fmt.Sprintf("# Auto-populated on %s\n\n", time.Now().Format("2006-01-02")))
+	sb.WriteString("## Project\n")
+	sb.WriteString(fmt.Sprintf("Language: %s\n", lang))
+	if framework != "" {
+		sb.WriteString(fmt.Sprintf("Framework: %s\n", framework))
+	}
+	if entryPoint != "" {
+		sb.WriteString(fmt.Sprintf("Entry point: %s\n", entryPoint))
+	}
+	if runCmd != "" {
+		sb.WriteString(fmt.Sprintf("Run command: %s\n", runCmd))
+	}
+
+	sb.WriteString("\n## Stack\n")
+	sb.WriteString(fmt.Sprintf("%s", lang))
+	if framework != "" {
+		sb.WriteString(fmt.Sprintf(" + %s", framework))
+	}
+	sb.WriteString("\n")
+
+	sb.WriteString("\n## Current Phase\n(active development)\n")
+	sb.WriteString("\n## Active Context\n(session start)\n")
+	sb.WriteString("\n## Recent Decisions\n(none yet)\n")
+	sb.WriteString("\n## Rejected Approaches\n(none yet)\n")
+
+	path := filepath.Join(b.dir, "BRAIN.md")
+	_ = os.WriteFile(path, []byte(sb.String()), 0o644)
+}
+
 // GroundTruthEntry is a file entry in GROUND_TRUTH.json.
 type GroundTruthEntry struct {
 	Hash            string    `json:"hash"`

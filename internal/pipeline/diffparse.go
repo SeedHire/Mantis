@@ -186,9 +186,14 @@ func applyEdits(edits []EditBlock, root string) (modified []string, skipCount in
 
 	for _, edit := range edits {
 		relPath := edit.FilePath
+		// Strip absolute root prefix if model outputs full paths.
 		if filepath.IsAbs(relPath) {
-			skipCount++
-			continue
+			if rel, err := filepath.Rel(root, relPath); err == nil && !strings.HasPrefix(rel, "..") {
+				relPath = rel
+			} else {
+				skipCount++
+				continue
+			}
 		}
 		abs := filepath.Join(root, filepath.Clean(relPath))
 		if rel, err := filepath.Rel(root, abs); err != nil || strings.HasPrefix(rel, "..") {
@@ -300,8 +305,20 @@ func extractAndApplyChanges(text, root string) ([]string, []string) {
 		if relPath == "" {
 			continue
 		}
-		if filepath.IsAbs(relPath) || strings.HasPrefix(filepath.Clean(relPath), "..") {
+		// Strip absolute root prefix if model outputs full paths like /Users/.../project/src/file.py
+		if filepath.IsAbs(relPath) {
+			if rel, err := filepath.Rel(root, relPath); err == nil && !strings.HasPrefix(rel, "..") {
+				relPath = rel
+			} else {
+				continue // truly external path — skip
+			}
+		}
+		if strings.HasPrefix(filepath.Clean(relPath), "..") {
 			continue
+		}
+		// Strip shell command fragments that models sometimes output as paths.
+		if strings.Contains(relPath, " ") && !strings.Contains(relPath, string(filepath.Separator)) {
+			continue // "install -r requirements.txt" is not a file path
 		}
 
 		abs := filepath.Join(root, filepath.Clean(relPath))

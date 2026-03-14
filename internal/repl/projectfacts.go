@@ -42,6 +42,13 @@ func detectProjectFacts(root string) string {
 		}
 	}
 
+	// Dependency check (Python).
+	if lang == "Python" || lang == "Python 3" {
+		if deps := detectMissingDeps(root); deps != "" {
+			sb.WriteString(deps)
+		}
+	}
+
 	sb.WriteString("[/PROJECT FACTS]")
 	return sb.String()
 }
@@ -437,4 +444,87 @@ func readFileFull(path string) string {
 		return ""
 	}
 	return string(data)
+}
+
+// detectMissingDeps scans Python imports in src/ and compares against
+// requirements.txt. Returns a warning string listing missing packages.
+func detectMissingDeps(root string) string {
+	reqPath := filepath.Join(root, "requirements.txt")
+	if !fileExists(reqPath) {
+		return ""
+	}
+
+	// Parse requirements.txt to get installed package names.
+	installed := map[string]bool{}
+	reqData := readFileFull(reqPath)
+	for _, line := range strings.Split(reqData, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// Extract package name (before >=, ==, <, etc.)
+		name := line
+		for _, sep := range []string{">=", "<=", "==", "!=", "~=", ">", "<", "["} {
+			if idx := strings.Index(name, sep); idx > 0 {
+				name = name[:idx]
+			}
+		}
+		name = strings.TrimSpace(strings.ToLower(name))
+		// Normalize: flask-login → flask_login, Flask-SQLAlchemy → flask_sqlalchemy
+		normalized := strings.ReplaceAll(strings.ToLower(name), "-", "_")
+		installed[normalized] = true
+		installed[name] = true
+	}
+
+	// Scan Python files for third-party imports.
+	thirdParty := map[string]bool{}
+	// Standard library modules (common ones) — skip these.
+	stdlib := map[string]bool{
+		"os": true, "sys": true, "re": true, "json": true, "datetime": true,
+		"time": true, "math": true, "random": true, "collections": true,
+		"functools": true, "itertools": true, "pathlib": true, "typing": true,
+		"abc": true, "io": true, "enum": true, "dataclasses": true,
+		"decimal": true, "hashlib": true, "uuid": true, "logging": true,
+		"unittest": true, "pytest": true, "copy": true, "contextlib": true,
+	}
+
+	importRe := regexp.MustCompile(`(?m)^(?:from|import)\s+([\w.]+)`)
+	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(path, ".py") {
+			return nil
+		}
+		// Skip tests, venv, migrations.
+		rel, _ := filepath.Rel(root, path)
+		if strings.Contains(rel, "venv") || strings.Contains(rel, "migrations") {
+			return nil
+		}
+		data := readFileFull(path)
+		matches := importRe.FindAllStringSubmatch(data, -1)
+		for _, m := range matches {
+			pkg := strings.Split(m[1], ".")[0]
+			pkg = strings.ToLower(pkg)
+			if !stdlib[pkg] && pkg != "src" && pkg != "" {
+				thirdParty[pkg] = true
+			}
+		}
+		return nil
+	})
+
+	// Find missing packages.
+	var missing []string
+	for pkg := range thirdParty {
+		normalized := strings.ReplaceAll(pkg, "-", "_")
+		if !installed[pkg] && !installed[normalized] {
+			missing = append(missing, pkg)
+		}
+	}
+
+	if len(missing) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("[MISSING DEPENDENCIES — add these to requirements.txt]\n%s\n",
+		strings.Join(missing, ", "))
 }

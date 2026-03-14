@@ -265,6 +265,12 @@ func Run(cfg Config) error {
 	if !b.Exists() {
 		_ = b.Init()
 	}
+	// Auto-populate BRAIN.md if still placeholder — ensures model always knows the stack.
+	if b.IsBrainEmpty() {
+		lang, framework, runCmd := detectLangFramework(root)
+		entry := detectEntryPoint(root, lang)
+		b.AutoPopulateBrain(lang, framework, entry, runCmd)
+	}
 	brainContext := b.LoadHot() // 7.5: hot tier only; cold memory retrieved on-demand
 	conventions := verify.ParseConventions(b.ReadFile("CONVENTIONS.md"))
 
@@ -804,16 +810,22 @@ func Run(cfg Config) error {
 			continue
 		}
 
-		// ── Single-agent fix loop for code-tier fix/debug/deploy tasks ──────
-		// Gives the model run_command + read_file tools so it can investigate
-		// and fix build/deployment errors autonomously, without the multi-agent gate.
-		// Also triggers on deploy/docker/make mentions regardless of task type.
-		// Fix agent: activate for fix tasks at any tier (not just TierCode).
-		// Small models at TierFast can't fix errors well — they need file access.
-		needsAgent := !planMode && intent.TaskType == "fix"
-		if !needsAgent && intent.Tier >= router.TierCode {
+		// ── Tool-equipped agent for tasks that need file access ──────────────
+		// Activates for fix, implement, refactor, test, and explain tasks.
+		// Without this, the model can't read/write files and tells the user
+		// "I can't read files" or guesses instead of checking.
+		agentTaskTypes := map[string]bool{
+			"fix": true, "implement": true, "refactor": true, "test": true,
+		}
+		needsAgent := !planMode && agentTaskTypes[intent.TaskType]
+		// Also activate for explain/general at Code tier+ (needs file reading).
+		if !needsAgent && !planMode && intent.Tier >= router.TierCode {
+			needsAgent = true
+		}
+		// Activate for deploy/docker/make keywords regardless of tier.
+		if !needsAgent && !planMode {
 			lo := strings.ToLower(input)
-			for _, kw := range []string{"docker", "makefile", "make build", "deploy", "dockerfile", "compose", "kubernetes", "kubectl"} {
+			for _, kw := range []string{"docker", "makefile", "make build", "deploy", "dockerfile", "compose", "kubernetes", "kubectl", "how to run", "how to start", "how do i run"} {
 				if strings.Contains(lo, kw) {
 					needsAgent = true
 					break
@@ -831,18 +843,22 @@ func Run(cfg Config) error {
 			if intent.Tier < router.TierCode {
 				fixModel = router.ModelFor(router.TierCode)
 			}
-			fmt.Printf("%s  ◆ fix agent [%s] — investigating with tools%s\n", colorDim, fixModel, colorReset)
+			agentLabel := "agent"
+			if intent.TaskType == "fix" {
+				agentLabel = "fix agent"
+			}
+			fmt.Printf("%s  ◆ %s [%s] — investigating with tools%s\n", colorDim, agentLabel, fixModel, colorReset)
 			stopSpin := startSpinner(string(intent.TaskType))
 			agentCtx, agentCancel := context.WithTimeout(turnCtx, 10*time.Minute)
-			agentResp, agentPT, agentCT, agentOK := runFixAgent(agentCtx, client, fixModel, messages, root)
+			agentResp, agentPT, agentCT, agentOK := runFixAgent(agentCtx, client, fixModel, messages, root, intent.TaskType)
 			agentCancel()
 			elapsed := stopSpin()
 
 			if agentOK {
 				turnTok := agentPT + agentCT
 				_, _, sessTotal := sess.Totals()
-				fmt.Printf("%s◈ Mantis%s  %s[fix-agent · +%d tok · %.1fs · session: %d]%s\n",
-					colorCopper+colorBold, colorReset, colorDim, turnTok, elapsed.Seconds(), sessTotal+turnTok, colorReset)
+				fmt.Printf("%s◈ Mantis%s  %s[%s · +%d tok · %.1fs · session: %d]%s\n",
+					colorCopper+colorBold, colorReset, colorDim, agentLabel, turnTok, elapsed.Seconds(), sessTotal+turnTok, colorReset)
 				renderResponse(stripInternalBlocks(stripFileBlocks(agentResp)))
 
 				wf := extractAndWriteFilesWithApproval(agentResp, root, rl, approvalCache, opLog)
@@ -3572,14 +3588,33 @@ func runFixAgent(
 	model string,
 	messages []interface{},
 	root string,
+	taskType string,
 ) (string, int, int, bool) {
 	const maxIter = 12
 	tools := fixAgentTools()
 
-	// Inject a fix-agent system prompt that instructs iterative build→fix→rebuild.
-	fixSysPrompt := ollama.Message{
-		Role: "system",
-		Content: `You are an autonomous fix agent. You MUST run commands yourself — never ask the user to run them.
+	// Task-adaptive workflow preamble.
+	var workflowBlock string
+	switch taskType {
+	case "explain":
+		workflowBlock = `You are an autonomous coding agent. You MUST use tools to answer — never guess or ask the user for file contents.
+
+WORKFLOW:
+1. Read relevant files with read_file to understand the code
+2. Search for related symbols with search_files if needed
+3. Provide a clear, specific explanation based on what you actually read
+4. Reference exact line numbers and function names from the files you read`
+	case "implement", "refactor", "test":
+		workflowBlock = `You are an autonomous coding agent. You MUST run commands and read files yourself — never ask the user.
+
+WORKFLOW:
+1. Read the relevant files with read_file to understand the current code
+2. Make changes with edit_file (modify existing) or write_file (create new)
+3. Run the build/test command with run_command to verify your changes work
+4. If there are errors, read the error output, fix, and re-run
+5. Keep iterating until everything passes`
+	default: // "fix", "general", etc.
+		workflowBlock = `You are an autonomous fix agent. You MUST run commands yourself — never ask the user to run them.
 
 WORKFLOW:
 1. Run the failing build/deploy command with run_command to capture the ACTUAL error
@@ -3587,7 +3622,12 @@ WORKFLOW:
 3. Fix the issue with edit_file (modify existing) or write_file (create new)
 4. Run the build command AGAIN to check if it's fixed
 5. If there are MORE errors, repeat from step 2
-6. Keep iterating until the build passes or you've exhausted all options
+6. Keep iterating until the build passes or you've exhausted all options`
+	}
+
+	fixSysPrompt := ollama.Message{
+		Role:    "system",
+		Content: workflowBlock + `
 
 KEY RULES:
 - NEVER tell the user to run a command. Run it yourself.
@@ -3699,6 +3739,65 @@ func extractCapturedBuildOutput(messages []interface{}) string {
 	return ""
 }
 
+// extractErrorFilePaths pulls file paths from error messages in the conversation.
+// Used to pre-read source files so the fix agent sees actual code before fixing.
+func extractErrorFilePaths(messages []interface{}, root string) []string {
+	seen := map[string]bool{}
+	var paths []string
+
+	// Common error patterns that reference file paths.
+	filePatterns := []*regexp.Regexp{
+		regexp.MustCompile(`File "([^"]+\.py)"[, ]`),                          // Python tracebacks
+		regexp.MustCompile(`from ([\w.]+) import`),                            // Python imports
+		regexp.MustCompile(`(?:in|at) ([\w/]+\.(?:go|py|js|ts|rs))(?::\d+)?`), // Go/JS/Rust errors
+		regexp.MustCompile(`cannot import name '(\w+)' from '([\w.]+)'`),      // Python ImportError
+		regexp.MustCompile(`ModuleNotFoundError: No module named '([\w.]+)'`),  // Python missing module
+	}
+
+	for _, msg := range messages {
+		m, ok := msg.(ollama.Message)
+		if !ok || m.Role != "user" {
+			continue
+		}
+
+		for _, pat := range filePatterns {
+			matches := pat.FindAllStringSubmatch(m.Content, -1)
+			for _, match := range matches {
+				for i := 1; i < len(match); i++ {
+					candidate := match[i]
+					// Convert Python module paths to file paths.
+					if strings.Contains(candidate, ".") && !strings.Contains(candidate, "/") && !strings.HasSuffix(candidate, ".py") {
+						candidate = strings.ReplaceAll(candidate, ".", "/") + ".py"
+					}
+					// Strip leading src/ or project root.
+					candidate = strings.TrimPrefix(candidate, root+"/")
+					// Check if file exists.
+					abs := filepath.Join(root, candidate)
+					if _, err := os.Stat(abs); err == nil && !seen[candidate] {
+						seen[candidate] = true
+						paths = append(paths, candidate)
+					}
+					// Also try with src/ prefix.
+					if !strings.HasPrefix(candidate, "src/") {
+						srcPath := "src/" + candidate
+						abs2 := filepath.Join(root, srcPath)
+						if _, err := os.Stat(abs2); err == nil && !seen[srcPath] {
+							seen[srcPath] = true
+							paths = append(paths, srcPath)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Cap at 5 files to avoid overloading context.
+	if len(paths) > 5 {
+		paths = paths[:5]
+	}
+	return paths
+}
+
 // runTextFixAgent uses a text-based ReAct pattern for models that don't support
 // native tool calling. It injects tool descriptions into the system prompt and
 // parses tool calls from the model's text output. Uses StreamChat (streaming)
@@ -3745,6 +3844,26 @@ After investigation, provide corrected files using edit_file/write_file calls or
 			Content: "The actual build error is already captured above (see [Mantis auto-ran...] block). " +
 				"Fix ONLY what that specific error output describes. " +
 				"Do NOT assume a different cause. Do NOT reference files that are not mentioned in the error.",
+		})
+	}
+
+	// Pre-read files referenced in error messages so the model sees actual code
+	// before attempting fixes (prevents import whack-a-mole).
+	errorFiles := extractErrorFilePaths(messages, root)
+	if len(errorFiles) > 0 {
+		var fileContents strings.Builder
+		fileContents.WriteString("[Pre-read source files referenced in the error — use these to understand the ACTUAL code before fixing]\n\n")
+		for _, ef := range errorFiles {
+			content := dispatchFixTool(root, "read_file", json.RawMessage(fmt.Sprintf(`{"path":%q}`, ef)))
+			if !strings.HasPrefix(content, "error:") && len(content) > 0 {
+				fileContents.WriteString(fmt.Sprintf("=== %s ===\n%s\n\n", ef, content))
+			}
+		}
+		agentMsgs = append(agentMsgs, ollama.Message{
+			Role: "user",
+			Content: fileContents.String() +
+				"CRITICAL: Read ALL the source files above carefully. Fix ALL import errors at once based on what ACTUALLY exists in each file. " +
+				"Do NOT guess what a file exports — the actual exports are shown above.",
 		})
 	}
 
