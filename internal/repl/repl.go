@@ -32,6 +32,7 @@ import (
 	"github.com/seedhire/mantis/internal/graph"
 	"github.com/seedhire/mantis/internal/intel"
 	"github.com/seedhire/mantis/internal/keyring"
+	"github.com/seedhire/mantis/internal/mcp"
 	"github.com/seedhire/mantis/internal/parser"
 	"github.com/seedhire/mantis/internal/nl"
 	"github.com/seedhire/mantis/internal/notify"
@@ -420,6 +421,8 @@ func Run(cfg Config) error {
 		readline.PcItem("/mode"),
 		readline.PcItem("/effort"),
 		readline.PcItem("/notify"),
+		readline.PcItem("/execute"),
+		readline.PcItem("/mcp"),
 		readline.PcItem("/quit"),
 	)
 
@@ -1638,6 +1641,48 @@ func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
 				fmt.Printf("  unknown value %q — use on or off\n\n", parts[1])
 			}
 		}
+	case "/mcp":
+		if len(parts) < 2 {
+			fmt.Println("  usage: /mcp list|load")
+			fmt.Println("    list  — show connected MCP servers and tools")
+			fmt.Println("    load  — load .mcp.json and start servers")
+			fmt.Println()
+		} else {
+			switch parts[1] {
+			case "list":
+				mcpClient := mcp.NewMCPClient()
+				root, _ := os.Getwd()
+				_ = mcpClient.LoadConfig(context.Background(), root)
+				tools := mcpClient.Tools()
+				if len(tools) == 0 {
+					fmt.Printf("  %sno MCP servers connected (create .mcp.json to configure)%s\n\n", colorDim, colorReset)
+				} else {
+					for _, tool := range tools {
+						fmt.Printf("  %s%-20s%s %s(%s)%s\n", colorGold, tool.Name, colorReset, colorDim, tool.ServerName, colorReset)
+						if tool.Description != "" {
+							fmt.Printf("  %s  %s%s\n", colorDim, tool.Description, colorReset)
+						}
+					}
+					fmt.Println()
+				}
+				mcpClient.Close()
+			case "load":
+				root, _ := os.Getwd()
+				mcpClient := mcp.NewMCPClient()
+				if err := mcpClient.LoadConfig(context.Background(), root); err != nil {
+					fmt.Printf("  %s✗ %v%s\n\n", colorRed, err, colorReset)
+				} else {
+					names := mcpClient.ServerNames()
+					if len(names) == 0 {
+						fmt.Printf("  %sno servers in .mcp.json%s\n\n", colorDim, colorReset)
+					} else {
+						fmt.Printf("  %s● loaded %d MCP server(s): %s%s\n\n", colorGold, len(names), fmt.Sprintf("%v", names), colorReset)
+					}
+				}
+			default:
+				fmt.Printf("  unknown subcommand %q — use list or load\n\n", parts[1])
+			}
+		}
 	case "/cost":
 		fmt.Println(sess.Report())
 	case "/stats":
@@ -1751,10 +1796,22 @@ func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
 		}
 	case "/plan":
 		*planMode = true
+		*permMode = ModePlan
+		if rl != nil {
+			root, _ := os.Getwd()
+			rl.SetPrompt("\033[38;5;244m" + filepath.Base(root) + "\033[0m" + permMode.PromptSuffix() + " \033[38;5;214m❯\033[0m ")
+		}
 		fmt.Printf("%s● plan mode ON — read-only exploration, no file writes%s\n\n", colorGold, colorReset)
 		return false
-	case "/build":
+	case "/build", "/execute":
 		*planMode = false
+		*permMode = ModeDefault
+		if rl != nil {
+			root, _ := os.Getwd()
+			rl.SetPrompt("\033[38;5;244m" + filepath.Base(root) + "\033[0m \033[38;5;214m❯\033[0m ")
+		}
+		// Save plan to .mantis/PLAN.md if conversation has plan content.
+		savePlanFromConversation(*messages)
 		fmt.Printf("%s● build mode ON — full tool access, file writes enabled%s\n\n", colorGold, colorReset)
 		return false
 	case "/context":
@@ -4249,8 +4306,9 @@ func printHelp() {
 		{"/commit", "generate commit message, preview, commit"},
 		{"/pr", "push branch + generate PR title/body + create GitHub PR"},
 		{"/git-log", "show last 10 mantis auto-commits"},
-		{"/plan", "enter plan mode — read-only exploration, no file writes"},
-		{"/build", "exit plan mode — full tool access, file writes enabled"},
+		{"/plan", "enter plan mode — read-only, sets permission to plan"},
+		{"/build", "exit plan mode — saves plan to .mantis/PLAN.md"},
+		{"/execute", "alias for /build — exit plan and start implementation"},
 		{"/context", "show context window token breakdown"},
 		{"/compact [focus]", "compress conversation history (optional focus topic)"},
 		{"/reset", "clear conversation (brain memory kept)"},
@@ -4265,6 +4323,7 @@ func printHelp() {
 		{"/mode [mode]", "set permission mode (default|auto-edit|plan)"},
 		{"/effort [level]", "set thinking effort (low|medium|high)"},
 		{"/notify on|off", "toggle desktop notifications for slow tasks"},
+		{"/mcp list|load", "manage MCP server connections (.mcp.json)"},
 		{"/telemetry on|off", "enable / disable anonymous usage upload"},
 		{"/version", "show current version"},
 		{"/quit", "exit  (also Ctrl+C)"},
@@ -5023,6 +5082,36 @@ func compressIfNeeded(callerCtx context.Context, messages []interface{}, client 
 // compactWithFocus forces conversation compaction with an optional focus hint.
 // Unlike compressIfNeeded (which only fires at 75% capacity), this always compacts
 // if there are enough turns. The focus hint biases the summary toward specific topics.
+// savePlanFromConversation extracts plan content from the conversation and
+// saves it to .mantis/PLAN.md so it can be reviewed before execution.
+func savePlanFromConversation(messages []interface{}) {
+	var planContent strings.Builder
+	for _, m := range messages {
+		msg, ok := m.(ollama.Message)
+		if !ok || msg.Role != "assistant" {
+			continue
+		}
+		// Look for structured plan markers or significant planning content.
+		content := msg.Content
+		if strings.Contains(content, "## Plan") || strings.Contains(content, "## Implementation") ||
+			strings.Contains(content, "### Step") || strings.Contains(content, "1.") {
+			planContent.WriteString(content)
+			planContent.WriteString("\n\n---\n\n")
+		}
+	}
+	if planContent.Len() == 0 {
+		return
+	}
+	mantisDir := ".mantis"
+	if _, err := os.Stat(mantisDir); os.IsNotExist(err) {
+		return
+	}
+	planPath := filepath.Join(mantisDir, "PLAN.md")
+	header := "# Implementation Plan\n\n_Generated during plan mode. Review before executing._\n\n---\n\n"
+	_ = os.WriteFile(planPath, []byte(header+planContent.String()), 0o644)
+	fmt.Printf("%s  ◆ plan saved to .mantis/PLAN.md%s\n", colorDim, colorReset)
+}
+
 func compactWithFocus(ctx context.Context, messages []interface{}, client *ollama.Client, model, focusHint string) []interface{} {
 	// Separate system prompt and turns.
 	var sys interface{}
