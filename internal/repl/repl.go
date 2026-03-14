@@ -1548,6 +1548,20 @@ func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
 	case "/reset":
 		*messages = (*messages)[:1]
 		fmt.Printf("%s● context cleared (brain memory kept)%s\n\n", colorGold, colorReset)
+	case "/compact":
+		// 7A: Manual compaction with optional focus hint.
+		focusHint := ""
+		if len(parts) > 1 {
+			focusHint = strings.Join(parts[1:], " ")
+		}
+		before := estimateConversationTokens(*messages)
+		*messages = compactWithFocus(context.Background(), *messages, client, router.ModelFor(router.TierFast), focusHint)
+		after := estimateConversationTokens(*messages)
+		if after < before {
+			fmt.Printf("%s● compacted: %dK → %dK tokens%s\n\n", colorGold, before/1000, after/1000, colorReset)
+		} else {
+			fmt.Printf("%s● nothing to compact (conversation is short)%s\n\n", colorDim, colorReset)
+		}
 	case "/cost":
 		fmt.Println(sess.Report())
 	case "/stats":
@@ -1795,13 +1809,28 @@ func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
 			fmt.Printf("%s  undo not available in this mode%s\n\n", colorDim, colorReset)
 			break
 		}
-		restored, err := oplog.UndoLastBatch()
-		if err != nil {
-			fmt.Printf("%s  nothing to undo%s\n\n", colorDim, colorReset)
-		} else {
+		// /undo N — undo N batches (default 1).
+		undoCount := 1
+		if len(parts) > 1 {
+			if n, err := strconv.Atoi(parts[1]); err == nil && n > 0 {
+				undoCount = n
+			}
+		}
+		anyRestored := false
+		for i := 0; i < undoCount; i++ {
+			restored, err := oplog.UndoLastBatch()
+			if err != nil {
+				if !anyRestored {
+					fmt.Printf("%s  nothing to undo%s\n\n", colorDim, colorReset)
+				}
+				break
+			}
+			anyRestored = true
 			for _, line := range restored {
 				fmt.Printf("%s  ↩ %s%s\n", colorGold, line, colorReset)
 			}
+		}
+		if anyRestored {
 			fmt.Println()
 		}
 	case "/snapshot":
@@ -2645,6 +2674,9 @@ Rules:
 
 	// ── Retrieved memory grounding ────────────────────────────────────────────
 	sb.WriteString(`
+## Context survival
+When working with file contents or tool results, write down key facts (file paths, function signatures, error messages, variable names) in your response text. Earlier context may be compressed — your response text survives but tool results may not.
+
 ## Retrieved memory
 When a <retrieved_memory> block appears in a user message, it contains context
 retrieved from past sessions, decisions, and conventions. Treat it as authoritative
@@ -4030,6 +4062,7 @@ func printHelp() {
 		{"/plan", "enter plan mode — read-only exploration, no file writes"},
 		{"/build", "exit plan mode — full tool access, file writes enabled"},
 		{"/context", "show context window token breakdown"},
+		{"/compact [focus]", "compress conversation history (optional focus topic)"},
 		{"/reset", "clear conversation (brain memory kept)"},
 		{"/cost", "token savings report"},
 		{"/stats", "usage analytics (tiers, latency, files)"},
@@ -4778,6 +4811,84 @@ func compressIfNeeded(callerCtx context.Context, messages []interface{}, client 
 		colorDim, len(oldTurns), estimatedTokens/1000, estimateConversationTokens(recentTurns)/1000+1, colorReset)
 
 	// Rebuild: system + summary + recent turns.
+	var compressed []interface{}
+	if sys != nil {
+		compressed = append(compressed, sys)
+	}
+	compressed = append(compressed, ollama.Message{
+		Role:    "user",
+		Content: "[conversation summary — prior turns compressed]\n" + summaryBuf.String() + "\n[/conversation summary]",
+	})
+	compressed = append(compressed, ollama.Message{
+		Role:    "assistant",
+		Content: "Understood. I have the full conversation context from the summary above.",
+	})
+	compressed = append(compressed, recentTurns...)
+	return compressed
+}
+
+// compactWithFocus forces conversation compaction with an optional focus hint.
+// Unlike compressIfNeeded (which only fires at 75% capacity), this always compacts
+// if there are enough turns. The focus hint biases the summary toward specific topics.
+func compactWithFocus(ctx context.Context, messages []interface{}, client *ollama.Client, model, focusHint string) []interface{} {
+	// Separate system prompt and turns.
+	var sys interface{}
+	var turns []interface{}
+	for _, m := range messages {
+		if msg, ok := m.(ollama.Message); ok && msg.Role == "system" {
+			sys = m
+		} else {
+			turns = append(turns, m)
+		}
+	}
+	// Need at least 6 messages to compact (3 user+assistant pairs).
+	if len(turns) < 6 {
+		return messages
+	}
+
+	keepRecent := 6
+	if len(turns) <= keepRecent {
+		return messages
+	}
+	oldTurns := turns[:len(turns)-keepRecent]
+	recentTurns := turns[len(turns)-keepRecent:]
+
+	var summaryInput strings.Builder
+	summaryInput.WriteString("Compress the conversation below into five labeled sections:\n")
+	summaryInput.WriteString("FACTS: Technical decisions, files written, stack choices\n")
+	summaryInput.WriteString("ACTIONS: What was tried and exact outcomes\n")
+	summaryInput.WriteString("STATE: Current state of modified files\n")
+	summaryInput.WriteString("PRECONDITIONS: What must be true before next step\n")
+	summaryInput.WriteString("NEXT: Explicit next steps discussed\n\n")
+	if focusHint != "" {
+		summaryInput.WriteString(fmt.Sprintf("FOCUS: Pay extra attention to anything about: %s\n\n", focusHint))
+	}
+	summaryInput.WriteString("Keep it under 700 words.\n\n")
+	for _, m := range oldTurns {
+		if msg, ok := m.(ollama.Message); ok {
+			content := msg.Content
+			if len(content) > 1500 {
+				content = content[:1500] + "…"
+			}
+			summaryInput.WriteString(fmt.Sprintf("[%s]: %s\n\n", msg.Role, content))
+		}
+	}
+
+	summaryMsgs := []interface{}{
+		ollama.Message{Role: "system", Content: "You are a conversation compressor. Output exactly five labeled sections: FACTS, ACTIONS, STATE, PRECONDITIONS, NEXT. No preamble."},
+		ollama.Message{Role: "user", Content: summaryInput.String()},
+	}
+
+	var summaryBuf strings.Builder
+	sumCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	_, _, err := client.StreamChat(sumCtx, model, summaryMsgs,
+		&ollama.ModelOptions{Temperature: 0.3, NumCtx: 16384},
+		func(chunk string) { summaryBuf.WriteString(chunk) })
+	if err != nil || strings.TrimSpace(summaryBuf.String()) == "" {
+		return messages // summarization failed — keep as-is
+	}
+
 	var compressed []interface{}
 	if sys != nil {
 		compressed = append(compressed, sys)
