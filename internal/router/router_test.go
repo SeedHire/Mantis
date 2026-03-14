@@ -245,13 +245,13 @@ func TestQuestionFormDampener(t *testing.T) {
 	}
 }
 
-// TestTerminalErrorFastPath verifies that a pasted panic/error message routes
-// to TierFast (it's already a captured error, not a heavy design question).
-func TestTerminalErrorFastPath(t *testing.T) {
+// TestTerminalErrorCodePath verifies that a pasted panic/error message routes
+// to TierCode (small models can't fix errors well — needs a capable model).
+func TestTerminalErrorCodePath(t *testing.T) {
 	panicMsg := "panic: runtime error: index out of range [3] with length 3"
 	intent := Classify(panicMsg, false)
-	if intent.Tier != TierFast {
-		t.Errorf("panic paste routed to %s, want TierFast", intent.Tier)
+	if intent.Tier != TierCode {
+		t.Errorf("panic paste routed to %s, want TierCode", intent.Tier)
 	}
 }
 

@@ -12,13 +12,14 @@ Reference actual function names and file paths from the project.`
 
 	case "fix":
 		return `[Task: Fix Bug]
-1. Identify the broken code and explain WHY it fails.
-2. Apply the fix: use edit_file for targeted replacements in existing files; use ` + "```lang:path/to/file" + ` fences only when creating new files or the change is too large for a targeted replacement.
-3. Explain why the fix works.
-4. Note any files that might need related changes.
-IMPORTANT: Prefer edit_file (old_string → new_string) over rewriting entire files — it is safer and uses fewer tokens.
-IMPORTANT: Do NOT create files that don't already exist unless the user explicitly asked for them. Only modify existing files.
-IMPORTANT: If project file contents are provided below, use them — do NOT guess file contents.`
+RULES:
+1. Read ALL injected [PROJECT FACTS] and source files COMPLETELY before responding.
+2. Identify EVERY error, not just the one pasted — fix ALL at once.
+3. Use edit_file for targeted changes — never rewrite entire files for small fixes.
+4. Do NOT ask for file contents — they are already injected above.
+5. After fixing, list what you changed and why.
+6. Use the correct tooling for the project language (see [PROJECT FACTS]).
+7. Do NOT create files that don't already exist unless the user explicitly asked for them.`
 
 	case "refactor":
 		return `[Task: Refactor]

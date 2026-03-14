@@ -609,6 +609,17 @@ func Run(cfg Config) error {
 			userContent = tmpl + "\n\n" + input
 		}
 
+		// Pre-analysis: inject structured project facts so weak models know the language/framework.
+		if facts := detectProjectFacts(root); facts != "" {
+			userContent = facts + "\n\n" + userContent
+		}
+		// Error analysis: parse error messages and inject structured diagnosis.
+		if intent.TaskType == "fix" || strings.Contains(strings.ToLower(input), "error") || strings.Contains(strings.ToLower(input), "traceback") {
+			if analysis := analyzeError(input, root); analysis != "" {
+				userContent = userContent + "\n\n" + analysis
+			}
+		}
+
 		// Auto-capture build errors and inject relevant project files.
 		{
 			if intent.TaskType == "fix" || intent.TaskType == "general" || intent.TaskType == "implement" {
@@ -632,8 +643,9 @@ func Run(cfg Config) error {
 		}
 
 		// Semantic memory retrieval — hybrid BM25+cosine via RRF.
+		// Skip for TierTrivial — one-line answers don't need memory.
 		var memChunksFound int
-		if embStore != nil {
+		if embStore != nil && intent.Tier >= router.TierFast {
 			embCtx, embCancel := context.WithTimeout(turnCtx, 5*time.Second)
 			if chunks, err := embStore.Search(embCtx, input, 5); err == nil && len(chunks) > 0 {
 				// Keep top chunk and any within 0.015 RRF delta of it.
@@ -681,7 +693,7 @@ func Run(cfg Config) error {
 			if dispatcher != nil && dispatcher.IsAvailable() {
 				graphQuerier = dispatcher.Querier()
 			}
-			if ctxMsg := contextMessageFor(turnCtx, input, root, brainContext, truthWriter, graphQuerier, embStore, autoReadFiles); ctxMsg != nil {
+			if ctxMsg := contextMessageFor(turnCtx, input, root, brainContext, truthWriter, graphQuerier, embStore, autoReadFiles, intent.Tier); ctxMsg != nil {
 				// Merge context injection with enriched userContent (build output, project files).
 				if msg, ok := ctxMsg.(ollama.Message); ok {
 					msg.Content = strings.Replace(msg.Content, "\n\nNow answer: "+input, "\n\nNow answer: "+userContent, 1)
@@ -1302,6 +1314,33 @@ func Run(cfg Config) error {
 						printWrittenFiles(wf2)
 					}
 					break
+				}
+			}
+		}
+
+		// Sanity check: catch obviously wrong responses (wrong tooling, "can't read files").
+		// Single retry — if second response also fails, show with warning.
+		if correction := sanityCheckResponse(rb.String(), root); correction != "" {
+			fmt.Printf("%s  [sanity check — re-prompting]%s\n", colorDim, colorReset)
+			retryMsgs := append(append([]interface{}{}, messages...), ollama.Message{Role: "user", Content: correction})
+			var rbSanity strings.Builder
+			sanityCtx, sanityCancel := context.WithTimeout(turnCtx, 3*time.Minute)
+			ptS, ctS, errS := streamWithFallback(sanityCtx, client, model, intent.Tier, retryMsgs, &rbSanity)
+			sanityCancel()
+			if errS == nil && strings.TrimSpace(rbSanity.String()) != "" {
+				// Only accept if second response passes sanity check.
+				if correction2 := sanityCheckResponse(rbSanity.String(), root); correction2 == "" {
+					messages[len(messages)-1] = ollama.Message{Role: "assistant", Content: rbSanity.String()}
+					rb.Reset()
+					rb.WriteString(rbSanity.String())
+					sess.Add(model, intent.Tier, ptS, ctS, false)
+					fmt.Printf("%s◈ Mantis%s %s(corrected)%s\n", colorCopper+colorBold, colorReset, colorDim, colorReset)
+					renderResponse(stripInternalBlocks(stripFileBlocks(rbSanity.String())))
+					if wfS := extractAndWriteFiles(rbSanity.String(), root, opLog); len(wfS) > 0 {
+						printWrittenFiles(wfS)
+					}
+				} else {
+					fmt.Printf("%s  ⚠ response may contain incorrect tooling suggestions%s\n", colorRed, colorReset)
 				}
 			}
 		}
@@ -2650,7 +2689,12 @@ Then give your final answer after </thinking>. Example:
 // Injects README for project questions, ContextSnippet for code questions,
 // and graph context when file paths or symbols are detected.
 // readCache tracks which files have already been injected this session.
-func contextMessageFor(ctx context.Context, input, root string, brainContext string, tw *truth.Writer, querier *graph.Querier, embStore *embeddings.Store, readCache map[string]bool) interface{} {
+// tier controls the context budget: Trivial gets minimal context, Code+ gets full.
+func contextMessageFor(ctx context.Context, input, root string, brainContext string, tw *truth.Writer, querier *graph.Querier, embStore *embeddings.Store, readCache map[string]bool, tier ...router.Tier) interface{} {
+	currentTier := router.TierCode // default: full budget
+	if len(tier) > 0 {
+		currentTier = tier[0]
+	}
 	lower := strings.ToLower(input)
 	isProjectQ := strings.Contains(lower, "project") || strings.Contains(lower, "what is") ||
 		strings.Contains(lower, "what does") || strings.Contains(lower, "what are") ||
@@ -2674,8 +2718,8 @@ func contextMessageFor(ctx context.Context, input, root string, brainContext str
 	}
 
 	// 7.5: Cold memory — retrieve relevant BRAIN.md/REJECTED.md chunks on demand.
-	// Skip chunks already present in hot memory (brainContext) to avoid duplication.
-	if embStore != nil {
+	// Skip for TierTrivial — these short answers don't need memory context.
+	if embStore != nil && currentTier >= router.TierCode {
 		if coldChunks, err := embStore.SearchHybrid(ctx, input, 2); err == nil {
 			var cold []string
 			for _, c := range coldChunks {
@@ -2693,14 +2737,15 @@ func contextMessageFor(ctx context.Context, input, root string, brainContext str
 		}
 	}
 
-	if isCodeQ && tw != nil {
+	if isCodeQ && tw != nil && currentTier >= router.TierFast {
 		if snippet := tw.ContextSnippetN(8, 800); snippet != "" {
 			parts = append(parts, "Codebase symbols (verified):\n"+snippet)
 		}
 	}
 
 	// 7.1: Repo-map — inject PageRank-ranked symbol index for codebase orientation.
-	if isCodeQ && querier != nil {
+	// Skip for Trivial/Fast — repo map is only useful for Code+ tasks.
+	if isCodeQ && querier != nil && currentTier >= router.TierCode {
 		if entries, err := querier.RepoMap(2048); err == nil && len(entries) > 0 {
 			mapStr := graph.RepoMapString(entries)
 			if mapStr != "" {
@@ -2710,7 +2755,7 @@ func contextMessageFor(ctx context.Context, input, root string, brainContext str
 	}
 
 	// 7.7: Code context — inject top semantic code chunks matching the query.
-	if isCodeQ && embStore != nil {
+	if isCodeQ && embStore != nil && currentTier >= router.TierFast {
 		if results, err := embStore.SearchHybrid(ctx, input, 3); err == nil {
 			var codeChunks []string
 			for _, r := range results {
@@ -2763,9 +2808,15 @@ func contextMessageFor(ctx context.Context, input, root string, brainContext str
 	if len(parts) == 0 {
 		return nil
 	}
-	// Token budget: cap total context injection at ~3K tokens (≈12K chars).
-	// If over budget, drop sections from the front (least important first).
-	const maxContextChars = 12000
+	// Token budget: tier-aware cap for context injection.
+	// Trivial: 3K chars, Fast: 6K chars, Code+: 12K chars.
+	maxContextChars := 12000
+	switch currentTier {
+	case router.TierTrivial:
+		maxContextChars = 3000
+	case router.TierFast:
+		maxContextChars = 6000
+	}
 	combined := strings.Join(parts, "\n\n")
 	if len(combined) > maxContextChars {
 		// Trim from the front (repo_map, cold_memory) to keep files + graph (most specific).

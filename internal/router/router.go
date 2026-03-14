@@ -470,10 +470,10 @@ func classify(ctx context.Context, message string, hasImage bool, store EmbedSto
 	}
 	lower := strings.ToLower(message)
 
-	// Terminal error paste — always fast/fix regardless of phrasing.
+	// Terminal error paste — route to TierCode so a capable model handles the fix.
 	for _, sig := range terminalErrorSignatures {
 		if strings.Contains(lower, sig) {
-			return Intent{Tier: TierFast, TaskType: "fix", NeedsGraph: false, Confidence: 0.90}
+			return Intent{Tier: TierCode, TaskType: "fix", NeedsGraph: false, Confidence: 0.90}
 		}
 	}
 
@@ -512,6 +512,11 @@ func classify(ctx context.Context, message string, hasImage bool, store EmbedSto
 	}
 
 	// Context modifiers:
+	// 0. "how to run/start" should never be trivial — needs project awareness.
+	if strings.Contains(lower, "how to run") || strings.Contains(lower, "how to start") {
+		scores[TierTrivial] = 0
+	}
+
 	// 1. Question-form dampener — a trailing "?" strongly suggests explanation/reason.
 	isQuestion := strings.HasSuffix(strings.TrimSpace(lower), "?")
 	if isQuestion {
@@ -579,6 +584,11 @@ func classify(ctx context.Context, message string, hasImage bool, store EmbedSto
 		intent = classifyByEmbedding(ctx, message, store, intent)
 		intent.TaskType = taskType            // preserve detected task type
 		intent.NeedsGraph = needsGraph(lower) // preserve graph flag
+	}
+
+	// Fix tasks need at least TierCode — small models can't fix errors well.
+	if intent.TaskType == "fix" && intent.Tier < TierCode {
+		intent.Tier = TierCode
 	}
 
 	return intent
