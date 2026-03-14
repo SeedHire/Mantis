@@ -481,6 +481,62 @@ func (t *AgentToolkit) EditFile(path, oldString, newString string) error {
 	return nil
 }
 
+// MultiEditFile applies multiple old→new replacements to a single file atomically.
+// If any replacement fails (not found or ambiguous), ALL edits are rolled back.
+// Edits are applied sequentially — earlier edits affect what later edits see.
+func (t *AgentToolkit) MultiEditFile(path string, edits []EditPair) error {
+	abs, err := t.safePath(path)
+	if err != nil {
+		return err
+	}
+	// 7J: read-before-write gate.
+	t.readFilesMu.Lock()
+	hasRead := t.readFiles[abs]
+	t.readFilesMu.Unlock()
+	if !hasRead {
+		return fmt.Errorf("multi_edit_file: you must read_file(%q) first", path)
+	}
+	t.fileMu.Lock()
+	defer t.fileMu.Unlock()
+	if err := t.checkStale(abs); err != nil {
+		return err
+	}
+
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		return err
+	}
+	original := string(data) // keep for rollback
+	content := original
+
+	for i, e := range edits {
+		count := strings.Count(content, e.OldString)
+		if count == 0 {
+			return fmt.Errorf("multi_edit_file: edit %d/%d — old_string not found in %s (edits rolled back)", i+1, len(edits), path)
+		}
+		if count > 1 {
+			return fmt.Errorf("multi_edit_file: edit %d/%d — old_string matches %d times in %s (edits rolled back)", i+1, len(edits), count, path)
+		}
+		content = strings.Replace(content, e.OldString, e.NewString, 1)
+	}
+
+	if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
+		return err
+	}
+	if info, statErr := os.Stat(abs); statErr == nil {
+		t.staleMu.Lock()
+		t.readTimes[abs] = info.ModTime()
+		t.staleMu.Unlock()
+	}
+	return nil
+}
+
+// EditPair represents a single old→new replacement in a multi-edit operation.
+type EditPair struct {
+	OldString string `json:"old_string"`
+	NewString string `json:"new_string"`
+}
+
 // RunTests detects the project's test runner and executes tests, returning
 // structured failure output instead of raw stdout.
 func (t *AgentToolkit) RunTests(packages string, timeoutSec int) (string, int) {
@@ -852,6 +908,21 @@ func (t *AgentToolkit) Tools() []ollama.Tool {
 		{
 			Type: "function",
 			Function: ollama.ToolFunction{
+				Name:        "multi_edit_file",
+				Description: "Apply multiple old→new replacements to a single file atomically. If any edit fails, none are applied. Edits are applied in order — earlier edits affect what later edits find.",
+				Parameters: rawJSON(`{
+					"type": "object",
+					"properties": {
+						"path":  {"type":"string","description":"Relative file path from project root"},
+						"edits": {"type":"array","items":{"type":"object","properties":{"old_string":{"type":"string","description":"Exact text to replace (must appear exactly once)"},"new_string":{"type":"string","description":"Replacement text"}},"required":["old_string","new_string"]},"description":"Array of {old_string, new_string} pairs to apply sequentially"}
+					},
+					"required": ["path","edits"]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: ollama.ToolFunction{
 				Name:        "run_tests",
 				Description: "Run the project's test suite and return structured failure output. Auto-detects test runner (go test, npm test, pytest, cargo test).",
 				Parameters: rawJSON(`{
@@ -927,11 +998,12 @@ func (t *AgentToolkit) Tools() []ollama.Tool {
 // is physically unable to write files — schema-level enforcement, not runtime.
 func (t *AgentToolkit) ReadOnlyTools() []ollama.Tool {
 	writeNames := map[string]bool{
-		"write_file": true,
-		"edit_file":  true,
-		"git_stage":  true,
-		"git_commit": true,
-		"git_branch": true,
+		"write_file":      true,
+		"edit_file":       true,
+		"multi_edit_file": true,
+		"git_stage":       true,
+		"git_commit":      true,
+		"git_branch":      true,
 	}
 	var readOnly []ollama.Tool
 	for _, tool := range t.Tools() {
@@ -1038,6 +1110,30 @@ func (t *AgentToolkit) Dispatch(ctx context.Context, toolName string, argsRaw js
 			}
 		}
 		return fmt.Sprintf("edited %s", args.Path), nil
+
+	case "multi_edit_file":
+		var args struct {
+			Path  string     `json:"path"`
+			Edits []EditPair `json:"edits"`
+		}
+		if err := json.Unmarshal(argsRaw, &args); err != nil {
+			return "", fmt.Errorf("bad args: %w", err)
+		}
+		if len(args.Edits) == 0 {
+			return "", fmt.Errorf("multi_edit_file: edits array is empty")
+		}
+		if err := t.MultiEditFile(args.Path, args.Edits); err != nil {
+			return "", err
+		}
+		// Lint after multi-edit.
+		if abs, pathErr := t.safePath(args.Path); pathErr == nil {
+			if data, readErr := os.ReadFile(abs); readErr == nil {
+				if lintErr := lintBeforeWrite(args.Path, string(data)); lintErr != "" {
+					return fmt.Sprintf("edited %s (%d edits) — WARNING: %s", args.Path, len(args.Edits), lintErr), nil
+				}
+			}
+		}
+		return fmt.Sprintf("edited %s (%d edits applied)", args.Path, len(args.Edits)), nil
 
 	case "run_tests":
 		var args struct {

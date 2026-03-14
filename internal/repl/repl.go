@@ -302,6 +302,7 @@ func Run(cfg Config) error {
 	// Session tracker.
 	sess := session.New()
 	approvalCache := NewApprovalCache()           // permission caching: remembers approved dirs across turns
+	permMode := ModeDefault                       // 7D: permission mode (default/auto-edit/plan)
 	opLog := NewOperationLog(mantisDir)           // operation log: enables /undo across turns
 	usageTracker := usage.New()
 	tlog := telemetry.New()
@@ -413,6 +414,7 @@ func Run(cfg Config) error {
 		readline.PcItem("/snapshots"),
 		readline.PcItem("/revert"),
 		readline.PcItem("/keys"),
+		readline.PcItem("/mode"),
 		readline.PcItem("/quit"),
 	)
 
@@ -528,7 +530,7 @@ func Run(cfg Config) error {
 		// Slash commands.
 		if strings.HasPrefix(input, "/") {
 			evLog.RecordSlashCommand(turn, strings.Fields(input)[0])
-			if quit := handleSlashCommand(input, sess, b, &messages, client, &brainContext, &planMode, cfg, webFetcher, opLog, embStore, snapStore); quit {
+			if quit := handleSlashCommand(input, sess, b, &messages, client, &brainContext, &planMode, cfg, webFetcher, opLog, embStore, snapStore, &permMode, rl); quit {
 				break
 			}
 			setPlanPrompt()
@@ -1529,7 +1531,7 @@ singleModel:
 }
 
 func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
-	messages *[]interface{}, client *ollama.Client, brainContext *string, planMode *bool, cfg Config, webFetcher *web.Fetcher, oplog *OperationLog, embStore *embeddings.Store, snapStore *snapshot.Store) (quit bool) {
+	messages *[]interface{}, client *ollama.Client, brainContext *string, planMode *bool, cfg Config, webFetcher *web.Fetcher, oplog *OperationLog, embStore *embeddings.Store, snapStore *snapshot.Store, permMode *PermissionMode, rl *readline.Instance) (quit bool) {
 
 	parts := strings.Fields(input)
 	cmd := parts[0]
@@ -1561,6 +1563,29 @@ func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
 			fmt.Printf("%s● compacted: %dK → %dK tokens%s\n\n", colorGold, before/1000, after/1000, colorReset)
 		} else {
 			fmt.Printf("%s● nothing to compact (conversation is short)%s\n\n", colorDim, colorReset)
+		}
+	case "/mode":
+		if len(parts) < 2 {
+			fmt.Printf("  current mode: \033[1m%s\033[0m\n", *permMode)
+			fmt.Println("  usage: /mode <default|auto-edit|plan>")
+			fmt.Println("    default    — prompt for file writes + bash")
+			fmt.Println("    auto-edit  — auto-approve edits, prompt for bash")
+			fmt.Println("    plan       — read-only tools only")
+			fmt.Println()
+		} else {
+			mode, ok := ParsePermissionMode(parts[1])
+			if !ok {
+				fmt.Printf("  unknown mode %q — use default, auto-edit, or plan\n\n", parts[1])
+			} else {
+				*permMode = mode
+				// Update prompt to show mode indicator.
+				if rl != nil {
+					root, _ := os.Getwd()
+					newPrompt := "\033[38;5;244m" + filepath.Base(root) + "\033[0m" + permMode.PromptSuffix() + " \033[38;5;214m❯\033[0m "
+					rl.SetPrompt(newPrompt)
+				}
+				fmt.Printf("  %s● mode set to %s%s\n\n", colorGold, *permMode, colorReset)
+			}
 		}
 	case "/cost":
 		fmt.Println(sess.Report())
@@ -3074,6 +3099,14 @@ func fixAgentTools() []ollama.Tool {
 		{
 			Type: "function",
 			Function: ollama.ToolFunction{
+				Name:        "multi_edit_file",
+				Description: "Apply multiple old→new replacements to a single file atomically. If any edit fails, none are applied. Edits apply in order.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Relative file path"},"edits":{"type":"array","items":{"type":"object","properties":{"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["old_string","new_string"]}}},"required":["path","edits"]}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: ollama.ToolFunction{
 				Name:        "search_files",
 				Description: "Search for a text pattern across project files (like grep -r). Returns matching lines with file paths.",
 				Parameters:  json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string","description":"Text or regex pattern to search for"},"path":{"type":"string","description":"Directory to search in (default: .)"}},"required":["pattern"]}`),
@@ -3134,7 +3167,7 @@ func fixToolArgSummary(name string, args json.RawMessage) string {
 		if p, ok := generic["path"].(string); ok {
 			return p
 		}
-	case "edit_file":
+	case "edit_file", "multi_edit_file":
 		if p, ok := generic["path"].(string); ok {
 			return p
 		}
@@ -3206,6 +3239,41 @@ func dispatchFixTool(root, toolName string, argsRaw json.RawMessage) string {
 			return fmt.Sprintf("error: %v", err)
 		}
 		return fmt.Sprintf("edited %s", args.Path)
+
+	case "multi_edit_file":
+		var args struct {
+			Path  string `json:"path"`
+			Edits []struct {
+				OldString string `json:"old_string"`
+				NewString string `json:"new_string"`
+			} `json:"edits"`
+		}
+		if err := json.Unmarshal(argsRaw, &args); err != nil {
+			return "error: bad arguments"
+		}
+		abs := filepath.Join(root, filepath.Clean(args.Path))
+		if abs != root && !strings.HasPrefix(abs, root+string(filepath.Separator)) {
+			return "error: path escapes project root"
+		}
+		data, err := os.ReadFile(abs)
+		if err != nil {
+			return fmt.Sprintf("error: %v", err)
+		}
+		content := string(data)
+		for i, e := range args.Edits {
+			count := strings.Count(content, e.OldString)
+			if count == 0 {
+				return fmt.Sprintf("error: edit %d/%d — old_string not found (edits rolled back)", i+1, len(args.Edits))
+			}
+			if count > 1 {
+				return fmt.Sprintf("error: edit %d/%d — old_string matches %d times (edits rolled back)", i+1, len(args.Edits), count)
+			}
+			content = strings.Replace(content, e.OldString, e.NewString, 1)
+		}
+		if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
+			return fmt.Sprintf("error: %v", err)
+		}
+		return fmt.Sprintf("edited %s (%d edits applied)", args.Path, len(args.Edits))
 
 	case "run_command":
 		var args struct {
@@ -4072,6 +4140,7 @@ func printHelp() {
 		{"/reject <reason>", "log last suggestion as rejected approach"},
 		{"/decision <text>", "log an architecture decision"},
 		{"/keys", "manage API keys (add/delete/tag)"},
+		{"/mode [mode]", "set permission mode (default|auto-edit|plan)"},
 		{"/telemetry on|off", "enable / disable anonymous usage upload"},
 		{"/version", "show current version"},
 		{"/quit", "exit  (also Ctrl+C)"},
@@ -5006,7 +5075,8 @@ func runWithScanner(cfg Config, client *ollama.Client, sess *session.Session,
 			continue
 		}
 		if strings.HasPrefix(input, "/") {
-			if quit := handleSlashCommand(input, sess, b, &messages, client, &scannerBrainCtx, &scannerPlanMode, cfg, webFetcher, nil, nil, nil); quit {
+			scannerPermMode := ModeDefault
+			if quit := handleSlashCommand(input, sess, b, &messages, client, &scannerBrainCtx, &scannerPlanMode, cfg, webFetcher, nil, nil, nil, &scannerPermMode, nil); quit {
 				break
 			}
 			continue

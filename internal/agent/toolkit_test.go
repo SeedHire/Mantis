@@ -375,6 +375,70 @@ func TestIsDestructiveGit(t *testing.T) {
 	}
 }
 
+// ── MultiEditFile ────────────────────────────────────────────────────────────
+
+func TestMultiEditFile(t *testing.T) {
+	tk, root := newTestToolkit(t)
+	content := "func A() {}\nfunc B() {}\nfunc C() {}\n"
+	if err := os.WriteFile(filepath.Join(root, "multi.go"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tk.ReadFile("multi.go", 0, 0)
+
+	edits := []EditPair{
+		{OldString: "func A() {}", NewString: "func Alpha() {}"},
+		{OldString: "func B() {}", NewString: "func Beta() {}"},
+	}
+	if err := tk.MultiEditFile("multi.go", edits); err != nil {
+		t.Fatalf("MultiEditFile: %v", err)
+	}
+	b, _ := os.ReadFile(filepath.Join(root, "multi.go"))
+	want := "func Alpha() {}\nfunc Beta() {}\nfunc C() {}\n"
+	if string(b) != want {
+		t.Errorf("got %q, want %q", b, want)
+	}
+}
+
+func TestMultiEditFile_Rollback(t *testing.T) {
+	tk, root := newTestToolkit(t)
+	content := "aaa bbb ccc"
+	if err := os.WriteFile(filepath.Join(root, "roll.txt"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tk.ReadFile("roll.txt", 0, 0)
+
+	edits := []EditPair{
+		{OldString: "aaa", NewString: "AAA"},
+		{OldString: "nonexistent", NewString: "xxx"}, // will fail
+	}
+	err := tk.MultiEditFile("roll.txt", edits)
+	if err == nil {
+		t.Fatal("expected error for failing edit")
+	}
+	if !strings.Contains(err.Error(), "rolled back") {
+		t.Errorf("error should mention rollback: %v", err)
+	}
+	// File should be unchanged (atomic rollback).
+	b, _ := os.ReadFile(filepath.Join(root, "roll.txt"))
+	if string(b) != content {
+		t.Errorf("file was modified despite rollback: %q", b)
+	}
+}
+
+func TestMultiEditFile_ReadBeforeWriteGate(t *testing.T) {
+	tk, root := newTestToolkit(t)
+	if err := os.WriteFile(filepath.Join(root, "gate2.go"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := tk.MultiEditFile("gate2.go", []EditPair{{OldString: "hello", NewString: "world"}})
+	if err == nil {
+		t.Fatal("expected error when editing without reading first")
+	}
+	if !strings.Contains(err.Error(), "must read_file") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
 // ── ShouldRunMultiAgent ───────────────────────────────────────────────────────
 
 func TestShouldRunMultiAgent(t *testing.T) {
