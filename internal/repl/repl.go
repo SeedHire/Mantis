@@ -540,6 +540,11 @@ func Run(cfg Config) error {
 			continue
 		}
 
+		// Multi-line paste indicator: show line count for pasted content.
+		if lineCount := strings.Count(input, "\n"); lineCount >= 3 {
+			fmt.Printf("%s  ◉ pasted %d lines%s\n", colorDim, lineCount+1, colorReset)
+		}
+
 		// Normalize terminal error pastes into actionable fix requests.
 		input = normalizeTerminalInput(input)
 

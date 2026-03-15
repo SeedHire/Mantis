@@ -40,8 +40,9 @@ const (
 	pColorDim   = "\033[38;5;244m"
 )
 
-// streamWithRetry wraps client.StreamChat with automatic key rotation on 429.
-// If onRL is nil, behaves identically to client.StreamChat.
+// streamWithRetry wraps client.StreamChat with key rotation, exponential backoff,
+// and optional model fallback on 429/rate-limit errors.
+// If tier is provided, rate-limited models fall back through router.PreferredModels(tier).
 func streamWithRetry(
 	ctx context.Context,
 	client *ollama.Client,
@@ -50,19 +51,90 @@ func streamWithRetry(
 	opts *ollama.ModelOptions,
 	onChunk func(string),
 	onRL OnRateLimitFunc,
+	tier ...router.Tier,
 ) (int, int, error) {
-	pt, ct, err := client.StreamChat(ctx, model, msgs, opts, onChunk)
-	if err == nil {
-		return pt, ct, nil
-	}
-	errStr := err.Error()
-	if onRL != nil && (strings.Contains(errStr, "429") || strings.Contains(errStr, "rate limit")) {
-		if onRL(client) {
-			// Key rotated — retry once with new key.
-			return client.StreamChat(ctx, model, msgs, opts, onChunk)
+	// Build candidate list: primary model + tier fallbacks (if tier provided).
+	candidates := []string{model}
+	if len(tier) > 0 {
+		for _, m := range router.PreferredModels(tier[0]) {
+			if m != model {
+				candidates = append(candidates, m)
+			}
 		}
 	}
-	return pt, ct, err
+
+	tried := map[string]bool{}
+	for _, m := range candidates {
+		if tried[m] {
+			continue
+		}
+		tried[m] = true
+
+		pt, ct, err := client.StreamChat(ctx, m, msgs, opts, onChunk)
+		if err == nil {
+			if m != model {
+				fmt.Printf("%s  [switched to %s]%s\n", pColorDim, m, pColorReset)
+				if len(tier) > 0 {
+					router.SetResolved(tier[0], m)
+				}
+			}
+			return pt, ct, nil
+		}
+
+		errStr := err.Error()
+		isRL := strings.Contains(errStr, "429") || strings.Contains(errStr, "503") ||
+			strings.Contains(errStr, "rate limit") || strings.Contains(errStr, "overloaded")
+		if !isRL {
+			return pt, ct, err
+		}
+
+		// Key rotation attempt.
+		if onRL != nil && onRL(client) {
+			pt, ct, err = client.StreamChat(ctx, m, msgs, opts, onChunk)
+			if err == nil {
+				if m != model && len(tier) > 0 {
+					router.SetResolved(tier[0], m)
+				}
+				return pt, ct, nil
+			}
+			errStr = err.Error()
+			isRL = strings.Contains(errStr, "429") || strings.Contains(errStr, "503") ||
+				strings.Contains(errStr, "rate limit") || strings.Contains(errStr, "overloaded")
+			if !isRL {
+				return 0, 0, err
+			}
+		}
+
+		// Exponential backoff: 2s, 4s, 8s.
+		const maxRetries = 3
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			wait := time.Duration(1<<uint(attempt)) * 2 * time.Second
+			fmt.Printf("%s  [rate limited — retrying in %s (%d/%d)]%s\n",
+				pColorDim, wait, attempt+1, maxRetries, pColorReset)
+			select {
+			case <-ctx.Done():
+				return 0, 0, ctx.Err()
+			case <-time.After(wait):
+			}
+			pt, ct, err = client.StreamChat(ctx, m, msgs, opts, onChunk)
+			if err == nil {
+				if m != model && len(tier) > 0 {
+					router.SetResolved(tier[0], m)
+				}
+				return pt, ct, nil
+			}
+			errStr = err.Error()
+			if !strings.Contains(errStr, "429") && !strings.Contains(errStr, "503") &&
+				!strings.Contains(errStr, "rate limit") && !strings.Contains(errStr, "overloaded") {
+				return 0, 0, err // different error, bail
+			}
+		}
+
+		// Model exhausted — try next candidate.
+		fmt.Printf("%s  [%s still rate limited, trying next…]%s\n", pColorDim, m, pColorReset)
+	}
+
+	return 0, 0, fmt.Errorf("all models rate limited for this stage")
 }
 
 // optsFor returns model options with temperature and a context window tuned to the model.
@@ -424,6 +496,15 @@ func Run(
 			for _, ew := range eacWarns {
 				fmt.Printf("%s  ⚠ %s%s\n", pColorDim, ew, pColorReset)
 			}
+			// Retry failed SEARCH edits with actual file content.
+			if failed := collectFailedEdits(res.CodeText, opts.Root); failed != nil {
+				retryPaths, rpt, rct := retryFailedEdits(ctx, client, codeModel, res.CodeText, opts.Root,
+					codeMsgs, codeOpts, nil, onRL)
+				written = append(written, retryPaths...)
+				res.PromptTok += rpt
+				res.ComplTok += rct
+				codeTokTotal += rpt + rct
+			}
 			// Fix 6: accumulate all written files, deduped.
 			for _, w := range written {
 				if !writtenSeen[w] {
@@ -486,6 +567,14 @@ func Run(
 			_, eacWarns := extractAndApplyChanges(res.CodeText, opts.Root)
 			for _, ew := range eacWarns {
 				fmt.Printf("%s  ⚠ %s%s\n", pColorDim, ew, pColorReset)
+			}
+			// Retry failed SEARCH edits at the editor pass.
+			if failed := collectFailedEdits(res.CodeText, opts.Root); failed != nil {
+				retryPaths, _, _ := retryFailedEdits(ctx, client, codeModel, res.CodeText, opts.Root,
+					[]interface{}{ollama.Message{Role: "system", Content: systemPrompt}}, codeOpts, nil, onRL)
+				if len(retryPaths) > 0 {
+					fmt.Printf("%s  ◉ %d file(s) recovered via edit retry%s\n", pColorDim, len(retryPaths), pColorReset)
+				}
 			}
 		}
 	}
