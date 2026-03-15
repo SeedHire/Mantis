@@ -833,10 +833,22 @@ func runTaskBased(
 
 	// safeWrite wraps extractAndApplyChanges with a mutex to prevent parallel tasks
 	// from racing on the same files (Fix 2). Warnings are routed through the renderer.
-	safeWrite := func(code, root string) []string {
+	// On SEARCH mismatch, retries failed edits by re-prompting with actual file content.
+	safeWrite := func(code, root string, taskMsgs []interface{}, onTok func(string)) []string {
 		writeMu.Lock()
 		defer writeMu.Unlock()
 		paths, warnings := extractAndApplyChanges(code, root)
+
+		// Check for failed edits and retry with actual file content.
+		if failed := collectFailedEdits(code, root); failed != nil {
+			retryPaths, _, _ := retryFailedEdits(ctx, client, codeModel, code, root, taskMsgs, codeOpts, onTok, onRL)
+			if len(retryPaths) > 0 {
+				paths = append(paths, retryPaths...)
+				// Update warning: some edits recovered via retry.
+				warnings = append(warnings, fmt.Sprintf("%d file(s) recovered via edit retry with actual content", len(retryPaths)))
+			}
+		}
+
 		for _, w := range warnings {
 			r.addWarning(w)
 		}
@@ -879,7 +891,8 @@ func runTaskBased(
 				allCode.WriteString(partial)
 				allCode.WriteString("\n\n")
 				if root != "" {
-					written := safeWrite(partial, root)
+					tokCb := func(c string) { atomic.AddInt64(&tasks[i].streamTok, 1) }
+					written := safeWrite(partial, root, msgs, tokCb)
 					tasks[i].FileCount = len(written)
 					allWrittenFiles = append(allWrittenFiles, written...)
 				}
@@ -898,7 +911,8 @@ func runTaskBased(
 		// Write files to disk immediately so user sees progress.
 		var written []string
 		if root != "" {
-			written = safeWrite(code, root)
+			tokCb := func(c string) { atomic.AddInt64(&tasks[i].streamTok, 1) }
+			written = safeWrite(code, root, msgs, tokCb)
 			tasks[i].FileCount = len(written)
 			allWrittenFiles = append(allWrittenFiles, written...)
 		}
@@ -962,7 +976,8 @@ func runTaskBased(
 				}
 
 				retryCode := retryBuf.String()
-				retryWritten := safeWrite(retryCode, root)
+				retryTokCb := func(c string) { atomic.AddInt64(&tasks[i].streamTok, 1) }
+				retryWritten := safeWrite(retryCode, root, retryMsgs, retryTokCb)
 				allWrittenFiles = append(allWrittenFiles, retryWritten...)
 				tasks[i].FileCount += len(retryWritten)
 				allCode.WriteString(retryCode)
@@ -1178,7 +1193,7 @@ func readPriorContext(root string, writtenFiles []string, maxChars int) string {
 	var sb strings.Builder
 	sb.WriteString("\n\n## Already implemented files (import from these, don't recreate):\n")
 	totalChars := 0
-	const maxLinesPerFile = 150 // Fix 5: was 60 — type defs past line 60 were invisible
+	const maxLinesPerFile = 300 // was 150 — models need more context to generate accurate SEARCH blocks
 
 	for _, e := range entries {
 		if totalChars >= maxChars {
@@ -1359,7 +1374,7 @@ func taskCodePrompt(request, plan, taskTitle, root string, writtenFiles []string
 		sb.WriteString(sealedManifest)
 	}
 
-	priorCtx := readPriorContext(root, writtenFiles, 24000)
+	priorCtx := readPriorContext(root, writtenFiles, 36000)
 	if priorCtx != "" {
 		sb.WriteString(priorCtx)
 	}
@@ -1538,6 +1553,60 @@ func extractSection(plan, heading string) string {
 		content = content[:nextIdx]
 	}
 	return strings.TrimSpace(content)
+}
+
+// retryFailedEdits re-prompts the model with actual file content for edits that
+// failed SEARCH matching. Returns additional written paths and token counts.
+// This is the highest-impact fix for SEARCH mismatch: the model generates accurate
+// SEARCH text when it can see the real file content.
+func retryFailedEdits(
+	ctx context.Context,
+	client *ollama.Client,
+	model string,
+	originalCode string,
+	root string,
+	msgs []interface{},
+	opts *ollama.ModelOptions,
+	onToken func(string),
+	onRL OnRateLimitFunc,
+) ([]string, int, int) {
+	failed := collectFailedEdits(originalCode, root)
+	if len(failed) == 0 {
+		return nil, 0, 0
+	}
+
+	// Cap at 5 files to stay within token budget.
+	var retryPrompt strings.Builder
+	retryPrompt.WriteString("Some edits failed because the SEARCH text didn't match the actual file content. " +
+		"Here are the actual file contents. Regenerate ONLY the failing edits using ```edit:filepath blocks.\n\n")
+
+	count := 0
+	for relPath, content := range failed {
+		if count >= 5 {
+			break
+		}
+		retryPrompt.WriteString(fmt.Sprintf("### %s (actual content)\n```\n%s\n```\n\n", relPath, content))
+		count++
+	}
+
+	retryMsgs := []interface{}{
+		msgs[0], // system
+		ollama.Message{Role: "user", Content: retryPrompt.String()},
+	}
+
+	var buf strings.Builder
+	pt, ct, err := streamWithRetry(ctx, client, model, retryMsgs, opts, func(c string) {
+		buf.WriteString(c)
+		if onToken != nil {
+			onToken(c)
+		}
+	}, onRL)
+	if err != nil || strings.TrimSpace(buf.String()) == "" {
+		return nil, 0, 0
+	}
+
+	paths, _ := extractAndApplyChanges(buf.String(), root)
+	return paths, pt, ct
 }
 
 // countCodeFences counts ```lang:filepath fenced blocks in text.

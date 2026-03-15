@@ -177,6 +177,16 @@ func normalizeWS(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
+// trimEachLine trims leading/trailing whitespace from each line independently
+// and rejoins. Used for Tier 2b matching (indentation-only mismatches).
+func trimEachLine(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		lines[i] = strings.TrimSpace(l)
+	}
+	return strings.Join(lines, "\n")
+}
+
 // applyEdits applies a slice of EditBlocks to files on disk under root.
 // Returns the list of files modified and a count of edits that were skipped.
 // Individual skipped-edit messages are NOT printed here; callers receive the
@@ -245,6 +255,61 @@ func applyEdits(edits []EditBlock, root string) (modified []string, skipCount in
 					break
 				}
 			}
+			// Tier 2b: per-line trim — catches indentation-only mismatches.
+			if !found {
+				trimOld := trimEachLine(edit.OldText)
+				for start := 0; start+n <= len(lines); start++ {
+					candidate := trimEachLine(strings.Join(lines[start:start+n], "\n"))
+					if candidate == trimOld {
+						var sb2 strings.Builder
+						sb2.WriteString(strings.Join(lines[:start], "\n"))
+						if start > 0 {
+							sb2.WriteByte('\n')
+						}
+						sb2.WriteString(edit.NewText)
+						if start+n < len(lines) {
+							sb2.WriteByte('\n')
+							sb2.WriteString(strings.Join(lines[start+n:], "\n"))
+						}
+						content = sb2.String()
+						found = true
+						break
+					}
+				}
+			}
+
+			// Tier 2c: best-effort — ≥70% of trimmed lines match consecutively.
+			// Only for blocks of 4+ lines to avoid false positives on short snippets.
+			if !found && n >= 4 {
+				trimmedOldLines := strings.Split(edit.OldText, "\n")
+				bestStart, bestCount := -1, 0
+				for start := 0; start+n <= len(lines); start++ {
+					matchCount := 0
+					for j := 0; j < n; j++ {
+						if strings.TrimSpace(lines[start+j]) == strings.TrimSpace(trimmedOldLines[j]) {
+							matchCount++
+						}
+					}
+					if matchCount > bestCount {
+						bestStart, bestCount = start, matchCount
+					}
+				}
+				if bestStart >= 0 && float64(bestCount)/float64(n) >= 0.70 {
+					var sb3 strings.Builder
+					sb3.WriteString(strings.Join(lines[:bestStart], "\n"))
+					if bestStart > 0 {
+						sb3.WriteByte('\n')
+					}
+					sb3.WriteString(edit.NewText)
+					if bestStart+n < len(lines) {
+						sb3.WriteByte('\n')
+						sb3.WriteString(strings.Join(lines[bestStart+n:], "\n"))
+					}
+					content = sb3.String()
+					found = true
+				}
+			}
+
 			if !found {
 				skipCount++
 				continue
@@ -349,4 +414,97 @@ func extractAndApplyChanges(text, root string) ([]string, []string) {
 	}
 
 	return allPaths, warnings
+}
+
+// collectFailedEdits parses edit blocks from model output, tries matching each
+// against the actual file on disk, and returns a map of relPath → actual file content
+// for every file that has at least one failing edit. Used by retryFailedEdits to
+// re-prompt the model with real file content.
+func collectFailedEdits(text, root string) map[string]string {
+	edits := parseEditBlocks(text)
+	if len(edits) == 0 {
+		return nil
+	}
+
+	failed := map[string]string{}
+	for _, edit := range edits {
+		relPath := edit.FilePath
+		if filepath.IsAbs(relPath) {
+			if rel, err := filepath.Rel(root, relPath); err == nil && !strings.HasPrefix(rel, "..") {
+				relPath = rel
+			} else {
+				continue
+			}
+		}
+		abs := filepath.Join(root, filepath.Clean(relPath))
+		if rel, err := filepath.Rel(root, abs); err != nil || strings.HasPrefix(rel, "..") {
+			continue
+		}
+
+		data, err := os.ReadFile(abs)
+		if err != nil {
+			continue
+		}
+		content := string(data)
+
+		// Check if this edit would match (exact or any fuzzy tier).
+		if strings.Count(content, edit.OldText) == 1 {
+			continue // exact match — not a failure
+		}
+		// Fuzzy: normalizeWS
+		normOld := normalizeWS(edit.OldText)
+		lines := strings.Split(content, "\n")
+		oldLines := strings.Split(edit.OldText, "\n")
+		n := len(oldLines)
+		matched := false
+		for start := 0; start+n <= len(lines); start++ {
+			candidate := strings.Join(lines[start:start+n], "\n")
+			if normalizeWS(candidate) == normOld {
+				matched = true
+				break
+			}
+		}
+		if matched {
+			continue
+		}
+		// Tier 2b: line-trimmed
+		trimOld := trimEachLine(edit.OldText)
+		for start := 0; start+n <= len(lines); start++ {
+			candidate := trimEachLine(strings.Join(lines[start:start+n], "\n"))
+			if candidate == trimOld {
+				matched = true
+				break
+			}
+		}
+		if matched {
+			continue
+		}
+		// Tier 2c: best-effort
+		if n >= 4 {
+			trimmedOldLines := strings.Split(edit.OldText, "\n")
+			for start := 0; start+n <= len(lines); start++ {
+				matchCount := 0
+				for j := 0; j < n; j++ {
+					if strings.TrimSpace(lines[start+j]) == strings.TrimSpace(trimmedOldLines[j]) {
+						matchCount++
+					}
+				}
+				if float64(matchCount)/float64(n) >= 0.70 {
+					matched = true
+					break
+				}
+			}
+		}
+		if matched {
+			continue
+		}
+
+		// This edit would fail — record the file's actual content.
+		failed[relPath] = content
+	}
+
+	if len(failed) == 0 {
+		return nil
+	}
+	return failed
 }

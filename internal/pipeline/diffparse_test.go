@@ -220,6 +220,106 @@ func TestExtractAndApplyChanges_EditOnly(t *testing.T) {
 	}
 }
 
+// TestApplyEdits_LineTrimmedMatch verifies Tier 2b: indentation-only mismatches.
+func TestApplyEdits_LineTrimmedMatch(t *testing.T) {
+	root := t.TempDir()
+	// File has tabs; model SEARCH has spaces.
+	content := "package main\n\nimport (\n\t\"fmt\"\n\t\"os\"\n)\n"
+	os.WriteFile(filepath.Join(root, "f.go"), []byte(content), 0o644)
+
+	edits := []EditBlock{{
+		FilePath: "f.go",
+		OldText:  "import (\n  \"fmt\"\n  \"os\"\n)",
+		NewText:  "import (\n\t\"fmt\"\n\t\"os\"\n\t\"io\"\n)",
+	}}
+	modified, skipped := applyEdits(edits, root)
+
+	if skipped != 0 {
+		t.Errorf("line-trimmed match: expected 0 skips, got %d", skipped)
+	}
+	if len(modified) != 1 {
+		t.Errorf("line-trimmed match: expected 1 modified, got %d", len(modified))
+	}
+	data, _ := os.ReadFile(filepath.Join(root, "f.go"))
+	if !strings.Contains(string(data), "\"io\"") {
+		t.Errorf("edit not applied: %s", data)
+	}
+}
+
+// TestApplyEdits_BestEffortMatch verifies Tier 2c: ≥70% line match for 4+ line blocks.
+func TestApplyEdits_BestEffortMatch(t *testing.T) {
+	root := t.TempDir()
+	// File content — 5 lines in the block.
+	content := "package main\n\nimport { type Database } from 'sql'\nconst x = 1\nconst y = 2\nconst z = 3\nfunc main() {}\n"
+	os.WriteFile(filepath.Join(root, "f.go"), []byte(content), 0o644)
+
+	// Model gets 4 out of 5 lines right — one line differs (missing `type` keyword).
+	edits := []EditBlock{{
+		FilePath: "f.go",
+		OldText:  "import { Database } from 'sql'\nconst x = 1\nconst y = 2\nconst z = 3\nfunc main() {}",
+		NewText:  "import { Database } from 'better-sql'\nconst x = 10\nconst y = 20\nconst z = 30\nfunc start() {}",
+	}}
+	modified, skipped := applyEdits(edits, root)
+
+	if skipped != 0 {
+		t.Errorf("best-effort match: expected 0 skips, got %d", skipped)
+	}
+	if len(modified) != 1 {
+		t.Errorf("best-effort match: expected 1 modified, got %d", len(modified))
+	}
+	data, _ := os.ReadFile(filepath.Join(root, "f.go"))
+	if !strings.Contains(string(data), "better-sql") {
+		t.Errorf("edit not applied: %s", data)
+	}
+}
+
+// TestApplyEdits_BestEffortTooFewLines verifies Tier 2c doesn't trigger for <4 lines.
+func TestApplyEdits_BestEffortTooFewLines(t *testing.T) {
+	root := t.TempDir()
+	content := "line A\nline B\nline C\n"
+	os.WriteFile(filepath.Join(root, "f.txt"), []byte(content), 0o644)
+
+	edits := []EditBlock{{
+		FilePath: "f.txt",
+		OldText:  "line X\nline B\nline C",
+		NewText:  "replaced",
+	}}
+	_, skipped := applyEdits(edits, root)
+	if skipped != 1 {
+		t.Errorf("expected 1 skip (too few lines for best-effort), got %d", skipped)
+	}
+}
+
+// TestCollectFailedEdits verifies collectFailedEdits identifies failing edits.
+func TestCollectFailedEdits(t *testing.T) {
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, "a.go"), []byte("package a\nfunc Real() {}\n"), 0o644)
+
+	// Edit with wrong SEARCH text — should appear in failed map.
+	text := "```edit:a.go\n<<<SEARCH\nfunc Fake() {}\n===\nfunc Fixed() {}\n>>>SEARCH\n```"
+	failed := collectFailedEdits(text, root)
+
+	if len(failed) != 1 {
+		t.Fatalf("expected 1 failed file, got %d", len(failed))
+	}
+	if _, ok := failed["a.go"]; !ok {
+		t.Error("expected a.go in failed map")
+	}
+}
+
+// TestCollectFailedEdits_NoFailures verifies no false positives.
+func TestCollectFailedEdits_NoFailures(t *testing.T) {
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, "a.go"), []byte("package a\nfunc Real() {}\n"), 0o644)
+
+	text := "```edit:a.go\n<<<SEARCH\nfunc Real() {}\n===\nfunc Fixed() {}\n>>>SEARCH\n```"
+	failed := collectFailedEdits(text, root)
+
+	if failed != nil {
+		t.Errorf("expected nil (no failures), got %v", failed)
+	}
+}
+
 // TestParseCodeBlocks_NestedBackticks verifies that JS/TS template literals
 // with backticks don't truncate the file (Fix 1: the critical bug).
 func TestParseCodeBlocks_NestedBackticks(t *testing.T) {
