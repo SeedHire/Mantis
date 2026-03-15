@@ -66,7 +66,7 @@ func TestApplyEdits_Success(t *testing.T) {
 	os.WriteFile(file, []byte("package main\n\nfunc old() {}\n"), 0o644)
 
 	edits := []EditBlock{{FilePath: "main.go", OldText: "func old() {}", NewText: "func new() {}"}}
-	modified, skipped := applyEdits(edits, root)
+	modified, skipped, _ := applyEdits(edits, root)
 
 	if skipped != 0 {
 		t.Errorf("unexpected skips: %d", skipped)
@@ -86,7 +86,7 @@ func TestApplyEdits_NotFound(t *testing.T) {
 	os.WriteFile(filepath.Join(root, "f.go"), []byte("package main\n"), 0o644)
 
 	edits := []EditBlock{{FilePath: "f.go", OldText: "nonexistent", NewText: "replaced"}}
-	modified, skipped := applyEdits(edits, root)
+	modified, skipped, _ := applyEdits(edits, root)
 
 	if len(modified) != 0 {
 		t.Errorf("expected 0 modified, got %d", len(modified))
@@ -101,7 +101,7 @@ func TestApplyEdits_Ambiguous(t *testing.T) {
 	os.WriteFile(filepath.Join(root, "f.go"), []byte("foo bar foo"), 0o644)
 
 	edits := []EditBlock{{FilePath: "f.go", OldText: "foo", NewText: "baz"}}
-	_, skipped := applyEdits(edits, root)
+	_, skipped, _ := applyEdits(edits, root)
 
 	if skipped != 1 {
 		t.Errorf("expected 1 skip for ambiguous match, got %d", skipped)
@@ -111,7 +111,7 @@ func TestApplyEdits_Ambiguous(t *testing.T) {
 func TestApplyEdits_PathTraversal(t *testing.T) {
 	root := t.TempDir()
 	edits := []EditBlock{{FilePath: "../../etc/passwd", OldText: "root", NewText: "evil"}}
-	_, skipped := applyEdits(edits, root)
+	_, skipped, _ := applyEdits(edits, root)
 
 	if skipped != 1 {
 		t.Errorf("expected 1 skip for unsafe path, got %d", skipped)
@@ -127,7 +127,7 @@ func TestApplyEdits_FuzzyMatch(t *testing.T) {
 
 	// SEARCH text has single spaces (exact mismatch, fuzzy match).
 	edits := []EditBlock{{FilePath: "f.go", OldText: "func  foo()  {\n  return\n}", NewText: "func foo() { return }"}}
-	modified, skipped := applyEdits(edits, root)
+	modified, skipped, _ := applyEdits(edits, root)
 
 	if skipped != 0 {
 		t.Errorf("fuzzy match: expected 0 skips, got %d", skipped)
@@ -232,7 +232,7 @@ func TestApplyEdits_LineTrimmedMatch(t *testing.T) {
 		OldText:  "import (\n  \"fmt\"\n  \"os\"\n)",
 		NewText:  "import (\n\t\"fmt\"\n\t\"os\"\n\t\"io\"\n)",
 	}}
-	modified, skipped := applyEdits(edits, root)
+	modified, skipped, _ := applyEdits(edits, root)
 
 	if skipped != 0 {
 		t.Errorf("line-trimmed match: expected 0 skips, got %d", skipped)
@@ -246,45 +246,87 @@ func TestApplyEdits_LineTrimmedMatch(t *testing.T) {
 	}
 }
 
-// TestApplyEdits_BestEffortMatch verifies Tier 2c: ≥70% line match for 4+ line blocks.
+// TestApplyEdits_BestEffortMatch verifies Tier 2c: ≥90% line match for 6+ line blocks.
 func TestApplyEdits_BestEffortMatch(t *testing.T) {
 	root := t.TempDir()
-	// File content — 5 lines in the block.
-	content := "package main\n\nimport { type Database } from 'sql'\nconst x = 1\nconst y = 2\nconst z = 3\nfunc main() {}\n"
+	// File content — 10 lines in the target block (need ≥6 for best-effort, ≥90% match).
+	content := "package main\n\nconst a = 1\nconst b = 2\nconst c = 3\nconst d = 4\nconst e = 5\nconst f = 6\nconst g = 7\nconst h = 8\nfunc main() {}\n"
 	os.WriteFile(filepath.Join(root, "f.go"), []byte(content), 0o644)
 
-	// Model gets 4 out of 5 lines right — one line differs (missing `type` keyword).
+	// Model gets 9 out of 10 lines right (90%), one non-signature line differs slightly.
+	// This should pass Tier 2c since 9/10 = 0.90 >= 0.90.
 	edits := []EditBlock{{
 		FilePath: "f.go",
-		OldText:  "import { Database } from 'sql'\nconst x = 1\nconst y = 2\nconst z = 3\nfunc main() {}",
-		NewText:  "import { Database } from 'better-sql'\nconst x = 10\nconst y = 20\nconst z = 30\nfunc start() {}",
+		OldText:  "const a = 1\nconst b = 2\nconst c = 3\nconst d = 4\nconst e = 5\nconst f = 6\nconst g = 7\nconst h = WRONG\nfunc main() {}\npackage main",
+		NewText:  "const a = 10\nconst b = 20",
 	}}
-	modified, skipped := applyEdits(edits, root)
+	// This has 10 lines, 8 match out of 10 = 80% → should FAIL.
+	_, skipped, _ := applyEdits(edits, root)
+	if skipped != 1 {
+		t.Errorf("expected 1 skip for 80%% match, got %d", skipped)
+	}
 
-	if skipped != 0 {
-		t.Errorf("best-effort match: expected 0 skips, got %d", skipped)
+	// Now test a 9/10 = 90% match that should pass.
+	os.WriteFile(filepath.Join(root, "f.go"), []byte(content), 0o644)
+	edits2 := []EditBlock{{
+		FilePath: "f.go",
+		OldText:  "const a = 1\nconst b = 2\nconst c = 3\nconst d = 4\nconst e = 5\nconst f = 6\nconst g = 7\nconst h = WRONG\nfunc main() {}",
+		NewText:  "const a = 10\nconst b = 20",
+	}}
+	// 9 lines, 8 match = 88.9% → should FAIL (need ≥90%).
+	_, skipped2, _ := applyEdits(edits2, root)
+	if skipped2 != 1 {
+		t.Errorf("expected 1 skip for 88.9%% match, got %d", skipped2)
 	}
-	if len(modified) != 1 {
-		t.Errorf("best-effort match: expected 1 modified, got %d", len(modified))
+
+	// Test 6/6 = 100% match on non-exact (requires Tier 2c path, reached via trimmed-line diff).
+	os.WriteFile(filepath.Join(root, "g.go"), []byte("  line1\n  line2\n  line3\n  line4\n  line5\n  line6\n"), 0o644)
+	edits3 := []EditBlock{{
+		FilePath: "g.go",
+		OldText:  "line1\nline2\nline3\nline4\nline5\nline6",
+		NewText:  "replaced",
+	}}
+	// All 6 trimmed lines match (100%) — should pass via Tier 2b (line-trimmed) actually.
+	modified3, skipped3, _ := applyEdits(edits3, root)
+	if skipped3 != 0 {
+		t.Errorf("expected 0 skips for 100%% trimmed match, got %d", skipped3)
 	}
-	data, _ := os.ReadFile(filepath.Join(root, "f.go"))
-	if !strings.Contains(string(data), "better-sql") {
-		t.Errorf("edit not applied: %s", data)
+	if len(modified3) != 1 {
+		t.Errorf("expected 1 modified, got %d", len(modified3))
 	}
 }
 
-// TestApplyEdits_BestEffortTooFewLines verifies Tier 2c doesn't trigger for <4 lines.
-func TestApplyEdits_BestEffortTooFewLines(t *testing.T) {
+// TestApplyEdits_BestEffortRejectLowMatch verifies 80% match is rejected (needs 90%).
+func TestApplyEdits_BestEffortRejectLowMatch(t *testing.T) {
 	root := t.TempDir()
-	content := "line A\nline B\nline C\n"
-	os.WriteFile(filepath.Join(root, "f.txt"), []byte(content), 0o644)
+	content := "line1\nline2\nline3\nline4\nline5\nline6\nline7\n"
+	os.WriteFile(filepath.Join(root, "f.go"), []byte(content), 0o644)
 
+	// 5/7 = 71% match — should be rejected.
 	edits := []EditBlock{{
-		FilePath: "f.txt",
-		OldText:  "line X\nline B\nline C",
+		FilePath: "f.go",
+		OldText:  "line1\nWRONG\nline3\nWRONG\nline5\nline6\nline7",
 		NewText:  "replaced",
 	}}
-	_, skipped := applyEdits(edits, root)
+	_, skipped, _ := applyEdits(edits, root)
+	if skipped != 1 {
+		t.Errorf("expected 1 skip for low-match block, got %d", skipped)
+	}
+}
+
+// TestApplyEdits_BestEffortTooFewLines verifies Tier 2c doesn't trigger for <6 lines.
+func TestApplyEdits_BestEffortTooFewLines(t *testing.T) {
+	root := t.TempDir()
+	content := "line A\nline B\nline C\nline D\nline E\n"
+	os.WriteFile(filepath.Join(root, "f.txt"), []byte(content), 0o644)
+
+	// 5 lines — below the 6-line minimum for Tier 2c.
+	edits := []EditBlock{{
+		FilePath: "f.txt",
+		OldText:  "line X\nline B\nline C\nline D\nline E",
+		NewText:  "replaced",
+	}}
+	_, skipped, _ := applyEdits(edits, root)
 	if skipped != 1 {
 		t.Errorf("expected 1 skip (too few lines for best-effort), got %d", skipped)
 	}

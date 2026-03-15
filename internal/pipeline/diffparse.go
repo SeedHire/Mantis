@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // EditBlock represents a single SEARCH/REPLACE edit within an ```edit:filepath block.
@@ -187,12 +188,26 @@ func trimEachLine(s string) string {
 	return strings.Join(lines, "\n")
 }
 
+// EditFailure records a single edit that could not be applied.
+type EditFailure struct {
+	FilePath      string // relative path
+	Reason        string // "not found", "ambiguous", "path traversal", "file unreadable"
+	SearchPreview string // first 3 lines of SEARCH block
+}
+
 // applyEdits applies a slice of EditBlocks to files on disk under root.
-// Returns the list of files modified and a count of edits that were skipped.
-// Individual skipped-edit messages are NOT printed here; callers receive the
-// skip count and decide how to surface it (to keep terminal output clean).
-func applyEdits(edits []EditBlock, root string) (modified []string, skipCount int) {
+// Returns the list of files modified, a count of edits that were skipped,
+// and structured failure info for diagnostics.
+func applyEdits(edits []EditBlock, root string) (modified []string, skipCount int, failures []EditFailure) {
 	seen := map[string]bool{}
+
+	searchPreview := func(old string) string {
+		lines := strings.SplitN(old, "\n", 4)
+		if len(lines) > 3 {
+			lines = lines[:3]
+		}
+		return strings.Join(lines, "\n")
+	}
 
 	for _, edit := range edits {
 		relPath := edit.FilePath
@@ -202,17 +217,20 @@ func applyEdits(edits []EditBlock, root string) (modified []string, skipCount in
 				relPath = rel
 			} else {
 				skipCount++
+				failures = append(failures, EditFailure{relPath, "path traversal", searchPreview(edit.OldText)})
 				continue
 			}
 		}
 		abs := filepath.Join(root, filepath.Clean(relPath))
 		if rel, err := filepath.Rel(root, abs); err != nil || strings.HasPrefix(rel, "..") {
 			skipCount++
+			failures = append(failures, EditFailure{relPath, "path traversal", searchPreview(edit.OldText)})
 			continue
 		}
 		data, err := os.ReadFile(abs)
 		if err != nil {
 			skipCount++
+			failures = append(failures, EditFailure{relPath, "file unreadable", searchPreview(edit.OldText)})
 			continue
 		}
 
@@ -230,6 +248,7 @@ func applyEdits(edits []EditBlock, root string) (modified []string, skipCount in
 			normOld := normalizeWS(edit.OldText)
 			if normOld == "" {
 				skipCount++
+				failures = append(failures, EditFailure{relPath, "empty search text", ""})
 				continue
 			}
 			lines := strings.Split(content, "\n")
@@ -278,23 +297,34 @@ func applyEdits(edits []EditBlock, root string) (modified []string, skipCount in
 				}
 			}
 
-			// Tier 2c: best-effort — ≥70% of trimmed lines match consecutively.
-			// Only for blocks of 4+ lines to avoid false positives on short snippets.
-			if !found && n >= 4 {
+			// Tier 2c: best-effort — ≥90% of trimmed lines match consecutively.
+			// Only for blocks of 6+ lines to avoid false positives on short snippets.
+			// Signature lines (func/class/def/type/interface) must match exactly.
+			if !found && n >= 6 {
 				trimmedOldLines := strings.Split(edit.OldText, "\n")
 				bestStart, bestCount := -1, 0
 				for start := 0; start+n <= len(lines); start++ {
 					matchCount := 0
+					sigFail := false
 					for j := 0; j < n; j++ {
-						if strings.TrimSpace(lines[start+j]) == strings.TrimSpace(trimmedOldLines[j]) {
+						trimmedActual := strings.TrimSpace(lines[start+j])
+						trimmedExpected := strings.TrimSpace(trimmedOldLines[j])
+						if trimmedActual == trimmedExpected {
 							matchCount++
+						} else if isSignatureLine(trimmedExpected) {
+							// Signature lines must match exactly — abort this window.
+							sigFail = true
+							break
 						}
+					}
+					if sigFail {
+						continue
 					}
 					if matchCount > bestCount {
 						bestStart, bestCount = start, matchCount
 					}
 				}
-				if bestStart >= 0 && float64(bestCount)/float64(n) >= 0.70 {
+				if bestStart >= 0 && float64(bestCount)/float64(n) >= 0.90 {
 					var sb3 strings.Builder
 					sb3.WriteString(strings.Join(lines[:bestStart], "\n"))
 					if bestStart > 0 {
@@ -312,16 +342,19 @@ func applyEdits(edits []EditBlock, root string) (modified []string, skipCount in
 
 			if !found {
 				skipCount++
+				failures = append(failures, EditFailure{relPath, "not found", searchPreview(edit.OldText)})
 				continue
 			}
 		} else {
 			// Ambiguous — more than one exact match.
 			skipCount++
+			failures = append(failures, EditFailure{relPath, "ambiguous (multiple matches)", searchPreview(edit.OldText)})
 			continue
 		}
 
 		if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
 			skipCount++
+			failures = append(failures, EditFailure{relPath, "write error", searchPreview(edit.OldText)})
 			continue
 		}
 
@@ -346,9 +379,19 @@ func extractAndApplyChanges(text, root string) ([]string, []string) {
 	// 1. Apply edit blocks first (surgical changes to existing files).
 	edits := parseEditBlocks(text)
 	if len(edits) > 0 {
-		modified, skipped := applyEdits(edits, root)
+		modified, skipped, editFailures := applyEdits(edits, root)
 		if skipped > 0 {
-			warnings = append(warnings, fmt.Sprintf("%d edit block(s) skipped (SEARCH mismatch — see .mantis/last-pipeline.md)", skipped))
+			warnings = append(warnings, fmt.Sprintf("%d edit block(s) skipped (SEARCH mismatch)", skipped))
+			// 9F: Per-file failure diagnostics — inline warnings for each failure.
+			for _, f := range editFailures {
+				preview := strings.SplitN(f.SearchPreview, "\n", 2)[0]
+				if len(preview) > 60 {
+					preview = preview[:60] + "…"
+				}
+				warnings = append(warnings, fmt.Sprintf("  edit failed: %s — %s (%s)", f.FilePath, f.Reason, preview))
+			}
+			// Write detailed failures to .mantis/last-failures.log.
+			writeFailureLog(root, editFailures)
 		}
 		for _, p := range modified {
 			if !seen[p] {
@@ -390,6 +433,18 @@ func extractAndApplyChanges(text, root string) ([]string, []string) {
 		if seen[abs] {
 			continue // already modified by an edit block — don't overwrite
 		}
+
+		// 9B: Protect existing files from whole-file overwrite.
+		// If the file already exists with content, require edit blocks instead.
+		if info, err := os.Stat(abs); err == nil && info.Size() > 0 {
+			existing, readErr := os.ReadFile(abs)
+			if readErr == nil && strings.TrimSpace(string(existing)) != strings.TrimSpace(content) {
+				warnings = append(warnings, fmt.Sprintf("skipped whole-file overwrite of existing %s — use edit blocks", relPath))
+				continue
+			}
+			// Content is identical (or only whitespace diff) — allow as no-op.
+		}
+
 		seen[abs] = true
 
 		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
@@ -414,6 +469,38 @@ func extractAndApplyChanges(text, root string) ([]string, []string) {
 	}
 
 	return allPaths, warnings
+}
+
+// isSignatureLine returns true if the line looks like a function/class/type declaration.
+// These lines must match exactly in fuzzy matching to prevent wrong-location replacements.
+func isSignatureLine(trimmed string) bool {
+	for _, prefix := range []string{"func ", "class ", "def ", "interface ", "type ", "struct ", "enum ", "trait ", "impl ", "pub fn ", "pub struct ", "export function ", "export class ", "export interface ", "export type "} {
+		if strings.HasPrefix(trimmed, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// writeFailureLog writes structured failure details to .mantis/last-failures.log
+// for post-mortem debugging.
+func writeFailureLog(root string, failures []EditFailure) {
+	if root == "" || len(failures) == 0 {
+		return
+	}
+	dir := filepath.Join(root, ".mantis")
+	_ = os.MkdirAll(dir, 0o755)
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("# Edit Failures — %s\n\n", time.Now().Format("2006-01-02 15:04:05")))
+	for i, f := range failures {
+		sb.WriteString(fmt.Sprintf("## %d. %s — %s\n", i+1, f.FilePath, f.Reason))
+		if f.SearchPreview != "" {
+			sb.WriteString("```\n")
+			sb.WriteString(f.SearchPreview)
+			sb.WriteString("\n```\n\n")
+		}
+	}
+	_ = os.WriteFile(filepath.Join(dir, "last-failures.log"), []byte(sb.String()), 0o644)
 }
 
 // collectFailedEdits parses edit blocks from model output, tries matching each

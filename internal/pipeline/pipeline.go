@@ -300,6 +300,13 @@ func Run(
 ) (*Result, error) {
 
 	pipelineStart := time.Now()
+
+	// 9E: Git stash checkpoint — save working state before pipeline modifies files.
+	stashCreated := false
+	if opts.Root != "" {
+		stashCreated = gitStashCheckpoint(opts.Root)
+	}
+
 	planModel := router.ModelFor(router.TierReason)
 	codeModel := router.ModelFor(router.TierCode)
 	// 7.2: Resolve editor model — defaults to TierFast if not explicitly set.
@@ -420,6 +427,12 @@ func Run(
 		}
 	}
 
+	// ── Stage 1.5: Extract project context from plan ────────────────────────
+	// Read existing files mentioned in the plan so the CODE stage sees real
+	// imports, types, and function signatures — not guessing blind.
+	planFiles := extractPlanFiles(res.PlanText)
+	projectCtx := readProjectContext(opts.Root, planFiles, 15, 48000)
+
 	// ── Stage 2: CODE — task-based or monolithic ─────────────────────────────
 	// Try to parse discrete tasks from the plan. If found, execute them
 	// one-by-one with focused prompts and live TUI progress. Otherwise
@@ -430,7 +443,7 @@ func Run(
 		// Task-based execution: each task gets its own focused prompt.
 		fmt.Printf("%s  ◆ coding   [%s] — %d tasks%s\n", pColorDim, codeModel, len(tasks), pColorReset)
 		codeStart := time.Now()
-		runTaskBased(ctx, client, codeModel, systemPrompt, userRequest, res.PlanText, tasks, res, opts.Root, opts.TaskTimeout, codeOpts, onRL)
+		runTaskBased(ctx, client, codeModel, systemPrompt, userRequest, res.PlanText, tasks, res, opts.Root, opts.TaskTimeout, codeOpts, onRL, projectCtx)
 		codeElapsed := time.Since(codeStart)
 
 		done := 0
@@ -457,7 +470,7 @@ func Run(
 
 		codeMsgs := []interface{}{
 			ollama.Message{Role: "system", Content: systemPrompt + effCodeSuffix},
-			ollama.Message{Role: "user", Content: codeUserPrompt(userRequest, res.PlanText)},
+			ollama.Message{Role: "user", Content: codeUserPrompt(userRequest, res.PlanText, projectCtx)},
 		}
 
 		var lastBuildErr string
@@ -488,6 +501,19 @@ func Run(
 			res.PromptTok += pt
 			res.ComplTok += ct
 			codeTokTotal += pt + ct
+
+			// 9D: Validate output before writing to disk.
+			if ok, reason := validateCodeOutput(res.CodeText); !ok {
+				fmt.Printf("%s  ⚠ invalid code output: %s — retrying%s\n", pColorDim, reason, pColorReset)
+				if attempt < maxRetries {
+					codeMsgs = append(codeMsgs,
+						ollama.Message{Role: "assistant", Content: res.CodeText},
+						ollama.Message{Role: "user", Content: "Your output was invalid: " + reason + ". You MUST output code in ```lang:filepath fences for new files or ```edit:filepath fences for existing files. Do not explain — just write the code."},
+					)
+					continue
+				}
+				break
+			}
 
 			if opts.Root == "" || attempt == maxRetries {
 				break
@@ -640,6 +666,12 @@ func Run(
 	}
 
 	res.Combined = assemble(res.PlanText, res.CodeText, res.TestText)
+
+	// 9E: Drop checkpoint stash on successful completion.
+	if stashCreated {
+		gitStashDrop(opts.Root)
+	}
+
 	printDoneLine(time.Since(pipelineStart))
 	return res, nil
 }
@@ -661,6 +693,10 @@ func ContinuePlan(
 	effTestNaming := langTestNaming(detectLang(opts.Root))
 	effCodeSuffix := codeStageSuffixFor(router.EditFormatForTier(router.TierCode))
 
+	// Read existing project files mentioned in the plan for CODE stage context.
+	cpPlanFiles := extractPlanFiles(planText)
+	cpProjectCtx := readProjectContext(opts.Root, cpPlanFiles, 15, 48000)
+
 	// ── CODE stage ────────────────────────────────────────────────────────────
 	fmt.Printf("%s  ◆ coding   [%s]%s\n", pColorDim, codeModel, pColorReset)
 
@@ -671,7 +707,7 @@ func ContinuePlan(
 
 	codeMsgs := []interface{}{
 		ollama.Message{Role: "system", Content: systemPrompt + effCodeSuffix},
-		ollama.Message{Role: "user", Content: codeUserPrompt(userRequest, planText)},
+		ollama.Message{Role: "user", Content: codeUserPrompt(userRequest, planText, cpProjectCtx)},
 	}
 
 	var lastBuildErr string
@@ -809,6 +845,31 @@ func ContinuePlan(
 	return res, nil
 }
 
+// gitStashCheckpoint creates a git stash to save the current working state.
+// Returns true if a stash was created. Does nothing if the tree is clean.
+func gitStashCheckpoint(root string) bool {
+	// Check if this is a git repo with changes.
+	statusCmd := exec.Command("git", "-C", root, "status", "--porcelain")
+	statusOut, err := statusCmd.Output()
+	if err != nil || len(strings.TrimSpace(string(statusOut))) == 0 {
+		return false // not a git repo or clean tree
+	}
+
+	stamp := time.Now().Format("20060102-150405")
+	cmd := exec.Command("git", "-C", root, "stash", "push", "-m", "mantis-checkpoint-"+stamp, "--include-untracked")
+	if err := cmd.Run(); err != nil {
+		return false
+	}
+	fmt.Printf("%s  ◉ checkpoint saved — 'git stash pop' to restore pre-pipeline state%s\n", pColorDim, pColorReset)
+	return true
+}
+
+// gitStashDrop drops the most recent stash (the checkpoint).
+func gitStashDrop(root string) {
+	cmd := exec.Command("git", "-C", root, "stash", "drop")
+	_ = cmd.Run() // best-effort
+}
+
 // ── Task-based execution ──────────────────────────────────────────────────────
 
 // parseTasks extracts individual tasks from the plan's "### Task Breakdown" section.
@@ -899,6 +960,7 @@ func runTaskBased(
 	taskTimeout time.Duration,
 	codeOpts *ollama.ModelOptions,
 	onRL OnRateLimitFunc,
+	projectCtx string,
 ) {
 	// Atomic renderer owns all stdout for the task region.
 	r := newTaskRenderer(tasks)
@@ -956,7 +1018,7 @@ func runTaskBased(
 		taskCtx, taskCancel := context.WithTimeout(ctx, taskTimeout)
 		defer taskCancel()
 
-		taskPrompt := taskCodePrompt(userRequest, planText, tasks[i].Title, root, writtenFiles, sealedManifest, tasks[i].VerificationCriteria)
+		taskPrompt := taskCodePrompt(userRequest, planText, tasks[i].Title, root, writtenFiles, sealedManifest, tasks[i].VerificationCriteria, projectCtx)
 		msgs := []interface{}{
 			ollama.Message{Role: "system", Content: systemPrompt + taskStageSuffix},
 			ollama.Message{Role: "user", Content: taskPrompt},
@@ -1441,7 +1503,7 @@ func extractSealedTypes(root string, writtenFiles []string) string {
 	return sb.String()
 }
 
-func taskCodePrompt(request, plan, taskTitle, root string, writtenFiles []string, sealedManifest string, criteria []string) string {
+func taskCodePrompt(request, plan, taskTitle, root string, writtenFiles []string, sealedManifest string, criteria []string, projectCtx string) string {
 	var sb strings.Builder
 	sb.WriteString("## Original Request\n")
 	sb.WriteString(request)
@@ -1466,6 +1528,10 @@ func taskCodePrompt(request, plan, taskTitle, root string, writtenFiles []string
 	priorCtx := readPriorContext(root, writtenFiles, 36000)
 	if priorCtx != "" {
 		sb.WriteString(priorCtx)
+	}
+	if projectCtx != "" {
+		sb.WriteString("\n\n")
+		sb.WriteString(projectCtx)
 	}
 	return sb.String()
 }
@@ -2462,16 +2528,124 @@ func planUserPrompt(req string) string {
 	return "Analyze this development request and produce a structured implementation plan:\n\n" + req
 }
 
-func codeUserPrompt(req, plan string) string {
+func codeUserPrompt(req, plan, projectCtx string) string {
+	ctx := ""
+	if projectCtx != "" {
+		ctx = "\n\n" + projectCtx
+	}
 	return fmt.Sprintf(
 		"Implement the following based on the plan provided.\n\n"+
 			"## Original Request\n%s\n\n"+
-			"## Implementation Plan\n%s\n\n"+
+			"## Implementation Plan\n%s%s\n\n"+
 			"Write the implementation now. For NEW files use `lang:filepath` fences. "+
 			"For EXISTING files use `edit:filepath` fences with <<<SEARCH/===/>>>SEARCH markers. "+
-			"Never output the full content of an existing file.",
-		req, plan,
+			"Never output the full content of an existing file — use SEARCH/REPLACE edits to modify existing code.",
+		req, plan, ctx,
 	)
+}
+
+// filePathRe matches file paths mentioned in plan text (e.g. src/routes/auth.go, models/user.ts).
+var filePathRe = regexp.MustCompile(`(?:^|[\s\x60"'(])([a-zA-Z0-9_./\-]+\.(?:go|ts|tsx|js|jsx|py|rs|java|rb|css|scss|html|yaml|yml|json|toml|sql|prisma|proto|svelte|vue))(?:[\s\x60"'),:]|$)`)
+
+// extractPlanFiles extracts file paths mentioned in the plan text.
+// Returns deduplicated relative paths.
+func extractPlanFiles(planText string) []string {
+	matches := filePathRe.FindAllStringSubmatch(planText, -1)
+	seen := map[string]bool{}
+	var paths []string
+	for _, m := range matches {
+		p := strings.TrimSpace(m[1])
+		if p == "" || seen[p] {
+			continue
+		}
+		// Skip obvious non-paths.
+		if strings.HasPrefix(p, ".") && !strings.HasPrefix(p, "./") && !strings.HasPrefix(p, "../") {
+			continue
+		}
+		seen[p] = true
+		paths = append(paths, p)
+	}
+	return paths
+}
+
+// readProjectContext reads existing project files mentioned in the plan and returns
+// a formatted context block. This gives the CODE stage visibility into the actual
+// codebase so it can generate accurate imports, types, and SEARCH blocks.
+// Cap: maxFiles files, maxChars total characters.
+func readProjectContext(root string, planFiles []string, maxFiles, maxChars int) string {
+	if root == "" || len(planFiles) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("## Existing Project Files (read from disk — use these for accurate imports and edits)\n")
+	totalChars := 0
+	filesRead := 0
+
+	for _, relPath := range planFiles {
+		if filesRead >= maxFiles || totalChars >= maxChars {
+			break
+		}
+		absPath := relPath
+		if !filepath.IsAbs(absPath) {
+			absPath = filepath.Join(root, absPath)
+		}
+		data, err := os.ReadFile(absPath)
+		if err != nil {
+			continue // file doesn't exist yet (new file) — skip
+		}
+		content := string(data)
+		// Skip binary files.
+		if len(content) > 0 && strings.ContainsRune(content[:min(len(content), 512)], 0) {
+			continue
+		}
+		// Cap individual files at 500 lines.
+		lines := strings.Split(content, "\n")
+		if len(lines) > 500 {
+			lines = lines[:500]
+			content = strings.Join(lines, "\n") + "\n... (truncated)"
+		}
+
+		ext := strings.TrimPrefix(filepath.Ext(relPath), ".")
+		block := fmt.Sprintf("\n### %s\n```%s\n%s\n```\n", relPath, ext, content)
+		if totalChars+len(block) > maxChars {
+			break
+		}
+		sb.WriteString(block)
+		totalChars += len(block)
+		filesRead++
+	}
+
+	if filesRead == 0 {
+		return ""
+	}
+	fmt.Printf("%s  ◉ %d existing file(s) injected as context%s\n", pColorDim, filesRead, pColorReset)
+	return sb.String()
+}
+
+// validateCodeOutput checks that model output contains valid code blocks and isn't
+// a refusal or pure prose. Returns (ok, reason).
+func validateCodeOutput(text string) (bool, string) {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return false, "empty output"
+	}
+	// Check for refusal patterns.
+	lower := strings.ToLower(trimmed)
+	for _, phrase := range []string{
+		"i can't help", "i cannot help", "i'm unable to", "i am unable to",
+		"i apologize", "i'm sorry, but i", "as an ai language model",
+		"i don't have access", "i cannot generate",
+	} {
+		if strings.Contains(lower, phrase) {
+			return false, "model refused request"
+		}
+	}
+	// Check for at least one code fence.
+	if !strings.Contains(text, "```") {
+		return false, "no code blocks found in output"
+	}
+	return true, ""
 }
 
 func testUserPrompt(req, plan string) string {
