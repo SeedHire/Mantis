@@ -230,9 +230,11 @@ func (s *Store) findStashByMessage(msg string) string {
 		return ""
 	}
 	for _, line := range strings.Split(string(out), "\n") {
-		if strings.Contains(line, msg) {
-			// Line format: "stash@{N}: On branch: message"
-			parts := strings.SplitN(line, ":", 2)
+		// Line format: "stash@{N}: On branch: message"
+		// Use exact suffix match to avoid collisions (e.g. "backup" matching "backup-2").
+		trimmed := strings.TrimSpace(line)
+		if strings.HasSuffix(trimmed, ": "+msg) || strings.HasSuffix(trimmed, " "+msg) {
+			parts := strings.SplitN(trimmed, ":", 2)
 			if len(parts) >= 1 {
 				return strings.TrimSpace(parts[0])
 			}

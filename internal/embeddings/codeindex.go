@@ -149,7 +149,11 @@ func extractSymbolChunk(lines []string, startLine, endLine, maxChars int) string
 	var sb strings.Builder
 	for i := start; i < end; i++ {
 		if sb.Len()+len(lines[i]) > maxChars {
-			sb.WriteString(lines[i][:min(maxChars-sb.Len(), len(lines[i]))])
+			remaining := maxChars - sb.Len()
+			if remaining < 0 {
+				remaining = 0
+			}
+			sb.WriteString(lines[i][:min(remaining, len(lines[i]))])
 			sb.WriteString("\n// ... truncated")
 			break
 		}

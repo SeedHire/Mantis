@@ -468,6 +468,73 @@ func TestSuggestDedicatedTool(t *testing.T) {
 	}
 }
 
+// ── Command Injection (Task 1) ────────────────────────────────────────────────
+
+func TestCommandInjection_RedirectionBlocked(t *testing.T) {
+	// BUG: >, >>, < not in shellMetachars — LLM can write arbitrary files
+	// via "echo evil > /tmp/pwned" which passes the allowlist (echo is allowed).
+	cases := []string{
+		"echo evil > /tmp/pwned",
+		"echo data >> /tmp/append",
+		"cat < /etc/shadow",
+		"ls > /tmp/filelist",
+	}
+	for _, cmd := range cases {
+		if isAllowedCmd(cmd) {
+			t.Errorf("isAllowedCmd(%q) = true — redirection should be blocked", cmd)
+		}
+	}
+}
+
+func TestCommandInjection_FindExecBlocked(t *testing.T) {
+	// BUG: find -exec bypasses allowlist — "find . -exec rm -rf {} +" passes.
+	cases := []string{
+		"find . -exec rm -rf {} +",
+		"find /tmp -exec cat {} ;",
+		"find . -exec sh -c 'evil' {} \\;",
+		"find . -delete",
+		"find . -execdir whoami {} +",
+	}
+	for _, cmd := range cases {
+		if isAllowedCmd(cmd) {
+			t.Errorf("isAllowedCmd(%q) = true — find -exec/-delete should be blocked", cmd)
+		}
+	}
+}
+
+func TestCommandInjection_GrepSensitivePathBlocked(t *testing.T) {
+	// BUG: grep is in allowedPrefixes but blockSensitivePath only checks cat/head/tail.
+	// "grep password /etc/shadow" passes all guards.
+	cases := []string{
+		"grep password /etc/shadow",
+		"grep -r root /etc/passwd",
+		"grep secret /proc/1/environ",
+		"grep key /var/log/syslog",
+	}
+	for _, cmd := range cases {
+		if isAllowedCmd(cmd) {
+			t.Errorf("isAllowedCmd(%q) = true — grep on sensitive paths should be blocked", cmd)
+		}
+	}
+}
+
+func TestCommandInjection_LegitCommandsStillWork(t *testing.T) {
+	// Ensure the fixes don't break legitimate commands.
+	cases := []string{
+		"echo hello",
+		"find . -name '*.go'",
+		"grep TODO main.go",
+		"grep -r FIXME src/",
+		"cat main.go",
+		"ls -la",
+	}
+	for _, cmd := range cases {
+		if !isAllowedCmd(cmd) {
+			t.Errorf("isAllowedCmd(%q) = false — legitimate command was blocked", cmd)
+		}
+	}
+}
+
 // ── ShouldRunMultiAgent ───────────────────────────────────────────────────────
 
 func TestShouldRunMultiAgent(t *testing.T) {

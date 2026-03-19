@@ -10,9 +10,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
 const (
@@ -90,12 +92,49 @@ type ChatChunk struct {
 	EvalCount       int  `json:"eval_count"`
 }
 
+// ChatProvider defines the core chat methods needed for fallback providers.
+// Both openai.Client and ollama.Client satisfy this interface.
+type ChatProvider interface {
+	StreamChat(ctx context.Context, model string, messages []interface{}, opts *ModelOptions, onChunk func(string)) (int, int, error)
+	ChatWithTools(ctx context.Context, model string, messages []interface{}, tools []Tool, opts *ModelOptions) (*ToolResult, error)
+}
+
+// FallbackProvider holds an alternative chat provider and its default model.
+type FallbackProvider struct {
+	Provider ChatProvider
+	Model    string // default model for this provider
+	Name     string // display name (e.g. "groq", "cerebras")
+}
+
 // Client talks to Ollama Cloud or local Ollama.
 type Client struct {
 	baseURL    string
 	apiKey     string
 	httpClient *http.Client
 	isCloud    bool
+
+	// Fallback is an optional OpenAI-compatible provider used when Ollama is unavailable.
+	// Set by the repl at startup if MANTIS_*_KEY env vars are detected.
+	Fallback      *FallbackProvider
+	useFallback   bool // true after Ollama fails and fallback succeeds
+}
+
+// newHTTPClient returns an http.Client with sensible connection timeouts.
+// No overall request timeout — callers control that via context deadlines.
+func newHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: Timeout, // 0 = no overall timeout; context handles it
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   10 * time.Second, // TCP connect timeout
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 30 * time.Second, // time to first response byte
+			MaxIdleConns:          10,
+			IdleConnTimeout:       90 * time.Second,
+		},
+	}
 }
 
 // New returns a Client pointed at Ollama Cloud if apiKey is set,
@@ -105,13 +144,13 @@ func New(apiKey string) *Client {
 		return &Client{
 			baseURL:    CloudBaseURL,
 			apiKey:     apiKey,
-			httpClient: &http.Client{Timeout: Timeout},
+			httpClient: newHTTPClient(),
 			isCloud:    true,
 		}
 	}
 	return &Client{
 		baseURL:    LocalBaseURL,
-		httpClient: &http.Client{Timeout: Timeout},
+		httpClient: newHTTPClient(),
 		isCloud:    false,
 	}
 }
@@ -126,7 +165,7 @@ func NewFromEnv() *Client {
 func NewWithBaseURL(baseURL string) *Client {
 	return &Client{
 		baseURL:    baseURL,
-		httpClient: &http.Client{},
+		httpClient: newHTTPClient(),
 	}
 }
 
@@ -186,6 +225,10 @@ func (c *Client) StreamChat(
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
+		// Connection failed — try fallback if available.
+		if pt, ct, fbErr, ok := c.tryFallbackStream(ctx, model, messages, opts, onChunk); ok {
+			return pt, ct, fbErr
+		}
 		return 0, 0, fmt.Errorf("http: %w", err)
 	}
 	defer resp.Body.Close()
@@ -219,6 +262,34 @@ func (c *Client) StreamChat(
 		return promptTokens, completionTokens, fmt.Errorf("stream read: %w", err)
 	}
 	return promptTokens, completionTokens, nil
+}
+
+// tryFallbackStream attempts to use the fallback provider for streaming.
+// Returns (pt, ct, err, ok) where ok=true if fallback was attempted.
+func (c *Client) tryFallbackStream(ctx context.Context, model string, messages []interface{}, opts *ModelOptions, onChunk func(string)) (int, int, error, bool) {
+	if c.Fallback == nil {
+		return 0, 0, nil, false
+	}
+	fbModel := model
+	if c.Fallback.Model != "" {
+		fbModel = c.Fallback.Model
+	}
+	pt, ct, err := c.Fallback.Provider.StreamChat(ctx, fbModel, messages, opts, onChunk)
+	if err == nil {
+		c.useFallback = true
+	}
+	return pt, ct, err, true
+}
+
+// UseFallback reports whether the client has switched to a fallback provider.
+func (c *Client) UseFallback() bool { return c.useFallback }
+
+// FallbackName returns the display name of the active fallback provider, or "".
+func (c *Client) FallbackName() string {
+	if c.Fallback != nil {
+		return c.Fallback.Name
+	}
+	return ""
 }
 
 // Chat is a non-streaming version that returns the full response.
@@ -282,6 +353,15 @@ func (c *Client) ListModels(ctx context.Context) ([]ModelInfo, error) {
 	for i, m := range result.Models {
 		infos[i] = ModelInfo{Name: m.Name, Size: m.Size}
 	}
+	// If no Ollama models are available but a fallback is configured,
+	// inject a synthetic model entry so the router has something to resolve.
+	if len(infos) == 0 && c.Fallback != nil && c.Fallback.Model != "" {
+		infos = append(infos, ModelInfo{
+			Name: c.Fallback.Model,
+			Size: 70_000_000_000, // assume 70B-class for proper tier routing
+		})
+		c.useFallback = true
+	}
 	return infos, nil
 }
 
@@ -339,6 +419,18 @@ func (c *Client) ChatWithTools(
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
+		// Connection failed — try fallback if available.
+		if c.Fallback != nil {
+			fbModel := model
+			if c.Fallback.Model != "" {
+				fbModel = c.Fallback.Model
+			}
+			result, fbErr := c.Fallback.Provider.ChatWithTools(ctx, fbModel, messages, tools, opts)
+			if fbErr == nil {
+				c.useFallback = true
+			}
+			return result, fbErr
+		}
 		return nil, fmt.Errorf("http: %w", err)
 	}
 	defer resp.Body.Close()

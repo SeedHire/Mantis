@@ -250,3 +250,37 @@ func TestTopoSort_EmptyDecomposition(t *testing.T) {
 		t.Errorf("empty decomposition: expected 0 levels, got %d", len(levels))
 	}
 }
+
+// ── getWorkerMaxIter ────────────────────────────────────────────────────────
+
+func TestGetWorkerMaxIter_Default(t *testing.T) {
+	os.Unsetenv("MANTIS_AGENT_MAX_ITER")
+	n := getWorkerMaxIter()
+	if n != defaultWorkerMaxIter {
+		t.Errorf("expected default %d, got %d", defaultWorkerMaxIter, n)
+	}
+}
+
+func TestGetWorkerMaxIter_EnvOverride(t *testing.T) {
+	t.Setenv("MANTIS_AGENT_MAX_ITER", "15")
+	n := getWorkerMaxIter()
+	if n != 15 {
+		t.Errorf("expected 15 from env, got %d", n)
+	}
+}
+
+func TestGetWorkerMaxIter_InvalidEnv(t *testing.T) {
+	t.Setenv("MANTIS_AGENT_MAX_ITER", "abc")
+	n := getWorkerMaxIter()
+	if n != defaultWorkerMaxIter {
+		t.Errorf("invalid env should fall back to default %d, got %d", defaultWorkerMaxIter, n)
+	}
+}
+
+func TestGetWorkerMaxIter_ZeroEnv(t *testing.T) {
+	t.Setenv("MANTIS_AGENT_MAX_ITER", "0")
+	n := getWorkerMaxIter()
+	if n != defaultWorkerMaxIter {
+		t.Errorf("zero env should fall back to default %d, got %d", defaultWorkerMaxIter, n)
+	}
+}

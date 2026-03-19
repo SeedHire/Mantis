@@ -569,6 +569,13 @@ func classify(ctx context.Context, message string, hasImage bool, store EmbedSto
 			scores[TierMax] -= 0.5
 		}
 	}
+	// 4. "what does X mean" is a definition lookup → trivial, not fast.
+	// Exclude error-related queries — "what does this error mean" is a fix question.
+	if strings.Contains(lower, "what does") && strings.Contains(lower, "mean") &&
+		!strings.Contains(lower, "error") && !strings.Contains(lower, "bug") &&
+		!strings.Contains(lower, "crash") && !strings.Contains(lower, "fail") {
+		scores[TierTrivial] += 1.5
+	}
 
 	// Pick tier with highest score.
 	best := TierCode
@@ -620,8 +627,19 @@ func classify(ctx context.Context, message string, hasImage bool, store EmbedSto
 	}
 
 	// Fix tasks need at least TierCode — small models can't fix errors well.
+	// Exception 1: trivial fixes (typo, spelling, rename) stay trivial.
+	// Exception 2: when another tier dominates (score ≥ 2× the code score),
+	// the user clearly wants that tier, not a fix — don't override.
 	if intent.TaskType == "fix" && intent.Tier < TierCode {
-		intent.Tier = TierCode
+		isTrivialFix := strings.Contains(lower, "typo") ||
+			strings.Contains(lower, "spelling") ||
+			strings.Contains(lower, "rename")
+		dominantScore := scores[best]
+		codeScore := scores[TierCode]
+		isDominant := dominantScore >= 2*codeScore && codeScore > 0
+		if !isTrivialFix && !isDominant {
+			intent.Tier = TierCode
+		}
 	}
 
 	return intent

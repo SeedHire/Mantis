@@ -156,14 +156,26 @@ func analyzeChurn(root, since string) ([]FileChurn, error) {
 			continue
 		}
 
-		added, _ := strconv.Atoi(parts[0])
-		deleted, _ := strconv.Atoi(parts[1])
-		path := parts[2]
-
 		// Skip binary files (git shows - for binary).
 		if parts[0] == "-" || parts[1] == "-" {
 			continue
 		}
+
+		added, _ := strconv.Atoi(parts[0])
+		deleted, _ := strconv.Atoi(parts[1])
+
+		// Handle renames: numstat shows "N M old => new" or "N M {prefix/old => prefix/new}".
+		// Join remaining parts to get the full path, then extract the new name.
+		path := strings.Join(parts[2:], " ")
+		if idx := strings.Index(path, " => "); idx != -1 {
+			path = path[idx+4:]
+		}
+		// Strip curly-brace rename syntax: "{old => new}/suffix" → "new/suffix"
+		if strings.Contains(path, "}") {
+			path = strings.ReplaceAll(path, "}", "")
+			path = strings.ReplaceAll(path, "{", "")
+		}
+		path = strings.TrimSpace(path)
 
 		fs, ok := stats[path]
 		if !ok {
@@ -181,9 +193,15 @@ func analyzeChurn(root, since string) ([]FileChurn, error) {
 		fs.lastAuthor = currentAuthor
 	}
 
-	// Get last modified dates.
-	var files []FileChurn
+	// Batch-fetch last-modified timestamps for all files in one git call.
 	now := time.Now()
+	trackedPaths := make(map[string]bool, len(stats))
+	for p := range stats {
+		trackedPaths[p] = true
+	}
+	lastModified := batchLastModified(root, trackedPaths, now)
+
+	var files []FileChurn
 	for path, fs := range stats {
 		commitCount := len(fs.commits)
 		churn := float64(fs.added+fs.deleted) / float64(max(commitCount, 1))
@@ -194,7 +212,10 @@ func analyzeChurn(root, since string) ([]FileChurn, error) {
 		}
 		sort.Strings(authorNames)
 
-		daysSince := daysSinceLastChange(root, path, now)
+		daysSince := -1
+		if d, ok := lastModified[path]; ok {
+			daysSince = d
+		}
 
 		files = append(files, FileChurn{
 			Path:            path,
@@ -311,6 +332,46 @@ func analyzeCoupling(root, since string, files []FileChurn) ([]CoupledFile, erro
 	return result, nil
 }
 
+// batchLastModified fetches last-change timestamps for all files in a single
+// git log call, returning a map of path → days since last change.
+// This replaces N individual `git log -1 -- <file>` calls with one pass.
+func batchLastModified(root string, trackedPaths map[string]bool, now time.Time) map[string]int {
+	result := make(map[string]int, len(trackedPaths))
+
+	// Single git log with commit timestamps + file names.
+	out, err := exec.Command("git", "-C", root, "log",
+		"--format=TS|%at",
+		"--name-only",
+	).Output()
+	if err != nil {
+		return result
+	}
+
+	// We only care about the FIRST (most recent) timestamp per file.
+	var currentTS int64
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "TS|") {
+			ts, err := strconv.ParseInt(strings.TrimPrefix(line, "TS|"), 10, 64)
+			if err == nil {
+				currentTS = ts
+			}
+			continue
+		}
+		// Only record files we actually care about, and only the first occurrence.
+		if trackedPaths[line] {
+			if _, already := result[line]; !already && currentTS > 0 {
+				hours := int(now.Sub(time.Unix(currentTS, 0)).Hours())
+				result[line] = (hours + 12) / 24
+			}
+		}
+	}
+	return result
+}
+
 func daysSinceLastChange(root, path string, now time.Time) int {
 	out, err := exec.Command("git", "-C", root, "log", "-1", "--format=%at", "--", path).Output()
 	if err != nil {
@@ -320,7 +381,8 @@ func daysSinceLastChange(root, path string, now time.Time) int {
 	if err != nil {
 		return -1
 	}
-	return int(now.Sub(time.Unix(ts, 0)).Hours() / 24)
+	hours := int(now.Sub(time.Unix(ts, 0)).Hours())
+	return (hours + 12) / 24 // round to nearest day
 }
 
 func max(a, b int) int {

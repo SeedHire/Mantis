@@ -18,7 +18,7 @@ import (
 // ToolResult is the text output of an internal codebase tool call,
 // ready to be injected into the AI's context.
 type ToolResult struct {
-	Tool    string // "context" | "impact" | "find" | "dead" | "circular"
+	Tool    string // "context" | "impact" | "find" | "dead" | "circular" | "hotspots" | "coupling"
 	Summary string // short description of what was found
 	Content string // full text to inject into the AI prompt
 }
@@ -98,6 +98,27 @@ func (d *Dispatcher) Dispatch(message string) []ToolResult {
 	// Circular dependency query
 	if strings.Contains(lower, "circular") || strings.Contains(lower, "cycle") {
 		if r := d.runCircular(); r != nil {
+			results = append(results, *r)
+		}
+	}
+
+	// Hotspots query
+	if isHotspotsQuery(lower) {
+		if r := d.runHotspots(); r != nil {
+			results = append(results, *r)
+		}
+	}
+
+	// Coupling query
+	if target := extractCouplingTarget(lower, message); target != "" {
+		if r := d.runCoupling(target); r != nil {
+			results = append(results, *r)
+		}
+	}
+
+	// Blame / author query
+	if target := extractBlameTarget(lower, message); target != "" {
+		if r := d.runBlame(target); r != nil {
 			results = append(results, *r)
 		}
 	}
@@ -296,6 +317,139 @@ func (d *Dispatcher) runCodeReview() *ToolResult {
 		Content: sb.String(),
 	}
 }
+func (d *Dispatcher) runHotspots() *ToolResult {
+	stats, err := intel.Temporal(d.root, 90)
+	if err != nil {
+		return nil
+	}
+	hotspots := intel.Hotspots(stats, 15)
+	if len(hotspots) == 0 {
+		return nil
+	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Hotspot analysis (last 90 days): %d files ranked by churn.\n", len(hotspots)))
+	for i, h := range hotspots {
+		if i >= 10 {
+			sb.WriteString(fmt.Sprintf("  ... and %d more\n", len(hotspots)-10))
+			break
+		}
+		sb.WriteString(fmt.Sprintf("  %s — %d commits, %d authors, churn=%.1f, last change %dd ago\n",
+			h.Path, h.Commits, h.Authors, h.ChurnScore, h.DaysSinceChange))
+	}
+	risky := intel.Risky(stats, 5)
+	if len(risky) > 0 {
+		sb.WriteString("\nRisky files (high churn, single author):\n")
+		for _, r := range risky {
+			sb.WriteString(fmt.Sprintf("  %s — %d commits by %s, churn=%.1f\n",
+				r.Path, r.Commits, r.LastAuthor, r.ChurnScore))
+		}
+	}
+	return &ToolResult{
+		Tool:    "hotspots",
+		Summary: fmt.Sprintf("%d hotspots found", len(hotspots)),
+		Content: sb.String(),
+	}
+}
+
+func (d *Dispatcher) runCoupling(target string) *ToolResult {
+	stats, err := intel.Temporal(d.root, 90)
+	if err != nil {
+		return nil
+	}
+	coupled := intel.CouplingFor(stats, target, 10)
+	if len(coupled) == 0 {
+		return nil
+	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Files frequently changed with `%s`:\n", target))
+	for _, c := range coupled {
+		other := c.FileB
+		if other == target {
+			other = c.FileA
+		}
+		sb.WriteString(fmt.Sprintf("  %s — %d co-changes (%.0f%% coupling)\n",
+			other, c.CoChanges, c.Coupling*100))
+	}
+	return &ToolResult{
+		Tool:    "coupling",
+		Summary: fmt.Sprintf("%d files coupled to %s", len(coupled), target),
+		Content: sb.String(),
+	}
+}
+
+func (d *Dispatcher) runBlame(target string) *ToolResult {
+	stats, err := intel.Temporal(d.root, 90)
+	if err != nil {
+		return nil
+	}
+	for _, f := range stats.Files {
+		if f.Path == target || strings.HasSuffix(f.Path, "/"+target) || strings.HasSuffix(f.Path, target) {
+			var sb strings.Builder
+			sb.WriteString(fmt.Sprintf("History for `%s`:\n", f.Path))
+			sb.WriteString(fmt.Sprintf("  Commits: %d\n", f.Commits))
+			sb.WriteString(fmt.Sprintf("  Authors: %s\n", strings.Join(f.AuthorNames, ", ")))
+			sb.WriteString(fmt.Sprintf("  Lines added: %d, deleted: %d\n", f.LinesAdded, f.LinesDeleted))
+			sb.WriteString(fmt.Sprintf("  Churn score: %.1f\n", f.ChurnScore))
+			sb.WriteString(fmt.Sprintf("  Last change: %d days ago by %s\n", f.DaysSinceChange, f.LastAuthor))
+			return &ToolResult{
+				Tool:    "blame",
+				Summary: fmt.Sprintf("history for %s: %d commits by %d authors", f.Path, f.Commits, f.Authors),
+				Content: sb.String(),
+			}
+		}
+	}
+	return nil
+}
+
+func isHotspotsQuery(lower string) bool {
+	triggers := []string{
+		"hotspot", "churn", "unstable file", "high-change", "volatile",
+		"frequently changed", "most changed", "most modified",
+		"risky file", "bus factor", "code health",
+	}
+	for _, t := range triggers {
+		if strings.Contains(lower, t) {
+			return true
+		}
+	}
+	return false
+}
+
+func extractCouplingTarget(lower, original string) string {
+	triggers := []string{
+		"coupled with ", "coupled to ", "co-change", "change together with ",
+		"changes with ", "related to ", "files that change with ",
+	}
+	for _, t := range triggers {
+		if idx := strings.Index(lower, t); idx != -1 {
+			rest := strings.TrimSpace(original[idx+len(t):])
+			word := firstWord(rest)
+			if word != "" && (looksLikeFile(word) || looksLikeSymbol(word)) {
+				return word
+			}
+		}
+	}
+	return ""
+}
+
+func extractBlameTarget(lower, original string) string {
+	triggers := []string{
+		"who changed ", "who modified ", "blame ", "author of ", "authors of ",
+		"history of ", "history for ", "last changed ", "who wrote ", "who touched ",
+		"commit history for ", "git blame ",
+	}
+	for _, t := range triggers {
+		if idx := strings.Index(lower, t); idx != -1 {
+			rest := strings.TrimSpace(original[idx+len(t):])
+			word := firstWord(rest)
+			if word != "" && (looksLikeFile(word) || looksLikeSymbol(word)) {
+				return word
+			}
+		}
+	}
+	return ""
+}
+
 func extractImpactTarget(lower, original string) string {
 	triggers := []string{
 		"if i change ", "if i modify ", "if i delete ", "if i remove ",

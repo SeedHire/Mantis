@@ -30,6 +30,11 @@ type Server struct {
 	temporalMu    sync.RWMutex
 	temporalStats *intel.TemporalStats
 	temporalTime  time.Time
+
+	// Cached dead code results (refreshed every 30 sec).
+	deadMu     sync.RWMutex
+	deadResult *intel.DeadResult
+	deadTime   time.Time
 }
 
 // NewServer creates an LSP server backed by the given graph database.
@@ -246,6 +251,29 @@ func (s *Server) getTemporalStats() *intel.TemporalStats {
 	s.temporalStats = stats
 	s.temporalTime = time.Now()
 	return stats
+}
+
+func (s *Server) getDeadResult() *intel.DeadResult {
+	s.deadMu.RLock()
+	if s.deadResult != nil && time.Since(s.deadTime) < 30*time.Second {
+		r := s.deadResult
+		s.deadMu.RUnlock()
+		return r
+	}
+	s.deadMu.RUnlock()
+
+	s.deadMu.Lock()
+	defer s.deadMu.Unlock()
+	if s.deadResult != nil && time.Since(s.deadTime) < 30*time.Second {
+		return s.deadResult
+	}
+	result, err := intel.FindDead(s.querier, "")
+	if err != nil {
+		return nil
+	}
+	s.deadResult = result
+	s.deadTime = time.Now()
+	return result
 }
 
 func makeError(id json.RawMessage, code int, msg string) *jsonRPCResponse {

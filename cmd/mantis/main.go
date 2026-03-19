@@ -74,7 +74,6 @@ var replAPIKeys []string
 
 // ── init ──────────────────────────────────────────────────────────────────────
 
-var initLang string
 var initWatch bool
 
 var initCmd = &cobra.Command{
@@ -127,6 +126,13 @@ var initCmd = &cobra.Command{
 
 		_ = db.SetMeta("version", "0.1.0")
 		_ = db.SetMeta("last_init", fmt.Sprintf("%d", time.Now().Unix()))
+
+		// Seed brain files + auto-discover conventions.
+		b := brain.New(root)
+		_ = b.Init()
+		if n := b.DiscoverConventions(); n > 0 {
+			fmt.Printf("✓ Discovered %d conventions  \033[38;5;244m(.mantis/CONVENTIONS.md)\033[0m\n", n)
+		}
 
 		if initWatch {
 			watcher := graph.NewWatcher(builder, root)
@@ -1377,10 +1383,309 @@ Or use as a generic LSP server:
 	},
 }
 
+// ── hooks install ─────────────────────────────────────────────────────────────
+
+var hooksCmd = &cobra.Command{
+	Use:   "hooks",
+	Short: "Manage lifecycle hooks",
+}
+
+var hooksInstallCmd = &cobra.Command{
+	Use:   "install",
+	Short: "Install git hooks for Mantis integration",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		root, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		gitDir := filepath.Join(root, ".git", "hooks")
+		if _, err := os.Stat(gitDir); os.IsNotExist(err) {
+			return fmt.Errorf("not a git repository (no .git/hooks directory)")
+		}
+
+		// Install pre-commit hook that runs mantis lint.
+		preCommit := filepath.Join(gitDir, "pre-commit")
+		hookScript := `#!/bin/sh
+# Mantis pre-commit hook — runs lint on staged files.
+# Installed by 'mantis hooks install'. Edit or remove freely.
+if command -v mantis >/dev/null 2>&1; then
+    mantis lint --ci 2>/dev/null
+fi
+`
+		if _, err := os.Stat(preCommit); err == nil {
+			fmt.Printf("\033[38;5;244m  ⚠ %s already exists — skipping (use --force to overwrite)\033[0m\n", preCommit)
+		} else {
+			if err := os.WriteFile(preCommit, []byte(hookScript), 0o755); err != nil {
+				return fmt.Errorf("write pre-commit: %w", err)
+			}
+			fmt.Printf("✓ Installed pre-commit hook  \033[38;5;244m(%s)\033[0m\n", preCommit)
+		}
+
+		// Ensure .mantisrc.yml exists with hooks section.
+		rcPath := filepath.Join(root, ".mantisrc.yml")
+		if _, err := os.Stat(rcPath); os.IsNotExist(err) {
+			rcContent := `version: 1
+hooks:
+  # post_commit:
+  #   - command: "echo 'committed'"
+`
+			if err := os.WriteFile(rcPath, []byte(rcContent), 0o644); err != nil {
+				return fmt.Errorf("write .mantisrc.yml: %w", err)
+			}
+			fmt.Printf("✓ Created .mantisrc.yml  \033[38;5;244m(configure hooks here)\033[0m\n")
+		}
+
+		return nil
+	},
+}
+
+// ── eval ──────────────────────────────────────────────────────────────────────
+
+var evalCmd = &cobra.Command{
+	Use:   "eval [prompt]",
+	Short: "Evaluate code generation quality on a prompt",
+	Long: `Runs the pipeline on a prompt and scores the output.
+Measures: build success, test pass rate, lint violations, token efficiency.
+Output: structured quality report (text or --json).`,
+	Args: cobra.MinimumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		root, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+
+		prompt := strings.Join(args, " ")
+		fmt.Printf("╭─ eval ─╮\n")
+		fmt.Printf("│ Prompt: %s\n", truncateEval(prompt, 60))
+		fmt.Printf("╰────────╯\n\n")
+
+		// Step 1: Baseline metrics.
+		fmt.Printf("\033[38;5;244m⠋ collecting baseline...\033[0m\n")
+		baselineLint := countLintIssues(root)
+		baselineTests := countTestResults(root)
+
+		// Step 2: Run pipeline.
+		fmt.Printf("\033[38;5;244m⠋ running pipeline...\033[0m\n")
+		// Use the pipeline via CLI to avoid import complexity.
+		pipeOut, err := exec.Command(os.Args[0], prompt).CombinedOutput()
+		pipeResult := string(pipeOut)
+		buildOK := err == nil
+
+		// Step 3: Post metrics.
+		postLint := countLintIssues(root)
+		postTests := countTestResults(root)
+
+		// Step 4: Score.
+		score := 0.0
+		if buildOK {
+			score += 4.0 // build passes = 4 points
+		}
+		if postTests.passed >= baselineTests.passed {
+			score += 3.0 // no test regressions = 3 points
+		}
+		if postLint <= baselineLint {
+			score += 2.0 // no new lint issues = 2 points
+		}
+		if len(pipeResult) > 100 {
+			score += 1.0 // produced substantial output = 1 point
+		}
+
+		// Report.
+		fmt.Printf("\n╭─ Quality Report ─╮\n")
+		fmt.Printf("│  Build:    %s\n", boolIcon(buildOK))
+		fmt.Printf("│  Tests:    %d/%d passed (was %d/%d)\n", postTests.passed, postTests.total, baselineTests.passed, baselineTests.total)
+		fmt.Printf("│  Lint:     %d issues (was %d)\n", postLint, baselineLint)
+		fmt.Printf("│  Score:    %.1f/10\n", score)
+		fmt.Printf("╰──────────────────╯\n")
+
+		return nil
+	},
+}
+
+type testCount struct {
+	passed int
+	total  int
+}
+
+func countLintIssues(root string) int {
+	out, _ := exec.Command("go", "vet", "./...").CombinedOutput()
+	if len(out) == 0 {
+		return 0
+	}
+	return strings.Count(string(out), "\n")
+}
+
+func countTestResults(root string) testCount {
+	out, _ := exec.Command("go", "test", "-count=1", "./...").CombinedOutput()
+	output := string(out)
+	passed := strings.Count(output, "ok ")
+	failed := strings.Count(output, "FAIL")
+	return testCount{passed: passed, total: passed + failed}
+}
+
+func boolIcon(b bool) string {
+	if b {
+		return "✓ pass"
+	}
+	return "✗ fail"
+}
+
+func truncateEval(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max-3] + "..."
+}
+
+// ── new (project templates) ──────────────────────────────────────────────────
+
+var newCmd = &cobra.Command{
+	Use:   "new <template> [project-name]",
+	Short: "Create a new project from a template",
+	Long: `Available templates:
+  go-cli      — Go CLI app with Cobra
+  go-api      — Go REST API with net/http
+  node-cli    — TypeScript CLI
+  python-pkg  — Python package with pyproject.toml`,
+	Args: cobra.MinimumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		template := args[0]
+		name := template
+		if len(args) > 1 {
+			name = args[1]
+		}
+
+		templates := map[string]map[string]string{
+			"go-cli": {
+				"go.mod": "module " + name + "\n\ngo 1.21\n",
+				"main.go": `package main
+
+import "fmt"
+
+func main() {
+	fmt.Println("` + name + ` — built with Mantis")
+}
+`,
+				"Makefile": `build:
+	go build -o ./bin/` + name + ` .
+
+test:
+	go test ./...
+
+lint:
+	go vet ./...
+`,
+			},
+			"go-api": {
+				"go.mod": "module " + name + "\n\ngo 1.21\n",
+				"main.go": `package main
+
+import (
+	"fmt"
+	"log"
+	"net/http"
+)
+
+func main() {
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "ok")
+	})
+	log.Println("listening on :8080")
+	log.Fatal(http.ListenAndServe(":8080", nil))
+}
+`,
+				"Makefile": `build:
+	go build -o ./bin/` + name + ` .
+
+run:
+	go run .
+
+test:
+	go test ./...
+`,
+			},
+			"node-cli": {
+				"package.json": `{
+  "name": "` + name + `",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "vitest"
+  }
+}
+`,
+				"tsconfig.json": `{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "node",
+    "outDir": "dist",
+    "strict": true
+  },
+  "include": ["src"]
+}
+`,
+				"src/index.ts": `console.log("` + name + ` — built with Mantis");
+`,
+			},
+			"python-pkg": {
+				"pyproject.toml": `[project]
+name = "` + name + `"
+version = "0.1.0"
+requires-python = ">=3.10"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.backends._legacy:_Backend"
+`,
+				"src/" + name + "/__init__.py": `"""` + name + ` — built with Mantis."""
+
+__version__ = "0.1.0"
+`,
+				"tests/test_main.py": `def test_import():
+    import ` + name + `
+    assert ` + name + `.__version__ == "0.1.0"
+`,
+			},
+		}
+
+		tmpl, ok := templates[template]
+		if !ok {
+			fmt.Printf("Unknown template %q. Available:\n", template)
+			for k := range templates {
+				fmt.Printf("  %s\n", k)
+			}
+			return fmt.Errorf("unknown template: %s", template)
+		}
+
+		// Create project directory.
+		if err := os.MkdirAll(name, 0o755); err != nil {
+			return err
+		}
+
+		for path, content := range tmpl {
+			full := filepath.Join(name, path)
+			if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+				return err
+			}
+			if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+				return err
+			}
+			fmt.Printf("  ✓ %s\n", path)
+		}
+
+		fmt.Printf("\n✓ Created %s from %s template\n", name, template)
+		fmt.Printf("  cd %s && mantis init\n", name)
+		return nil
+	},
+}
+
 // ── main ──────────────────────────────────────────────────────────────────────
 
 func init() {
-	initCmd.Flags().StringVar(&initLang, "lang", "ts", "Primary language (ts, py)")
 	initCmd.Flags().BoolVar(&initWatch, "watch", false, "Start file watcher after indexing")
 
 	contextCmd.Flags().IntVar(&contextDepth, "depth", 3, "Max import depth to traverse")
@@ -1415,7 +1720,8 @@ func init() {
 	rootCmd.Flags().BoolVar(&replOffline, "offline", false, "Skip GitHub auth gate — for local-only use without internet")
 	rootCmd.Flags().StringArrayVar(&replAPIKeys, "api-key", nil, "Ollama API key (can be specified multiple times for rotation)")
 
-	rootCmd.AddCommand(initCmd, contextCmd, watchCmd, findCmd, impactCmd, deadCmd, circularCmd, graphCmd, lintCmd, tuiCmd, handoffCmd, hotspotsCmd, riskyCmd, couplingCmd, intentCmd, todosCmd, specGapsCmd, workspaceCmd, traceCmd, mcpCmd, lspCmd)
+	rootCmd.AddCommand(initCmd, contextCmd, watchCmd, findCmd, impactCmd, deadCmd, circularCmd, graphCmd, lintCmd, tuiCmd, handoffCmd, hotspotsCmd, riskyCmd, couplingCmd, intentCmd, todosCmd, specGapsCmd, workspaceCmd, traceCmd, mcpCmd, lspCmd, hooksCmd, evalCmd, newCmd)
+	hooksCmd.AddCommand(hooksInstallCmd)
 
 	workspaceCmd.AddCommand(wsInitCmd, wsFindCmd, wsImpactCmd, wsStatsCmd)
 	traceCmd.AddCommand(traceIngestCmd, traceHotpathsCmd, traceColdCmd, traceWeightCmd)

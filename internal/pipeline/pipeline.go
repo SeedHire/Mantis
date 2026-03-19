@@ -260,6 +260,55 @@ type Result struct {
 	Tasks        []Task   // parsed tasks with status (for TUI display)
 	WrittenFiles []string // absolute paths of all files written during task execution
 	TestsRan     bool     // UX-5: true if pipeline already ran test verification
+	Stages       []StageResult // observability: per-stage outcomes
+}
+
+// StageResult records the outcome of a single pipeline stage.
+type StageResult struct {
+	Name    string
+	Model   string
+	Elapsed time.Duration
+	Tokens  int    // prompt + completion
+	Status  string // "ok", "failed", "skipped", "fallback"
+	Error   string // non-empty on failure
+	Retries int
+}
+
+// Summary returns a compact multi-line summary of all stage outcomes.
+func (r *Result) Summary() string {
+	if len(r.Stages) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("Pipeline summary:\n")
+	totalTok := 0
+	var totalElapsed time.Duration
+	for _, s := range r.Stages {
+		icon := "✓"
+		if s.Status == "failed" {
+			icon = "✗"
+		} else if s.Status == "skipped" {
+			icon = "○"
+		} else if s.Status == "fallback" {
+			icon = "⚠"
+		}
+		line := fmt.Sprintf("  %s %-12s [%s] %.1fs %dt", icon, s.Name, s.Model, s.Elapsed.Seconds(), s.Tokens)
+		if s.Retries > 0 {
+			line += fmt.Sprintf(" (%d retries)", s.Retries)
+		}
+		if s.Error != "" {
+			errMsg := s.Error
+			if len(errMsg) > 80 {
+				errMsg = errMsg[:77] + "..."
+			}
+			line += " — " + errMsg
+		}
+		sb.WriteString(line + "\n")
+		totalTok += s.Tokens
+		totalElapsed += s.Elapsed
+	}
+	sb.WriteString(fmt.Sprintf("  Total: %.1fs · %d tokens · %d files written\n", totalElapsed.Seconds(), totalTok, len(r.WrittenFiles)))
+	return sb.String()
 }
 
 // Task represents a single implementation task parsed from the plan.
@@ -302,9 +351,9 @@ func Run(
 	pipelineStart := time.Now()
 
 	// 9E: Git stash checkpoint — save working state before pipeline modifies files.
-	stashCreated := false
+	var stashRef string
 	if opts.Root != "" {
-		stashCreated = gitStashCheckpoint(opts.Root)
+		stashRef = gitStashCheckpoint(opts.Root)
 	}
 
 	planModel := router.ModelFor(router.TierReason)
@@ -316,17 +365,18 @@ func Run(
 	}
 	// BUG-1: local options — no package-level mutation.
 	planOpts := optsFor(planModel, 0.3)
-	codeOpts := optsFor(codeModel, 0.15)
+	codeOpts := optsFor(codeModel, codeTemperature(userRequest))
 	onRL := opts.OnRateLimit // key rotation callback (nil = disabled)
 	res := &Result{}
 
 	// 7.9: Model-aware edit format selection.
 	editFormat := router.EditFormatForTier(router.TierCode)
-	effCodeSuffix := codeStageSuffixFor(editFormat)
+	lang := detectLang(opts.Root)
+	userConstraints := extractConstraints(userRequest)
+	effCodeSuffix := codeStageSuffixFor(lang, editFormat) + userConstraints
 
 	// Language-aware additions to plan and test suffixes.
-	lang := detectLang(opts.Root)
-	effPlanSuffix := planStageSuffix + langPlanRules(lang)
+	effPlanSuffix := planStageSuffix + langPlanRules(lang) + userConstraints
 	effTestNaming := langTestNaming(lang)
 
 	// ── Stage 1: PLAN ─────────────────────────────────────────────────────────
@@ -345,7 +395,6 @@ func Run(
 	planElapsed := planStop()
 	if err != nil {
 		// Plan model unavailable — fall back to code model so the pipeline still runs.
-		// Print as a persistent newline so it isn't overwritten by the next spinner.
 		fmt.Printf("\n%s  ⚠ plan model unavailable, falling back to %s%s\n", pColorDim, codeModel, pColorReset)
 		planBuf.Reset()
 		planIncr2, planStop2 := progressTicker("planning")
@@ -354,10 +403,12 @@ func Run(
 		if err != nil {
 			return nil, fmt.Errorf("plan stage: %w", err)
 		}
+		planModel = codeModel // record the actual model used
 	}
 	res.PlanText = planBuf.String()
 	res.PromptTok += pt
 	res.ComplTok += ct
+	planStage := StageResult{Name: "plan", Model: planModel, Elapsed: planElapsed, Tokens: pt + ct, Status: "ok"}
 	fmt.Printf("%s  ✓ plan ready  %s(%.1fs · %d tokens)%s\n", pColorGold, pColorDim, planElapsed.Seconds(), pt+ct, pColorReset)
 
 	// ── Clarify: detect interactive questions from the model ─────────────────
@@ -386,6 +437,8 @@ func Run(
 			fmt.Printf("%s  ○ questions skipped — using model defaults%s\n", pColorDim, pColorReset)
 		}
 	}
+
+	res.Stages = append(res.Stages, planStage)
 
 	// Plan Mode: stop after PLAN stage for user review.
 	if opts.PlanOnly {
@@ -454,6 +507,11 @@ func Run(
 		}
 		fmt.Printf("%s  ✓ code ready  %s(%d/%d tasks · %.1fs · %d tokens)%s\n",
 			pColorGold, pColorDim, done, len(tasks), codeElapsed.Seconds(), res.PromptTok+res.ComplTok, pColorReset)
+		codeStatus := "ok"
+		if done < len(tasks) {
+			codeStatus = "failed"
+		}
+		res.Stages = append(res.Stages, StageResult{Name: "code", Model: codeModel, Elapsed: codeElapsed, Tokens: res.PromptTok + res.ComplTok - planStage.Tokens, Status: codeStatus})
 
 		// 8.5.1: Write structured progress file when the pipeline has 5+ tasks.
 		if len(tasks) >= 5 && opts.Root != "" {
@@ -522,6 +580,10 @@ func Run(
 			for _, ew := range eacWarns {
 				fmt.Printf("%s  ⚠ %s%s\n", pColorDim, ew, pColorReset)
 			}
+			// Dep guardrails: warn about unnecessary dependencies.
+			for _, dw := range checkSuspiciousDeps(res.CodeText, userRequest) {
+				fmt.Printf("%s  %s%s\n", pColorDim, dw, pColorReset)
+			}
 			// Retry failed SEARCH edits with actual file content.
 			if failed := collectFailedEdits(res.CodeText, opts.Root); failed != nil {
 				retryPaths, rpt, rct := retryFailedEdits(ctx, client, codeModel, res.CodeText, opts.Root,
@@ -560,11 +622,21 @@ func Run(
 			lastBuildErr = buildErrStr
 			fmt.Printf("%s  [build error — retry %d/%d]%s\n", pColorDim, attempt+1, maxRetries, pColorReset)
 
-			retryMsg := fmt.Sprintf(
-				"Build failed with the following error:\n\n```\n%s\n```\n\n"+
-					"Fix only the affected function(s). Use ```edit:filepath blocks with <<<SEARCH/===/>>>SEARCH markers "+
-					"to patch existing files. Only use ```lang:filepath for brand new files.",
-				buildErrStr)
+			// 10B: Parse build errors and construct focused retry context.
+			var retryMsg string
+			if parsed := parseBuildErrors(buildErrStr, lang); len(parsed) > 0 {
+				retryMsg = buildRetryContext(opts.Root, parsed, 3)
+			} else {
+				truncated := buildErrStr
+				if len(truncated) > 2000 {
+					truncated = truncated[:2000] + "\n... (truncated)"
+				}
+				retryMsg = fmt.Sprintf(
+					"Build failed with the following error:\n\n```\n%s\n```\n\n"+
+						"Fix only the affected function(s). Use ```edit:filepath blocks with <<<SEARCH/===/>>>SEARCH markers "+
+						"to patch existing files. Only use ```lang:filepath for brand new files.",
+					truncated)
+			}
 			if len(codeMsgs) > 2 {
 				codeMsgs = codeMsgs[:2]
 			}
@@ -579,6 +651,7 @@ func Run(
 		}
 		codeElapsed := time.Since(codeStart)
 		fmt.Printf("%s  ✓ code ready  %s(%.1fs · %d tokens)%s\n", pColorGold, pColorDim, codeElapsed.Seconds(), codeTokTotal, pColorReset)
+		res.Stages = append(res.Stages, StageResult{Name: "code", Model: codeModel, Elapsed: codeElapsed, Tokens: codeTokTotal, Status: "ok"})
 	}
 
 	// ── Stage 2.5: Editor validation pass (7.2) ─────────────────────────────
@@ -588,9 +661,15 @@ func Run(
 	if editorModel != "" && editorModel != codeModel && res.CodeText != "" {
 		fmt.Printf("%s  ◆ editor pass   [%s]%s\n", pColorDim, editorModel, pColorReset)
 		res.CodeText = editorValidate(ctx, client, editorModel, res.CodeText, onRL)
-		// Re-apply validated code to disk.
+		// Re-apply validated code to disk. Allow overwriting files from the code stage.
 		if opts.Root != "" {
-			_, eacWarns := extractAndApplyChanges(res.CodeText, opts.Root)
+			pipelineWritten := map[string]bool{}
+			for _, p := range res.WrittenFiles {
+				if rel, err := filepath.Rel(opts.Root, p); err == nil {
+					pipelineWritten[rel] = true
+				}
+			}
+			_, eacWarns := extractAndApplyChanges(res.CodeText, opts.Root, pipelineWritten)
 			for _, ew := range eacWarns {
 				fmt.Printf("%s  ⚠ %s%s\n", pColorDim, ew, pColorReset)
 			}
@@ -651,6 +730,11 @@ func Run(
 		res.PromptTok += testOut.pt
 		res.ComplTok += testOut.ct
 		fmt.Printf("%s  ✓ tests ready  %s(%.1fs · %d tokens)%s\n", pColorGold, pColorDim, testOut.elapsed.Seconds(), testOut.pt+testOut.ct, pColorReset)
+		res.Stages = append(res.Stages, StageResult{Name: "tests", Model: codeModel, Elapsed: testOut.elapsed, Tokens: testOut.pt + testOut.ct, Status: "ok"})
+	} else if opts.SkipTests || opts.TDDFirst {
+		res.Stages = append(res.Stages, StageResult{Name: "tests", Status: "skipped"})
+	} else if testOut.err != nil {
+		res.Stages = append(res.Stages, StageResult{Name: "tests", Model: codeModel, Status: "failed", Error: testOut.err.Error()})
 	}
 
 	// ── Stage 4: TEST VERIFICATION (optional) ────────────────────────────────
@@ -668,8 +752,18 @@ func Run(
 	res.Combined = assemble(res.PlanText, res.CodeText, res.TestText)
 
 	// 9E: Drop checkpoint stash on successful completion.
-	if stashCreated {
-		gitStashDrop(opts.Root)
+	if stashRef != "" {
+		gitStashDrop(opts.Root, stashRef)
+	}
+
+	// Print failure summary if any stage failed.
+	if summary := res.Summary(); summary != "" {
+		for _, s := range res.Stages {
+			if s.Status == "failed" {
+				fmt.Printf("\n%s%s%s", pColorDim, summary, pColorReset)
+				break
+			}
+		}
 	}
 
 	printDoneLine(time.Since(pipelineStart))
@@ -688,10 +782,11 @@ func ContinuePlan(
 	pipelineStart := time.Now()
 	res := &Result{PlanText: planText}
 	codeModel := router.ModelFor(router.TierCode)
-	codeOpts := optsFor(codeModel, 0.15) // BUG-1: local opts, no package-level mutation
+	codeOpts := optsFor(codeModel, codeTemperature(userRequest)) // BUG-1: local opts, no package-level mutation
 	onRL := opts.OnRateLimit
-	effTestNaming := langTestNaming(detectLang(opts.Root))
-	effCodeSuffix := codeStageSuffixFor(router.EditFormatForTier(router.TierCode))
+	cpLang := detectLang(opts.Root)
+	effTestNaming := langTestNaming(cpLang)
+	effCodeSuffix := codeStageSuffixFor(cpLang, router.EditFormatForTier(router.TierCode))
 
 	// Read existing project files mentioned in the plan for CODE stage context.
 	cpPlanFiles := extractPlanFiles(planText)
@@ -773,10 +868,20 @@ func ContinuePlan(
 		}
 		lastBuildErr = buildErrStr
 		fmt.Printf("%s  [build error — retry %d/%d]%s\n", pColorDim, attempt+1, maxRetries, pColorReset)
-		retryMsg := fmt.Sprintf(
-			"Build failed with the following error:\n\n```\n%s\n```\n\n"+
-				"Fix only the affected function(s). Use ```edit:filepath blocks with <<<SEARCH/===/>>>SEARCH markers.",
-			buildErrStr)
+		// 10B: Parse build errors and construct focused retry context.
+		var retryMsg string
+		if parsed := parseBuildErrors(buildErrStr, cpLang); len(parsed) > 0 {
+			retryMsg = buildRetryContext(opts.Root, parsed, 3)
+		} else {
+			truncated := buildErrStr
+			if len(truncated) > 2000 {
+				truncated = truncated[:2000] + "\n... (truncated)"
+			}
+			retryMsg = fmt.Sprintf(
+				"Build failed with the following error:\n\n```\n%s\n```\n\n"+
+					"Fix only the affected function(s). Use ```edit:filepath blocks with <<<SEARCH/===/>>>SEARCH markers.",
+				truncated)
+		}
 		if len(codeMsgs) > 2 {
 			codeMsgs = codeMsgs[:2]
 		}
@@ -846,27 +951,45 @@ func ContinuePlan(
 }
 
 // gitStashCheckpoint creates a git stash to save the current working state.
-// Returns true if a stash was created. Does nothing if the tree is clean.
-func gitStashCheckpoint(root string) bool {
+// Returns the stash ref (e.g. "stash@{0}") if created, or "" if the tree is clean.
+// Uses `git stash create` (non-destructive) + `git stash store` instead of `git stash push`
+// so the working tree is never modified.
+func gitStashCheckpoint(root string) string {
 	// Check if this is a git repo with changes.
 	statusCmd := exec.Command("git", "-C", root, "status", "--porcelain")
 	statusOut, err := statusCmd.Output()
 	if err != nil || len(strings.TrimSpace(string(statusOut))) == 0 {
-		return false // not a git repo or clean tree
+		return "" // not a git repo or clean tree
+	}
+
+	// stash create produces a commit object without touching the working tree.
+	createCmd := exec.Command("git", "-C", root, "stash", "create")
+	createOut, err := createCmd.Output()
+	if err != nil {
+		return ""
+	}
+	commitHash := strings.TrimSpace(string(createOut))
+	if commitHash == "" {
+		return "" // nothing to stash (e.g. only ignored files changed)
 	}
 
 	stamp := time.Now().Format("20060102-150405")
-	cmd := exec.Command("git", "-C", root, "stash", "push", "-m", "mantis-checkpoint-"+stamp, "--include-untracked")
-	if err := cmd.Run(); err != nil {
-		return false
+	msg := "mantis-checkpoint-" + stamp
+	storeCmd := exec.Command("git", "-C", root, "stash", "store", "-m", msg, commitHash)
+	if err := storeCmd.Run(); err != nil {
+		return ""
 	}
 	fmt.Printf("%s  ◉ checkpoint saved — 'git stash pop' to restore pre-pipeline state%s\n", pColorDim, pColorReset)
-	return true
+	return "stash@{0}" // stash store always puts it at position 0
 }
 
-// gitStashDrop drops the most recent stash (the checkpoint).
-func gitStashDrop(root string) {
-	cmd := exec.Command("git", "-C", root, "stash", "drop")
+// gitStashDrop drops a specific stash ref (e.g. "stash@{0}").
+// Requires an explicit ref to prevent accidentally dropping the wrong stash.
+func gitStashDrop(root, ref string) {
+	if ref == "" {
+		return
+	}
+	cmd := exec.Command("git", "-C", root, "stash", "drop", ref)
 	_ = cmd.Run() // best-effort
 }
 
@@ -962,6 +1085,9 @@ func runTaskBased(
 	onRL OnRateLimitFunc,
 	projectCtx string,
 ) {
+	// 10B: Detect language for parsed build error retries.
+	taskLang := detectLang(root)
+
 	// Atomic renderer owns all stdout for the task region.
 	r := newTaskRenderer(tasks)
 	r.initialRender()
@@ -1024,8 +1150,12 @@ func runTaskBased(
 			ollama.Message{Role: "user", Content: taskPrompt},
 		}
 
+		// 10C: Per-task adaptive temperature based on task title.
+		taskOpts := *codeOpts // shallow copy
+		taskOpts.Temperature = codeTemperature(tasks[i].Title)
+
 		var buf strings.Builder
-		pt, ct, err := streamWithRetry(taskCtx, client, codeModel, msgs, codeOpts, func(c string) {
+		pt, ct, err := streamWithRetry(taskCtx, client, codeModel, msgs, &taskOpts, func(c string) {
 			buf.WriteString(c)
 			atomic.AddInt64(&tasks[i].streamTok, 1)
 		}, onRL)
@@ -1097,7 +1227,16 @@ func runTaskBased(
 						break
 					}
 					lastBuildErr = buildErrStr
-					retryReason.WriteString(fmt.Sprintf("Build failed:\n```\n%s\n```\n\n", buildErrStr))
+					// 10B: Parse build errors for focused retry context.
+					if parsed := parseBuildErrors(buildErrStr, taskLang); len(parsed) > 0 {
+						retryReason.WriteString(buildRetryContext(root, parsed, 3) + "\n\n")
+					} else {
+						truncated := buildErrStr
+						if len(truncated) > 2000 {
+							truncated = truncated[:2000] + "\n... (truncated)"
+						}
+						retryReason.WriteString(fmt.Sprintf("Build failed:\n```\n%s\n```\n\n", truncated))
+					}
 				}
 				if !qualityOK && len(valWarnings) > 0 {
 					retryReason.WriteString("Code quality issues found:\n")
@@ -1269,42 +1408,17 @@ const taskStageSuffix = `
 You are implementing ONE specific task from a larger plan.
 - Output ONLY the files needed for THIS task — do not implement other tasks.
 - For NEW files: use ` + "```lang:filepath" + ` fences with full content.
-- For EXISTING files: use ` + "```edit:filepath" + ` fences with SEARCH/REPLACE markers:
-  ` + "```edit:path/to/file.go" + `
-  <<<SEARCH
-  exact old text
-  ===
-  exact new text
-  >>>SEARCH
-  ` + "```" + `
+- For EXISTING files: use ` + "```edit:filepath" + ` fences with SEARCH/REPLACE markers.
 - Never output the full content of an existing file — only the changed sections.
-- Include config/manifest files ONLY if this is the setup/config task.
-- Handle all error cases. No stubs. No TODOs.
-- If prior tasks already created files you need to import from, assume they exist and IMPORT from them.
+- If prior tasks created files you need, assume they exist and IMPORT from them.
 
-CRITICAL RULES to avoid breaking parallel tasks:
-1. NEVER redefine any symbol listed in the "SEALED TYPES" section — those are LOCKED. Import them.
-2. NEVER recreate a file that the "Already implemented files" list shows — only EDIT it if you must.
-3. Use CONSISTENT constructor signatures: if prior tasks use dependency injection (passing db/repo as args), do the same.
-4. If you need a type from another file, import it — do NOT copy-paste or redefine it inline.
-
-ABSOLUTE RULES — violation means the code is REJECTED:
-1. Every function body MUST have real logic — never return nil/undefined as a stub.
-2. Every import MUST match exact exports shown in "Already implemented files" below. NEVER invent package names that do not exist.
-3. If referencing a type from a prior file, use the EXACT name and field names shown.
-4. NEVER write "// TODO", "// FIXME", "throw new Error('not implemented')", or any placeholder.
-5. If you cannot fully implement something, OMIT it entirely rather than stubbing it.
-6. Route files MUST wire to actual controller methods — NEVER use res.status(501) or "not implemented" placeholders.
-7. When prior files show 'export default new ClassName()', import the DEFAULT EXPORT (the instance), do NOT call static methods on the class.
-8. Use the EXACT property names, constructor parameters, and method signatures shown in the "Exports" summary — do NOT invent alternatives.
-9. Express validation middleware: validate req.body directly — NEVER wrap {body, query, params} around it.
-10. Wrap async Express handlers to forward errors: asyncHandler = (fn) => (req, res, next) => fn(req, res, next).catch(next). Place error-handling middleware AFTER all routes.
-11. NEVER use string concatenation for SQL. Use parameterized queries or ORM methods.
-12. NEVER hardcode secrets (API keys, passwords, JWT secrets). Use environment variables.
-13. Use correct HTTP status codes: 201 creation, 204 deletion, 400 bad input, 404 not found, 422 validation errors.
-14. NEVER do N+1 queries — use include (Prisma), select_related (Django), joinedload (SQLAlchemy).
-15. Every catch block must re-throw, return an error response, or handle the failure — NEVER catch (e) { console.log(e) }.
-16. Use Promise.all for independent parallel async calls — NEVER sequential await for independent operations.
+CRITICAL RULES — violation means the code is REJECTED:
+1. Every function body MUST have real logic — NO stubs, NO TODOs, NO placeholders, NO "not implemented".
+2. Every import MUST match exact exports shown in "Already implemented files". NEVER invent package names.
+3. Use the EXACT names, field names, and signatures from prior files — do NOT invent alternatives.
+4. NEVER redefine SEALED TYPES — import them. NEVER recreate already-implemented files — EDIT if needed.
+5. Handle all errors — every catch block must re-throw, return an error response, or handle the failure.
+6. Use correct HTTP status codes: 201 creation, 204 deletion, 400 bad input, 404 not found, 422 validation.
 
 CRITICAL: Begin IMMEDIATELY with code blocks. No preamble.
 `
@@ -2153,154 +2267,134 @@ Use the SAME task numbers as in "### Task Breakdown". Format each task number al
 ### Assumptions
 `
 
-const codeStageSuffix = `
+// codeStageSuffixFor returns a language-scoped code stage suffix.
+// Only universal core rules + rules for the detected language are included,
+// keeping total prompt ≤30 lines for small local models.
+func codeStageSuffixFor(lang string, format router.EditFormat) string {
+	var b strings.Builder
 
+	// ── Core rules (universal, ≤15 lines) ────────────────────────────────────
+	b.WriteString(`
 ## Your role: IMPLEMENTER
-Write the complete implementation based on the plan. Requirements:
-- Only implement what the plan specifies — do NOT add extra features, helpers, or abstractions
-- Do NOT add docstrings, comments, or type annotations beyond what is needed
-- Three similar lines of code is BETTER than an unnecessary abstraction
-- Every function body has real logic — no stubs, no TODOs, no placeholder returns
-- Errors surfaced to callers — no silent swallowing. Every catch block must re-throw, return an error response, or explicitly handle the failure. NEVER catch (e) { console.log(e) }.
+Write the complete implementation based on the plan.
+- Only implement what the plan specifies — no extra features or abstractions
+- Every function body has real logic — NO stubs, NO TODOs, NO placeholder returns
+- Errors surfaced to callers — no silent swallowing, no empty catch blocks
 - No debugging prints (console.log / fmt.Println / print) left in
 - Config via environment variables, not hardcoded strings
-- No unimplemented paths left in place
+- NEVER invent packages — only import REAL, well-known packages
+- Use correct HTTP status codes: 201 creation, 204 deletion, 400 bad input, 404 not found
 
-### Input validation rules:
-- Validate inputs at system boundaries (HTTP handlers, CLI args, file reads) using a schema validator (Zod, Joi, class-validator)
-- Express/Koa validation middleware: validate req.body directly — NEVER wrap in {body: req.body, query, params}
-- Zod/Joi schemas must match the shape of the DATA being validated (e.g. {title: z.string()}), not the Express Request object
-- Always use express.json() middleware BEFORE route handlers
-- Place validation middleware BEFORE route handlers. Place error-handling middleware (err, req, res, next) AFTER all routes.
-- Wrap async route handlers to forward errors: const asyncHandler = (fn) => (req, res, next) => fn(req, res, next).catch(next)
-- Always validate on the server side — never rely on client-side validation alone
-
-### Security rules (OWASP):
-- NEVER use string concatenation for SQL — always use parameterized queries / ORM methods
-- NEVER use innerHTML or dangerouslySetInnerHTML with user data — use framework auto-escaping
-- NEVER hardcode secrets (API keys, DB passwords, JWT secrets) — use environment variables
-- Use bcrypt/scrypt/argon2 for password hashing — NEVER MD5/SHA1/plain text
-- Use child_process.execFile() not exec() when running OS commands — prevents command injection
-- Return generic error messages to clients, log details server-side only — never expose stack traces in API responses
-
-### Import and module rules:
-- NEVER invent packages that do not exist. Only import REAL, well-known packages (e.g. express, zod, prisma, cors, helmet — NOT made-up names)
-- Check package.json "type" field: use import/export for ESM ("type":"module"), require() for CJS
-- Use explicit file extensions in Node.js ESM imports (.js not .ts at runtime)
-- NEVER use path aliases (@/...) unless tsconfig.json paths AND bundler are confirmed configured
-- NEVER use deprecated APIs: use Buffer.from() not new Buffer(), useEffect not componentWillMount
-- tsconfig.json: NEVER enable "noUnusedLocals" or "noUnusedParameters" — they cause cascading errors in Express middleware/route handlers where unused next/req params are standard
-- When you define a helper (asyncHandler), USE it — NEVER also import a different version and leave the import unused
-
-### Async and concurrency rules:
-- NEVER use sequential await when calls are independent — use Promise.all([a(), b()])
-- Use Promise.allSettled when one failure should NOT cancel others
-- Every promise must have error handling — no floating promises
-- Always set timeouts on outbound HTTP calls (axios/fetch timeout option)
-- Go: every goroutine MUST have an exit path (context cancel, done channel, or WaitGroup)
-- Go: NEVER use time.Sleep for synchronization — use channels or sync.WaitGroup
-- Python async: NEVER call blocking I/O inside async def — use asyncio.to_thread()
-
-### API design rules:
-- Use correct HTTP status codes: 201 for creation, 204 for deletion, 400 for bad input, 404 for not found, 422 for validation errors
-- Use nouns in URLs (GET /users/123), HTTP methods for verbs — NEVER /getUser/123
-- Consistent error response shape: { error: { code: string, message: string } }
-
-### Database/ORM rules:
-- NEVER do N+1 queries: use include/select (Prisma), select_related/prefetch_related (Django), joinedload (SQLAlchemy), eager loading (TypeORM)
-- Prisma: use findUnique for lookups by unique fields, not findFirst. Define both sides of relations.
-- Add database indexes for columns used in WHERE/JOIN/ORDER BY
-- Use SELECT only needed columns, not SELECT *
-
-### Docker rules (when generating Dockerfiles):
-- Always add a non-root USER directive
-- Use multi-stage builds: build stage with dev deps, production stage with runtime only
-- Copy package.json/lock files BEFORE source code to cache install layer
-- Always create .dockerignore with node_modules, .git, .env
-- Use exec form CMD ["node", "server.js"], not shell form
-
-### File output formats:
-- For NEW files: use ` + "```lang:filepath" + ` fences with full content.
-- For EXISTING files: use ` + "```edit:filepath" + ` fences with SEARCH/REPLACE markers:
-  ` + "```edit:path/to/file.go" + `
-  <<<SEARCH
-  exact old text to find
-  ===
-  exact replacement text
-  >>>SEARCH
-  ` + "```" + `
-  Multiple <<<SEARCH...>>>SEARCH sections per block are allowed for multiple edits to the same file.
-- NEVER output the full content of an existing file. Only output the changed sections using edit blocks.
-- Config/manifest files (package.json, tsconfig.json, etc.) that are NEW use ` + "```lang:filepath" + ` with full content.
-- Handle all error cases. No stubs. No TODOs left unimplemented.
-- Validate inputs at boundaries. Return structured errors.
-
-CRITICAL: Begin your response IMMEDIATELY with the first code block. Do NOT write any preamble.
-`
-
-// 7.9: Format-specific code stage suffix for models that work better with whole-file output.
-const codeStageWholeFile = `
-
-## Your role: IMPLEMENTER
-Write the complete implementation based on the plan. Requirements:
-- Only implement what the plan specifies — do NOT add extra features, helpers, or abstractions
-- Do NOT add docstrings, comments, or type annotations beyond what is needed
-- Three similar lines of code is BETTER than an unnecessary abstraction
-- Every function body has real logic — no stubs, no TODOs, no placeholder returns
-- Errors surfaced to callers — no silent swallowing. Every catch block must re-throw, return an error response, or explicitly handle the failure. NEVER catch (e) { console.log(e) }.
-- No debugging prints left in
-- Config via environment variables, not hardcoded strings
-
-### Input validation rules:
-- Validate inputs at system boundaries (HTTP handlers, CLI args, file reads) using a schema validator (Zod, Joi, class-validator)
-- Express/Koa: validate req.body directly — NEVER wrap in {body: req.body, query, params}
-- Zod/Joi schemas match the DATA shape (e.g. {title: z.string()}), NOT the Express Request object
-- Always use express.json() middleware BEFORE route handlers
-- Place validation middleware BEFORE route handlers. Error-handling middleware (err, req, res, next) AFTER all routes.
-- Wrap async route handlers: const asyncHandler = (fn) => (req, res, next) => fn(req, res, next).catch(next)
-
-### Security rules:
-- NEVER string-concatenate SQL — use parameterized queries / ORM methods
-- NEVER use innerHTML/dangerouslySetInnerHTML with user data
+### Security (universal):
+- NEVER string-concatenate SQL — use parameterized queries / ORM
 - NEVER hardcode secrets — use environment variables
-- Use bcrypt/scrypt/argon2 for passwords — NEVER MD5/SHA1/plain text
-- Use execFile() not exec() for OS commands
+- Return generic errors to clients; log details server-side only
+`)
 
-### Import and module rules:
-- Only import REAL, well-known packages — NEVER invent package names
-- Check package.json "type" field for ESM vs CJS
-- NEVER use deprecated APIs: Buffer.from() not new Buffer(), useEffect not componentWillMount
-- tsconfig.json: NEVER enable "noUnusedLocals" or "noUnusedParameters" — causes cascading errors in Express middleware handlers
+	// ── Language-specific rules (≤10 each) ────────────────────────────────────
+	b.WriteString(langCodeRules(lang))
 
-### Async rules:
-- Use Promise.all for independent parallel calls, not sequential await
-- Every promise must have error handling — no floating promises
-- Always set timeouts on outbound HTTP calls
-- Go: every goroutine needs an exit path. Python async: never block inside async def.
-
-### API design:
-- Correct HTTP status codes: 201 creation, 204 deletion, 400 bad input, 404 not found, 422 validation
-- Nouns in URLs, HTTP methods for verbs. Consistent error shape: { error: { code, message } }
-
-### Database/ORM:
-- NEVER do N+1 queries — use include/joinedload/select_related
-- Add indexes for columns in WHERE/JOIN/ORDER BY
-
+	// ── File output format ────────────────────────────────────────────────────
+	switch format {
+	case router.EditFormatWholeFile:
+		b.WriteString(`
 ### File output format:
 - Use ` + "```lang:filepath" + ` fences with the COMPLETE file content for every file.
 - Output the full file — do not use partial snippets or edit markers.
-- Handle all error cases. No stubs. No TODOs left unimplemented.
 
-CRITICAL: Begin your response IMMEDIATELY with the first code block. Do NOT write any preamble.
-`
+Example:
+` + "```go:internal/server/handler.go" + `
+package server
 
-// codeStageSuffixFor returns the appropriate code stage suffix for the model's edit format.
-func codeStageSuffixFor(format router.EditFormat) string {
-	switch format {
-	case router.EditFormatWholeFile:
-		return codeStageWholeFile
+func Health(w http.ResponseWriter, r *http.Request) {
+    w.WriteHeader(http.StatusOK)
+    w.Write([]byte("ok"))
+}
+` + "```" + `
+`)
 	default:
-		return codeStageSuffix
+		b.WriteString(`
+### File output format:
+- For NEW files: use ` + "```lang:filepath" + ` fences with full content.
+- For EXISTING files under 50 lines: use ` + "```lang:filepath" + ` with the COMPLETE file.
+- For EXISTING files 50+ lines: use ` + "```edit:filepath" + ` with SEARCH/REPLACE markers.
+- NEVER output the full content of a large existing file — only changed sections.
+
+Example (editing existing file 50+ lines):
+` + "```edit:internal/server/handler.go" + `
+<<<SEARCH
+func Health(w http.ResponseWriter, r *http.Request) {
+    w.WriteHeader(200)
+}
+===
+func Health(w http.ResponseWriter, r *http.Request) {
+    w.WriteHeader(http.StatusOK)
+    w.Write([]byte("ok"))
+}
+>>>SEARCH
+` + "```" + `
+Multiple <<<SEARCH...>>>SEARCH sections per block are allowed.
+`)
+	}
+
+	b.WriteString("\nCRITICAL: Begin your response IMMEDIATELY with the first code block. Do NOT write any preamble.\n")
+	return b.String()
+}
+
+// langCodeRules returns language-specific implementation rules (≤10 per language).
+func langCodeRules(lang string) string {
+	switch lang {
+	case "go":
+		return `
+### Go rules:
+- Handle every error — NEVER discard with _ = f(). Wrap with fmt.Errorf("context: %w", err).
+- Use errors.Is / errors.As for matching — NEVER compare error strings.
+- Every goroutine MUST have an exit path (context cancel, done channel, WaitGroup).
+- NEVER use time.Sleep for synchronization — use channels or sync primitives.
+- Use context.Context as the first parameter for I/O or cancelable functions.
+- For deferred Close(), use a named return and assign the close error.
+- Use errgroup.Group for parallel goroutines with error propagation.
+- Name packages by what they provide — not "utils" or "helpers".
+- Generics: use comparable (not any) when type params need == or !=.
+`
+	case "typescript":
+		return `
+### TypeScript/JavaScript rules:
+- Use ESM imports (import/export). Check package.json "type" field.
+- NEVER use path aliases (@/...) unless tsconfig paths + bundler are confirmed.
+- tsconfig: NEVER enable "noUnusedLocals" or "noUnusedParameters".
+- Express: validate req.body directly — NEVER wrap {body, query, params}.
+- Wrap async Express handlers: asyncHandler = fn => (req,res,next) => fn(req,res,next).catch(next)
+- Place error-handling middleware (err,req,res,next) AFTER all routes.
+- Use Promise.all for independent parallel calls — NEVER sequential await.
+- NEVER do N+1 queries — use include (Prisma), joinedload, select_related.
+- Prisma: use findUnique for unique fields, define BOTH sides of relations.
+- NEVER use 'any' to silence errors — use 'unknown' and narrow with type guards.
+`
+	case "python":
+		return `
+### Python rules:
+- Use type hints on all function signatures.
+- NEVER call blocking I/O inside async def — use asyncio.to_thread().
+- Use context managers (with) for file/connection handling.
+- Use dataclasses or Pydantic models for structured data — not plain dicts.
+- Handle exceptions specifically — NEVER bare except or except Exception.
+- Use pathlib.Path over os.path for file operations.
+- Use f-strings for formatting — not % or .format().
+- NEVER do N+1 queries — use select_related/prefetch_related (Django), joinedload (SQLAlchemy).
+`
+	case "rust":
+		return `
+### Rust rules:
+- Use thiserror for library errors, anyhow for binary errors.
+- All unwrap() in non-test code MUST be replaced with ? or explicit handling.
+- No clone() when a reference suffices, no collect() into Vec when an iterator works.
+- Prefer &str over String in function params when ownership is not needed.
+- Use #[derive(Debug, Clone)] on public types. Implement Display for error types.
+- Use builder pattern for structs with many optional fields.
+`
+	default:
+		return ""
 	}
 }
 

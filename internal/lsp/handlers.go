@@ -340,9 +340,9 @@ func (s *Server) publishDiagnosticsFor(uri string) {
 
 	var diagnostics []Diagnostic
 
-	// Check for dead code in this file.
-	deadResult, err := intel.FindDead(s.querier, "")
-	if err == nil {
+	// Check for dead code in this file (cached, refreshed every 30s).
+	deadResult := s.getDeadResult()
+	if deadResult != nil {
 		for _, sym := range deadResult.Symbols {
 			if sym.FilePath == relPath {
 				diagnostics = append(diagnostics, Diagnostic{
@@ -449,9 +449,9 @@ func (s *Server) handleMantisDeadCode(id json.RawMessage) *jsonRPCResponse {
 	if s.querier == nil {
 		return makeError(id, errCodeInternal, "graph not initialized")
 	}
-	result, err := intel.FindDead(s.querier, "")
-	if err != nil {
-		return makeError(id, errCodeInternal, err.Error())
+	result := s.getDeadResult()
+	if result == nil {
+		return makeError(id, errCodeInternal, "dead code analysis failed")
 	}
 
 	type deadItem struct {

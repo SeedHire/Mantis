@@ -105,3 +105,32 @@ func TestUpdateBrain_SessionSectionPresent(t *testing.T) {
 		t.Error("expected a '## Session YYYY-MM-DD' heading in BRAIN.md")
 	}
 }
+
+func TestLoadSkills_UTF8RuneBoundary(t *testing.T) {
+	b := newTestBrain(t)
+	skillsDir := filepath.Join(b.dir, "skills")
+	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a skill file containing multi-byte UTF-8 characters (each é is 2 bytes).
+	// The content is crafted so a naive byte-slice truncation would split a multi-byte rune.
+	content := strings.Repeat("é", 200) // 400 bytes, 200 runes
+	if err := os.WriteFile(filepath.Join(skillsDir, "test-skill.md"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Request fewer chars than available — triggers the truncation path.
+	// 350 bytes falls in the middle of a 2-byte é character.
+	result := b.LoadSkills(350)
+	if result == "" {
+		t.Fatal("expected non-empty result")
+	}
+
+	// The result must be valid UTF-8 — no broken runes.
+	for i, r := range result {
+		if r == '\uFFFD' {
+			t.Errorf("found replacement character (U+FFFD) at byte offset %d — truncation broke a UTF-8 rune", i)
+		}
+	}
+}

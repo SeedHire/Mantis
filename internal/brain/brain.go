@@ -137,6 +137,103 @@ func (b *Brain) seedConventions() error {
 	return os.WriteFile(path, []byte(content), 0o644)
 }
 
+// DiscoverConventions analyzes the project at b.root and fills CONVENTIONS.md
+// with auto-detected conventions. Only runs if CONVENTIONS.md still has placeholder
+// "(not set)" sections. Returns the number of conventions discovered.
+func (b *Brain) DiscoverConventions() int {
+	path := filepath.Join(b.dir, "CONVENTIONS.md")
+	existing, err := os.ReadFile(path)
+	if err == nil && !strings.Contains(string(existing), "(not set)") {
+		return 0 // user already filled it in
+	}
+
+	var naming, arch, testing []string
+
+	// Detect language and naming from project files.
+	if _, err := os.Stat(filepath.Join(b.root, "go.mod")); err == nil {
+		naming = append(naming, "Go: exported names are PascalCase, unexported are camelCase")
+		naming = append(naming, "Go: error variables use `err` prefix, error types use `Error` suffix")
+		arch = append(arch, "Go modules with `internal/` for private packages")
+		testing = append(testing, "Go: tests in `_test.go` files in the same package")
+		testing = append(testing, "Go: use table-driven tests where applicable")
+		// Check for cmd/ directory pattern
+		if info, err := os.Stat(filepath.Join(b.root, "cmd")); err == nil && info.IsDir() {
+			arch = append(arch, "`cmd/` for CLI entry points, `internal/` for library code")
+		}
+	}
+	if _, err := os.Stat(filepath.Join(b.root, "package.json")); err == nil {
+		naming = append(naming, "JavaScript/TypeScript: camelCase for variables/functions, PascalCase for classes/components")
+		testing = append(testing, "Node: tests in `__tests__/` or `*.test.{ts,js}` files")
+		// Check for src/ pattern
+		if info, err := os.Stat(filepath.Join(b.root, "src")); err == nil && info.IsDir() {
+			arch = append(arch, "`src/` for source code")
+		}
+	}
+	if _, err := os.Stat(filepath.Join(b.root, "pyproject.toml")); err == nil {
+		naming = append(naming, "Python: snake_case for functions/variables, PascalCase for classes")
+		testing = append(testing, "Python: tests in `tests/` directory using pytest")
+	}
+	if _, err := os.Stat(filepath.Join(b.root, "requirements.txt")); err == nil && len(naming) == 0 {
+		naming = append(naming, "Python: snake_case for functions/variables, PascalCase for classes")
+		testing = append(testing, "Python: tests in `tests/` directory using pytest")
+	}
+
+	// Check for common config files that imply conventions
+	if _, err := os.Stat(filepath.Join(b.root, ".eslintrc.json")); err == nil {
+		naming = append(naming, "ESLint enforced — follow existing lint rules")
+	}
+	if _, err := os.Stat(filepath.Join(b.root, ".prettierrc")); err == nil {
+		naming = append(naming, "Prettier formatting — auto-formatted on save")
+	}
+	if _, err := os.Stat(filepath.Join(b.root, "Makefile")); err == nil {
+		arch = append(arch, "Makefile-based build system — use `make` targets for build/test/lint")
+	}
+	if _, err := os.Stat(filepath.Join(b.root, "docker-compose.yml")); err == nil {
+		arch = append(arch, "Docker Compose for local services")
+	}
+
+	total := len(naming) + len(arch) + len(testing)
+	if total == 0 {
+		return 0
+	}
+
+	// Build the conventions file.
+	var sb strings.Builder
+	sb.WriteString("# CONVENTIONS.md — Architecture Rules\n")
+	sb.WriteString("# Auto-discovered by `mantis init`. Edit freely.\n")
+	sb.WriteString("# Mantis enforces these on every AI response.\n\n")
+
+	sb.WriteString("## Naming\n")
+	if len(naming) > 0 {
+		for _, n := range naming {
+			sb.WriteString("- " + n + "\n")
+		}
+	} else {
+		sb.WriteString("(not set)\n")
+	}
+
+	sb.WriteString("\n## Architecture\n")
+	if len(arch) > 0 {
+		for _, a := range arch {
+			sb.WriteString("- " + a + "\n")
+		}
+	} else {
+		sb.WriteString("(not set)\n")
+	}
+
+	sb.WriteString("\n## Testing\n")
+	if len(testing) > 0 {
+		for _, t := range testing {
+			sb.WriteString("- " + t + "\n")
+		}
+	} else {
+		sb.WriteString("(not set)\n")
+	}
+
+	_ = os.WriteFile(path, []byte(sb.String()), 0o644)
+	return total
+}
+
 // Load reads all brain files and returns a SystemPrompt fragment
 // to inject into the AI's context at the start of every session.
 func (b *Brain) Load() string {
@@ -540,7 +637,24 @@ func (b *Brain) loadSkillsOrdered(priority []string, maxChars int) string {
 		if total+len(content) > maxChars {
 			remaining := maxChars - total
 			if remaining > 300 {
-				parts = append(parts, content[:remaining]+"…")
+				// Truncate at a valid UTF-8 rune boundary.
+				runes := []rune(content)
+				if remaining < len(content) {
+					// Walk runes until byte length exceeds remaining.
+					byteLen := 0
+					runeIdx := 0
+					for runeIdx < len(runes) {
+						rl := len(string(runes[runeIdx]))
+						if byteLen+rl > remaining {
+							break
+						}
+						byteLen += rl
+						runeIdx++
+					}
+					parts = append(parts, string(runes[:runeIdx])+"…")
+				} else {
+					parts = append(parts, content+"…")
+				}
 			}
 			break
 		}

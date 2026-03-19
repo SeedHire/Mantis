@@ -3,6 +3,7 @@ package graph
 import (
 	"io/fs"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -41,6 +42,7 @@ func (w *Watcher) Start() error {
 	go func() {
 		defer watcher.Close()
 
+		var debounceMu sync.Mutex
 		debounce := map[string]*time.Timer{}
 
 		for {
@@ -56,26 +58,28 @@ func (w *Watcher) Start() error {
 					continue
 				}
 
-				// Debounce 200ms
+				// Debounce 200ms — mutex protects map across goroutines (AfterFunc callbacks).
+				debounceMu.Lock()
 				if t, exists := debounce[path]; exists {
 					t.Stop()
 				}
 				op := event.Op
 				debounce[path] = time.AfterFunc(200*time.Millisecond, func() {
-					// BUG-13: check done before touching the builder; the 200ms
-					// debounce may fire after Stop() closes w.done.
 					select {
 					case <-w.done:
 						return
 					default:
 					}
+					debounceMu.Lock()
 					delete(debounce, path)
+					debounceMu.Unlock()
 					if op&fsnotify.Remove != 0 {
 						_ = w.builder.RemoveFile(path)
 					} else if op&(fsnotify.Create|fsnotify.Write) != 0 {
 						_ = w.builder.UpdateFile(path)
 					}
 				})
+				debounceMu.Unlock()
 
 			case _, ok := <-watcher.Errors:
 				if !ok {

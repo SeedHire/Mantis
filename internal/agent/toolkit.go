@@ -46,7 +46,7 @@ func (e *FinishedError) Is(t error) bool { return t == ErrFinished }
 
 // shellMetachars are characters that allow chaining arbitrary commands after
 // an allowed prefix. Any command containing these is rejected.
-var shellMetachars = []string{";", "&&", "||", "|", "$(", "`", "\n"}
+var shellMetachars = []string{";", "&&", "||", "|", "$(", "`", "\n", ">", ">>", "<"}
 
 // containsShellMeta returns true if cmd contains shell metacharacters that
 // could be used to chain arbitrary commands after an allowed prefix.
@@ -1264,6 +1264,24 @@ func isAllowedCmd(cmd string) bool {
 			if blockSensitivePath(trimmed) {
 				return false
 			}
+			// Block dangerous find flags that bypass the allowlist.
+			if strings.HasPrefix(trimmed, "find ") && hasDangerousFindFlag(trimmed) {
+				return false
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// dangerousFindFlags are find(1) flags that execute or delete.
+var dangerousFindFlags = []string{"-exec", "-execdir", "-delete", "-ok"}
+
+// hasDangerousFindFlag returns true if a find command contains flags
+// that can execute arbitrary commands or delete files.
+func hasDangerousFindFlag(cmd string) bool {
+	for _, flag := range dangerousFindFlags {
+		if strings.Contains(cmd, " "+flag) {
 			return true
 		}
 	}
@@ -1275,18 +1293,27 @@ func isAllowedCmd(cmd string) bool {
 // BUG-09: "less " removed — it is not in allowedPrefixes so isAllowedCmd
 // already rejects it before blockSensitivePath is ever reached.
 func blockSensitivePath(cmd string) bool {
-	for _, diag := range []string{"cat ", "head ", "tail "} {
+	for _, diag := range []string{"cat ", "head ", "tail ", "grep ", "find ", "ls "} {
 		if strings.HasPrefix(cmd, diag) {
-			rest := strings.TrimSpace(cmd[len(diag):])
-			if strings.HasPrefix(rest, "/etc") || strings.HasPrefix(rest, "/proc") ||
-				strings.HasPrefix(rest, "/sys") || strings.HasPrefix(rest, "/dev") ||
-				strings.HasPrefix(rest, "/var/log") || strings.HasPrefix(rest, "/root") ||
-				strings.Contains(rest, "..") {
+			if containsSensitivePath(cmd[len(diag):]) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// sensitivePaths are system directories that should never be accessed.
+var sensitivePaths = []string{"/etc", "/proc", "/sys", "/dev", "/var/log", "/root", "/private/etc"}
+
+// containsSensitivePath returns true if text references sensitive system paths.
+func containsSensitivePath(text string) bool {
+	for _, sp := range sensitivePaths {
+		if strings.Contains(text, sp) {
+			return true
+		}
+	}
+	return strings.Contains(text, "..")
 }
 
 // walkGlob recursively walks root and returns up to maxResults files whose

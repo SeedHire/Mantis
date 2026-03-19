@@ -22,13 +22,14 @@ type Result struct {
 // codeBlockRe extracts content inside fenced code blocks.
 // Group 1: fence header (lang or lang:filepath). Group 2: code content.
 // edit:filepath blocks are skipped in the scanning loop (they contain SEARCH/REPLACE markers).
-var codeBlockRe = regexp.MustCompile("```([a-z][a-z]*(?::[^\n`]+)?)\n([\\s\\S]*?)```")
+var codeBlockRe = regexp.MustCompile("(?i)```([a-z][a-z]*(?::[^\n`]+)?)\n([\\s\\S]*?)```")
 
 // funcCallRe matches function/method call patterns like foo(), Bar(), obj.Method().
 var funcCallRe = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_]*)\s*\(`)
 
 // stopWords are common English words and keywords that look like calls but aren't symbols.
 var stopWords = map[string]bool{
+	// Go keywords and builtins
 	"if": true, "for": true, "switch": true, "select": true, "return": true,
 	"make": true, "len": true, "cap": true, "append": true, "copy": true,
 	"delete": true, "panic": true, "recover": true, "new": true, "close": true,
@@ -37,10 +38,26 @@ var stopWords = map[string]bool{
 	"chan": true, "true": true, "false": true, "nil": true, "string": true,
 	"int": true, "error": true, "bool": true, "byte": true, "rune": true,
 	"float64": true, "float32": true, "print": true, "println": true,
-	// Python/TS common builtins
+	"int32": true, "int64": true, "uint": true, "uint32": true, "uint64": true,
+	"complex128": true, "any": true, "struct": true,
+	// Common cross-language keywords
+	"while": true, "else": true, "try": true, "catch": true, "throw": true,
+	"typeof": true, "await": true, "async": true, "class": true, "this": true,
+	"self": true, "break": true, "continue": true, "do": true, "finally": true,
+	"with": true, "yield": true, "from": true, "as": true, "in": true,
+	"not": true, "or": true, "and": true, "is": true, "elif": true, "except": true,
+	// Python builtins
 	"super": true, "list": true, "dict": true, "set": true, "str": true,
-	"isinstance": true, "console": true, "require": true,
-	"describe": true, "expect": true, "test": true,
+	"isinstance": true, "none": true,
+	"getattr": true, "setattr": true, "hasattr": true,
+	// JS/TS builtins and test frameworks
+	"console": true, "require": true, "export": true, "default": true,
+	"describe": true, "expect": true, "test": true, "it": true,
+	"promise": true, "array": true, "object": true,
+	"number": true, "boolean": true, "date": true,
+	"regexp": true, "json": true, "math": true,
+	"settimeout": true, "setinterval": true, "cleartimeout": true, "fetch": true,
+	"parseint": true, "parsefloat": true, "isnan": true, "undefined": true,
 }
 
 // SuggestCorrections builds a correction string mapping unknown symbols
@@ -208,7 +225,7 @@ var (
 	// Matches variable/function declarations in common languages.
 	varDeclRe = regexp.MustCompile(`(?:let|const|var|func|def|function)\s+([a-zA-Z_][a-zA-Z0-9_]*)`)
 	// Matches code blocks with file paths: ```lang:filepath
-	codeFencePathRe = regexp.MustCompile("```[a-z]+:([^\n`]+)\n([\\s\\S]*?)```")
+	codeFencePathRe = regexp.MustCompile("(?i)```[a-z]+:([^\n`]+)\n([\\s\\S]*?)```")
 )
 
 // CheckConventions checks extracted code blocks against parsed convention rules.
@@ -227,12 +244,21 @@ func CheckConventions(response string, conventions []Convention) ConventionResul
 	// First, extract blocks with file paths.
 	for _, m := range codeFencePathRe.FindAllStringSubmatch(response, -1) {
 		if len(m) >= 3 {
-			blocks = append(blocks, codeBlock{filePath: strings.TrimSpace(m[1]), code: m[2]})
+			fp := strings.TrimSpace(m[1])
+			code := m[2]
+			// Skip edit blocks — they contain SEARCH/REPLACE markers, not new code.
+			// Detect via: edit: prefix in path, ```edit: in fence, or SEARCH markers in body.
+			if strings.HasPrefix(fp, "edit:") ||
+				strings.Contains(m[0], "```edit:") ||
+				strings.Contains(code, "<<<SEARCH") {
+				continue
+			}
+			blocks = append(blocks, codeBlock{filePath: fp, code: code})
 		}
 	}
 	// Also include generic code blocks (no file path → global rules only).
 	for _, m := range codeBlockRe.FindAllStringSubmatch(response, -1) {
-		if len(m) >= 3 && !strings.HasPrefix(m[1], "edit:") {
+		if len(m) >= 3 && !strings.Contains(m[1], "edit:") && !strings.Contains(m[2], "<<<SEARCH") {
 			blocks = append(blocks, codeBlock{code: m[2]})
 		}
 	}

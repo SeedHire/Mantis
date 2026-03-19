@@ -86,6 +86,14 @@ func (b *Builder) BuildFull(ignorePatterns []string) (fileCount, symbolCount int
 		return 0, 0, fmt.Errorf("walk dir: %w", err)
 	}
 
+	// Clear stale data before re-indexing to prevent orphaned edges.
+	if _, err := b.db.conn.Exec(`DELETE FROM edges`); err != nil {
+		return 0, 0, fmt.Errorf("clear edges: %w", err)
+	}
+	if _, err := b.db.conn.Exec(`DELETE FROM nodes`); err != nil {
+		return 0, 0, fmt.Errorf("clear nodes: %w", err)
+	}
+
 	// Store all nodes first (so import edges can reference both sides)
 	for _, pf := range pending {
 		result := pf.result

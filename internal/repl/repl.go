@@ -37,6 +37,7 @@ import (
 	"github.com/seedhire/mantis/internal/nl"
 	"github.com/seedhire/mantis/internal/notify"
 	"github.com/seedhire/mantis/internal/ollama"
+	oai "github.com/seedhire/mantis/internal/openai"
 	"github.com/seedhire/mantis/internal/pipeline"
 	"github.com/seedhire/mantis/internal/router"
 	"github.com/seedhire/mantis/internal/session"
@@ -220,6 +221,12 @@ func Run(cfg Config) error {
 		client.SetAPIKey(keyRing.Current())
 	}
 
+	// ── OpenAI-compatible fallback providers ─────────────────────────────
+	// Check env vars for fallback providers (used when Ollama is unavailable).
+	if fb := detectFallbackProvider(); fb != nil {
+		client.Fallback = fb
+	}
+
 	// Single line: user · connection.
 	{
 		connStr := colorDim + "local Ollama" + colorReset
@@ -228,6 +235,9 @@ func Run(cfg Config) error {
 		}
 		if keyRing != nil && keyRing.Count() > 1 {
 			connStr += fmt.Sprintf(" %s(%d API keys)%s", colorDim, keyRing.Count(), colorReset)
+		}
+		if client.Fallback != nil {
+			connStr += fmt.Sprintf(" %s+ %s fallback%s", colorDim, client.Fallback.Name, colorReset)
 		}
 		if creds != nil && creds.GitHubUser != "" {
 			fmt.Printf("%s● %s%s · %s\n", colorGreen, creds.GitHubUser, colorReset, connStr)
@@ -245,14 +255,27 @@ func Run(cfg Config) error {
 		cancel()
 		fmt.Printf("\r%s                          %s\r", colorDim, colorReset) // clear line
 		if err != nil {
-			if strings.Contains(err.Error(), "connection refused") || strings.Contains(err.Error(), "dial") {
-				fmt.Printf("\033[38;5;196m● Ollama is not running — start it with: ollama serve\033[0m\n")
-				fmt.Printf("%s  mantis requires Ollama for model inference%s\n", colorDim, colorReset)
+			// If Ollama fails but we have a fallback, inject its model and continue.
+			if client.Fallback != nil && client.Fallback.Model != "" {
+				fmt.Printf("%s● Ollama unavailable — using %s fallback (%s)%s\n",
+					colorGold, client.Fallback.Name, client.Fallback.Model, colorReset)
+				models = []ollama.ModelInfo{{Name: client.Fallback.Model, Size: 70_000_000_000}}
+				err = nil // clear error so we proceed
+			} else if strings.Contains(err.Error(), "connection refused") || strings.Contains(err.Error(), "dial") {
+				fmt.Printf("\033[38;5;196m● Ollama is not running\033[0m\n")
+				fmt.Printf("%s  To start:  ollama serve%s\n", colorDim, colorReset)
+				fmt.Printf("%s  Or get a free cloud key at https://ollama.com/cloud%s\n", colorDim, colorReset)
+			} else if strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "unauthorized") {
+				fmt.Printf("\033[38;5;196m● API key is invalid or expired\033[0m\n")
+				fmt.Printf("%s  Run /keys to update, or get a new key at https://ollama.com/cloud%s\n", colorDim, colorReset)
 			} else {
-				fmt.Printf("%s● could not list models: %v%s\n", colorGold, err, colorReset)
+				fmt.Printf("%s● could not connect: %v%s\n", colorGold, err, colorReset)
+				fmt.Printf("%s  Check your network or try: ollama serve (for local use)%s\n", colorDim, colorReset)
 			}
 		} else if len(models) == 0 {
-			fmt.Printf("\033[38;5;196m● No models installed — install one with: ollama pull qwen3-coder\033[0m\n")
+			fmt.Printf("\033[38;5;196m● No models available\033[0m\n")
+			fmt.Printf("%s  Install one:  ollama pull qwen2.5-coder:7b%s\n", colorDim, colorReset)
+			fmt.Printf("%s  Or use cloud: get a free key at https://ollama.com/cloud%s\n", colorDim, colorReset)
 		}
 		if err == nil && len(models) > 0 {
 			availableModels = models
@@ -359,7 +382,9 @@ func Run(cfg Config) error {
 		ollama.Message{Role: "system", Content: systemPrompt},
 	}
 
-	// Session resume: load most recent session conversation if --continue.
+	// Session resume: load most recent session conversation.
+	// --continue: explicit resume (24h window, full history).
+	// Auto-resume: if session is <1h old, restore last 20 messages automatically.
 	if cfg.Continue {
 		if prev, err := session.LoadRecent(mantisDir, 24*time.Hour); err == nil && prev != nil && len(prev.Messages) > 0 {
 			var restored []interface{}
@@ -382,6 +407,33 @@ func Run(cfg Config) error {
 			}
 		} else {
 			fmt.Printf("%s● no recent session to resume%s\n", colorDim, colorReset)
+		}
+	} else {
+		// Auto-resume: silently restore recent context if session is <1h old.
+		if prev, err := session.LoadRecent(mantisDir, 1*time.Hour); err == nil && prev != nil && len(prev.Messages) > 0 {
+			var restored []interface{}
+			for _, raw := range prev.Messages {
+				var msg ollama.Message
+				if err := json.Unmarshal(raw, &msg); err == nil && msg.Role != "" {
+					restored = append(restored, msg)
+				}
+			}
+			// Only restore non-system messages, cap at 20 most recent.
+			var history []interface{}
+			for _, m := range restored {
+				if msg, ok := m.(ollama.Message); ok && msg.Role != "system" {
+					history = append(history, m)
+				}
+			}
+			if len(history) > 20 {
+				history = history[len(history)-20:]
+			}
+			if len(history) > 0 {
+				messages = append(messages, history...)
+				fmt.Printf("%s● auto-resumed: %s (%d messages from %s ago)%s\n",
+					colorDim, prev.Topic, len(history),
+					time.Since(prev.StartTime).Round(time.Minute), colorReset)
+			}
 		}
 	}
 
@@ -568,9 +620,12 @@ func Run(cfg Config) error {
 			}
 		}
 
-		// Classify intent → pick model.
+		// Classify intent → pick model (with panic guard).
 		hasImage := cfg.ImagePath != ""
-		intent := router.Classify(input, hasImage, routerStore)
+		intent, classifyOk := safeClassify(input, hasImage, routerStore)
+		if !classifyOk {
+			continue
+		}
 		if cfg.ForceTier != "" {
 			intent.Tier = parseTier(cfg.ForceTier)
 		}
@@ -740,6 +795,9 @@ func Run(cfg Config) error {
 		if tokensAfter < tokensBefore {
 			evLog.RecordCompaction(turn, (tokensBefore-tokensAfter)/100, tokensBefore, tokensAfter)
 		}
+
+		// Auto-web-search: if the user is asking about APIs/docs, inject search results.
+		autoWebSearch(input, &messages, webFetcher)
 
 		messages = append(messages, userMsg)
 
@@ -1577,7 +1635,11 @@ func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
 	case "/quit", "/exit", "/q":
 		return true
 	case "/help":
-		printHelp()
+		if len(parts) > 1 && parts[1] == "all" {
+			printHelpFull()
+		} else {
+			printHelp()
+		}
 	case "/version":
 		v := cfg.Version
 		if v == "" {
@@ -2570,33 +2632,42 @@ func handlePRCommand(client *ollama.Client) {
 		return
 	}
 
+	// Check for remote.
+	if remoteOut, _ := toolkit.RunBash("git remote", 5); strings.TrimSpace(remoteOut) == "" {
+		fmt.Printf("%s✗ no git remote configured — run: git remote add origin <url>%s\n\n", colorRed, colorReset)
+		return
+	}
+
 	// Get current branch.
 	branch, code := toolkit.RunBash("git rev-parse --abbrev-ref HEAD", 5)
 	branch = strings.TrimSpace(branch)
 	if code != 0 || branch == "" || branch == "HEAD" {
-		fmt.Printf("%s✗ not on a named branch%s\n\n", colorRed, colorReset)
+		fmt.Printf("%s✗ not on a named branch (detached HEAD?) — checkout or create a branch first%s\n\n", colorRed, colorReset)
 		return
 	}
-	if branch == "main" || branch == "master" {
+
+	// Detect default branch dynamically.
+	defaultBranch := detectDefaultBranch(toolkit)
+	if branch == defaultBranch {
 		fmt.Printf("%s✗ on %s — create a feature branch first%s\n\n", colorRed, branch, colorReset)
 		return
 	}
 
-	// Commits ahead of main/master.
-	commitLog, _ := toolkit.RunBash("git log main..HEAD --oneline", 10)
-	if strings.TrimSpace(commitLog) == "" {
-		commitLog, _ = toolkit.RunBash("git log master..HEAD --oneline", 10)
+	// Warn about uncommitted changes.
+	if statusOut, _ := toolkit.RunBash("git status --porcelain", 5); strings.TrimSpace(statusOut) != "" {
+		lineCount := len(strings.Split(strings.TrimSpace(statusOut), "\n"))
+		fmt.Printf("%s⚠ %d uncommitted change(s) — these won't be in the PR. /commit first?%s\n", colorGold, lineCount, colorReset)
 	}
+
+	// Commits ahead of default branch.
+	commitLog, _ := toolkit.RunBash(fmt.Sprintf("git log %s..HEAD --oneline", defaultBranch), 10)
 	if strings.TrimSpace(commitLog) == "" {
-		fmt.Printf("%s● no commits ahead of main/master — nothing to PR%s\n\n", colorDim, colorReset)
+		fmt.Printf("%s● no commits ahead of %s — nothing to PR%s\n\n", colorDim, defaultBranch, colorReset)
 		return
 	}
 
 	// Diff stat.
-	diffStat, _ := toolkit.RunBash("git diff main...HEAD --stat", 10)
-	if diffStat == "" {
-		diffStat, _ = toolkit.RunBash("git diff master...HEAD --stat", 10)
-	}
+	diffStat, _ := toolkit.RunBash(fmt.Sprintf("git diff %s...HEAD --stat", defaultBranch), 10)
 
 	// Generate PR title + body via model.
 	fmt.Printf("%s  generating PR description…%s\n", colorDim, colorReset)
@@ -2706,6 +2777,24 @@ func parsePROutput(raw string) (title, body string) {
 		}
 	}
 	return
+}
+
+// detectDefaultBranch returns "main", "master", or whatever the repo's default branch is.
+func detectDefaultBranch(toolkit *agent.AgentToolkit) string {
+	// Try git symbolic-ref for origin's HEAD.
+	out, code := toolkit.RunBash("git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null", 5)
+	if code == 0 {
+		ref := strings.TrimSpace(out)
+		// e.g. "refs/remotes/origin/main" → "main"
+		if parts := strings.Split(ref, "/"); len(parts) > 0 {
+			return parts[len(parts)-1]
+		}
+	}
+	// Fallback: check if "main" branch exists, else assume "master".
+	if _, code := toolkit.RunBash("git rev-parse --verify main 2>/dev/null", 5); code == 0 {
+		return "main"
+	}
+	return "master"
 }
 
 // buildSystemPrompt returns the base system prompt (tier-independent).
@@ -2995,6 +3084,16 @@ func contextMessageFor(ctx context.Context, input, root string, brainContext str
 			readCache[clean] = true
 			newCount++
 			fmt.Printf("%s  ● reading: %s%s\n", colorDim, clean, colorReset)
+		}
+	}
+
+	// If no explicit files detected, try topic-based file discovery.
+	if len(mentionedFiles) == 0 && querier != nil {
+		topicFiles := extractTopicFiles(input, querier)
+		if len(topicFiles) > 0 {
+			mentionedFiles = topicFiles
+			fmt.Printf("%s  ● topic: %d relevant file(s) detected%s\n",
+				colorDim, len(topicFiles), colorReset)
 		}
 	}
 
@@ -4435,56 +4534,107 @@ func printHelp() {
 	d := colorDim
 	g := colorGold
 	r := colorReset
-	fmt.Printf("\n%s╭─ Commands ──────────────────────────────────────────────╮%s\n", d, r)
-	cmds := [][2]string{
-		{"/init", "analyze codebase and generate MANTIS.md"},
+	fmt.Printf("\n%s╭─ Essential Commands ───────────────────────────────────╮%s\n", d, r)
+	essential := [][2]string{
 		{"/file <path>", "inject a file into context"},
-		{"/vision <path>", "analyze an image or screenshot"},
-		{"/fetch <url>", "fetch a web page into context (Jina Reader)"},
-		{"/search <query>", "web search — Jina (keyless) or Tavily (MANTIS_TAVILY_KEY)"},
 		{"/ask <question>", "read-only expert analysis — no file writes"},
-		{"/replay [sid]", "replay event log for this or a given session"},
-		{"/benchmark", "score model quality across 10 coding tasks"},
+		{"/plan", "plan mode — think first, then /build to implement"},
+		{"/build", "implement from plan — writes code to disk"},
 		{"/test [pkg]", "run tests → fix failures → repeat until green"},
-		{"/index", "index source code for semantic search"},
-		{"/undo", "revert all files written by the last AI response"},
-		{"/snapshot [label]", "save a git snapshot of current changes"},
-		{"/snapshots", "list all saved snapshots"},
-		{"/revert <id>", "restore working tree to a saved snapshot"},
+		{"/undo [N]", "revert files written by the last N AI responses"},
 		{"/commit", "generate commit message, preview, commit"},
-		{"/pr", "push branch + generate PR title/body + create GitHub PR"},
-		{"/git-log", "show last 10 mantis auto-commits"},
-		{"/plan", "enter plan mode — read-only, sets permission to plan"},
-		{"/build", "exit plan mode — saves plan to .mantis/PLAN.md"},
-		{"/execute", "alias for /build — exit plan and start implementation"},
-		{"/context", "show context window token breakdown"},
-		{"/compact [focus]", "compress conversation history (optional focus topic)"},
-		{"/reset", "clear conversation (brain memory kept)"},
-		{"/cost", "token savings report"},
-		{"/stats", "usage analytics (tiers, latency, files)"},
-		{"/brain", "show project memory"},
-		{"/save", "save session to project memory now"},
-		{"/models", "show available models and current routing"},
-		{"/reject <reason>", "log last suggestion as rejected approach"},
-		{"/decision <text>", "log an architecture decision"},
-		{"/keys", "manage API keys (add/delete/tag)"},
-		{"/mode [mode]", "set permission mode (default|auto-edit|plan)"},
-		{"/effort [level]", "set thinking effort (low|medium|high)"},
-		{"/notify on|off", "toggle desktop notifications for slow tasks"},
-		{"/mcp list|load", "manage MCP server connections (.mcp.json)"},
-		{"/telemetry on|off", "enable / disable anonymous usage upload"},
-		{"/version", "show current version"},
-		{"/quit", "exit  (also Ctrl+C)"},
 	}
-	for _, c := range cmds {
+	for _, c := range essential {
 		fmt.Printf("%s│%s  %s%-20s%s  %s%s%s │%s\n",
 			d, r, g, c[0], r, d, c[1], r, r)
 	}
-	fmt.Printf("%s╰────────────────────────────────────────────────────────╯%s\n\n", d, r)
+	fmt.Printf("%s╰────────────────────────────────────────────────────────╯%s\n", d, r)
+	fmt.Printf("%s  type /help all for all %d commands%s\n\n", d, 38, r)
+}
+
+func printHelpFull() {
+	d := colorDim
+	g := colorGold
+	r := colorReset
+	sections := []struct {
+		title string
+		cmds  [][2]string
+	}{
+		{"Context & Analysis", [][2]string{
+			{"/file <path>", "inject a file into context"},
+			{"/vision <path>", "analyze an image or screenshot"},
+			{"/fetch <url>", "fetch a web page into context (Jina Reader)"},
+			{"/search <query>", "web search — Jina (keyless) or Tavily"},
+			{"/ask <question>", "read-only expert analysis — no file writes"},
+			{"/index", "index source code for semantic search"},
+			{"/context", "show context window token breakdown"},
+		}},
+		{"Planning & Execution", [][2]string{
+			{"/plan", "enter plan mode — read-only, think first"},
+			{"/build", "implement from plan — writes code to disk"},
+			{"/execute", "alias for /build"},
+			{"/test [pkg]", "run tests → fix failures → repeat until green"},
+			{"/benchmark", "score model quality across 10 coding tasks"},
+			{"/init", "analyze codebase and generate MANTIS.md"},
+		}},
+		{"Git & Snapshots", [][2]string{
+			{"/undo [N]", "revert files written by the last N AI responses"},
+			{"/snapshot [label]", "save a git snapshot of current changes"},
+			{"/snapshots", "list all saved snapshots"},
+			{"/revert <id>", "restore working tree to a saved snapshot"},
+			{"/commit", "generate commit message, preview, commit"},
+			{"/pr", "push branch + generate PR title/body + create PR"},
+			{"/git-log", "show last 10 mantis auto-commits"},
+		}},
+		{"Project Memory", [][2]string{
+			{"/brain", "show project memory"},
+			{"/save", "save session to project memory now"},
+			{"/reject <reason>", "log last suggestion as rejected approach"},
+			{"/decision <text>", "log an architecture decision"},
+		}},
+		{"Session & Config", [][2]string{
+			{"/compact [focus]", "compress conversation history"},
+			{"/reset", "clear conversation (brain memory kept)"},
+			{"/replay [sid]", "replay event log for a session"},
+			{"/mode [mode]", "permission mode (default|auto-edit|plan)"},
+			{"/effort [level]", "thinking effort (low|medium|high)"},
+			{"/models", "show available models and routing"},
+			{"/keys", "manage API keys (add/delete/tag)"},
+			{"/notify on|off", "toggle desktop notifications"},
+			{"/mcp list|load", "manage MCP server connections"},
+			{"/telemetry on|off", "anonymous usage data toggle"},
+			{"/cost", "token savings report"},
+			{"/stats", "usage analytics (tiers, latency, files)"},
+			{"/version", "show current version"},
+			{"/quit", "exit  (also Ctrl+C)"},
+		}},
+	}
+	for _, s := range sections {
+		fmt.Printf("\n%s╭─ %s ─╮%s\n", d, s.title, r)
+		for _, c := range s.cmds {
+			fmt.Printf("%s│%s  %s%-20s%s  %s%s%s\n",
+				d, r, g, c[0], r, d, c[1], r)
+		}
+	}
+	fmt.Println()
 }
 
 func printFooter() {
-	fmt.Printf("\n%s  /help · /file · /test · /brain · /quit%s\n\n", colorDim, colorReset)
+	fmt.Printf("\n%s  /help · just type a question to start%s\n\n", colorDim, colorReset)
+}
+
+// safeClassify wraps router.Classify with panic recovery so a classifier crash
+// doesn't kill the REPL. Returns the intent and true on success, or a fallback
+// TierFast intent and false on panic.
+func safeClassify(input string, hasImage bool, store router.EmbedStore) (intent router.Intent, ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("\n%s⚠ classifier error: %v — using default routing%s\n", colorRed, r, colorReset)
+			intent = router.Intent{Tier: router.TierFast, TaskType: "question", Confidence: 0.5}
+			ok = true // still ok to proceed, just with fallback
+		}
+	}()
+	return router.Classify(input, hasImage, store), true
 }
 
 // tierColors maps each tier to a terminal color code for the routing badge.
@@ -5449,5 +5599,35 @@ func runWithScanner(cfg Config, client *ollama.Client, sess *session.Session,
 		cfg.InitialQuery = ""
 	}
 	endSession(sess, b, messages, nil)
+	return nil
+}
+
+// detectFallbackProvider checks MANTIS_*_KEY env vars and returns the first
+// available OpenAI-compatible provider as a fallback. Returns nil if none found.
+func detectFallbackProvider() *ollama.FallbackProvider {
+	// Priority order: Cerebras (fastest), Groq, SambaNova, Gemini.
+	type candidate struct {
+		envKey  string
+		newFunc func(string) *oai.Client
+		model   string
+		name    string
+	}
+	candidates := []candidate{
+		{"MANTIS_CEREBRAS_KEY", oai.NewCerebras, oai.CerebrasModel, "cerebras"},
+		{"MANTIS_GROQ_KEY", oai.NewGroq, oai.GroqModel, "groq"},
+		{"MANTIS_SAMBANOVA_KEY", oai.NewSambaNova, oai.SambaNovaModel, "sambanova"},
+		{"MANTIS_GEMINI_KEY", oai.NewGemini, oai.GeminiModel, "gemini"},
+	}
+	for _, c := range candidates {
+		key := os.Getenv(c.envKey)
+		if key == "" {
+			continue
+		}
+		return &ollama.FallbackProvider{
+			Provider: c.newFunc(key),
+			Model:    c.model,
+			Name:     c.name,
+		}
+	}
 	return nil
 }

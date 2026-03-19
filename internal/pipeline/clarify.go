@@ -79,7 +79,10 @@ func formatAnswers(result *ClarifyResult) string {
 	var sb strings.Builder
 	sb.WriteString("Here are my choices:\n")
 	for i, q := range result.Questions {
-		ans := result.Answers[i]
+		ans := q.Default
+		if i < len(result.Answers) {
+			ans = result.Answers[i]
+		}
 		if ans < 0 || ans >= len(q.Options) {
 			ans = q.Default
 		}

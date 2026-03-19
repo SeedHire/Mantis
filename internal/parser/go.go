@@ -2,6 +2,7 @@ package parser
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -187,8 +188,11 @@ func resolveGoImport(fromFile, importPath, root string) string {
 	}
 	for i := 1; i <= len(parts); i++ {
 		candidate := filepath.Join(parts[i:]...)
+		if candidate == "" || candidate == "." {
+			continue
+		}
 		fullPath := filepath.Join(root, candidate)
-		if fullPath != root {
+		if _, err := os.Stat(fullPath); err == nil {
 			return fullPath
 		}
 	}

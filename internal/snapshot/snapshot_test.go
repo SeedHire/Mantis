@@ -132,6 +132,47 @@ func TestTakePersistence(t *testing.T) {
 	}
 }
 
+func TestFindStashByMessage_ExactMatch(t *testing.T) {
+	dir := initGitRepo(t)
+	s := NewStore(dir)
+
+	// Create two stashes with messages where one is a substring of the other.
+	// Make change 1.
+	if err := os.WriteFile(filepath.Join(dir, "hello.go"), []byte("package main\n// v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test",
+			"GIT_AUTHOR_EMAIL=test@test.com",
+			"GIT_COMMITTER_NAME=test",
+			"GIT_COMMITTER_EMAIL=test@test.com",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %s (%v)", args, out, err)
+		}
+	}
+
+	run("stash", "push", "-m", "mantis-backup-2")
+	// Make change 2.
+	if err := os.WriteFile(filepath.Join(dir, "hello.go"), []byte("package main\n// v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("stash", "push", "-m", "mantis-backup")
+
+	// findStashByMessage("mantis-backup") should NOT match "mantis-backup-2".
+	ref := s.findStashByMessage("mantis-backup")
+	if ref == "" {
+		t.Fatal("expected to find stash with exact message 'mantis-backup'")
+	}
+
+	// Verify it's stash@{0} (the most recent, which has exactly "mantis-backup").
+	if ref != "stash@{0}" {
+		t.Errorf("expected stash@{0}, got %q — may have matched the wrong stash (substring collision)", ref)
+	}
+}
+
 func TestPrune(t *testing.T) {
 	dir := initGitRepo(t)
 	s := NewStore(dir)

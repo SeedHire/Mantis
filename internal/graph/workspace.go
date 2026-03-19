@@ -214,7 +214,7 @@ func (ws *Workspace) DetectCrossRepoEdges() ([]CrossRepoEdge, error) {
 		}
 
 		for _, e := range allEdges {
-			if e.Type != "imports" {
+			if e.Type != EdgeTypeImport {
 				continue
 			}
 

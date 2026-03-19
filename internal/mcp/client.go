@@ -297,14 +297,16 @@ func (s *serverConn) sendRequest(ctx context.Context, req map[string]interface{}
 		return nil, err
 	}
 
+	// Hold mutex only for the write+read pair, but release before blocking.
+	// This prevents deadlock when the read hangs indefinitely.
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if _, err := fmt.Fprintf(s.stdin, "%s\n", data); err != nil {
+		s.mu.Unlock()
 		return nil, fmt.Errorf("write: %w", err)
 	}
+	s.mu.Unlock()
 
-	// Read response line (newline-delimited JSON-RPC).
+	// Read response line (newline-delimited JSON-RPC) without holding the mutex.
 	done := make(chan struct{})
 	var line string
 	var readErr error

@@ -258,6 +258,9 @@ func extractCallName(funcNode *sitter.Node, code []byte) string {
 func nodeText(n *sitter.Node, code []byte) string {
 	start := n.StartByte()
 	end := n.EndByte()
+	if int(start) >= len(code) {
+		return ""
+	}
 	if int(end) > len(code) {
 		end = uint32(len(code))
 	}

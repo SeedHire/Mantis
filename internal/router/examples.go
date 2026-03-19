@@ -29,7 +29,7 @@ var RouterExamples = []LabeledExample{
 	{Query: "how to use fmt.Sprintf", Tier: TierFast},
 	{Query: "show me an example of error wrapping", Tier: TierFast},
 	{Query: "what does context.WithTimeout do", Tier: TierFast},
-	{Query: "what is the difference between make and new", Tier: TierFast},
+	{Query: "what is the difference between make and new", Tier: TierReason},
 	{Query: "how to iterate over a map", Tier: TierFast},
 	{Query: "show me a goroutine example", Tier: TierFast},
 	{Query: "what type does json.Unmarshal expect", Tier: TierFast},

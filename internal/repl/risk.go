@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 )
 
 // RiskLevel classifies a tool action by its reversibility.
@@ -183,6 +184,7 @@ func ParsePermissionMode(s string) (PermissionMode, bool) {
 // ScopedApprovalCache tracks user approvals with scope awareness.
 // "user approved git push to feature-branch" ≠ approval to push to main.
 type ScopedApprovalCache struct {
+	mu        sync.RWMutex
 	approvals map[string]bool // key = "tool:scope"
 }
 
@@ -193,11 +195,15 @@ func NewScopedApprovalCache() *ScopedApprovalCache {
 
 // Approve records that a tool+scope combination was approved.
 func (c *ScopedApprovalCache) Approve(toolName, scope string) {
+	c.mu.Lock()
 	c.approvals[approvalKey(toolName, scope)] = true
+	c.mu.Unlock()
 }
 
 // IsApproved checks if a tool+scope was previously approved.
 func (c *ScopedApprovalCache) IsApproved(toolName, scope string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.approvals[approvalKey(toolName, scope)]
 }
 

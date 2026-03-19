@@ -40,10 +40,11 @@ type Index map[string]FileEntry // file path → entry
 
 // Writer writes and updates GROUND_TRUTH.json inside .mantis/.
 type Writer struct {
-	brainDir string
-	parsers  map[string]parser.Parser
-	mu       sync.Mutex
-	index    Index
+	brainDir  string
+	parsers   map[string]parser.Parser
+	mu        sync.Mutex
+	index     Index
+	batchMode bool // when true, UpdateFile skips per-call flush
 }
 
 // New creates a Writer for the given project root.
@@ -111,7 +112,9 @@ func (w *Writer) UpdateFile(path string) {
 	w.mu.Lock()
 	w.index[path] = entry
 	w.mu.Unlock()
-	_ = w.flush()
+	if !w.batchMode {
+		_ = w.flush()
+	}
 }
 
 // RemoveFile removes a file entry from the index.
@@ -124,7 +127,10 @@ func (w *Writer) RemoveFile(path string) {
 
 // BuildFull indexes all supported files under root.
 // Called once during init to seed the index.
+// Uses batch mode to avoid flushing to disk after every single file.
 func (w *Writer) BuildFull(root string) error {
+	w.batchMode = true
+	defer func() { w.batchMode = false }()
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -225,6 +231,9 @@ func (w *Writer) SymbolExists(name string) bool {
 // FindClosest returns the closest matching symbol names for a given unknown symbol.
 // Uses simple prefix and substring matching to suggest corrections.
 func (w *Writer) FindClosest(name string, limit int) []string {
+	if name == "" || limit <= 0 {
+		return nil
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -286,11 +295,13 @@ func (w *Writer) flush() error {
 	}
 	w.mu.Lock()
 	data, err := json.MarshalIndent(w.index, "", "  ")
-	w.mu.Unlock()
 	if err != nil {
+		w.mu.Unlock()
 		return err
 	}
-	return os.WriteFile(filepath.Join(w.brainDir, filename), data, 0o644)
+	writeErr := os.WriteFile(filepath.Join(w.brainDir, filename), data, 0o644)
+	w.mu.Unlock()
+	return writeErr
 }
 
 func (w *Writer) load() error {

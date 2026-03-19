@@ -132,6 +132,7 @@ func credPath() string {
 }
 
 // Load reads credentials from disk. Returns empty struct if not found.
+// If the GitHub token is stored in the OS keychain, it is retrieved from there.
 func Load() (*Credentials, error) {
 	data, err := os.ReadFile(credPath())
 	if os.IsNotExist(err) {
@@ -144,20 +145,87 @@ func Load() (*Credentials, error) {
 	if err := json.Unmarshal(data, &c); err != nil {
 		return nil, err
 	}
+	// Try to load GitHub token from OS keychain if not in JSON.
+	if c.GitHubToken == "" {
+		if tok := keychainGet("mantis", "github-token"); tok != "" {
+			c.GitHubToken = tok
+		}
+	}
 	return &c, nil
 }
 
 // Save writes credentials to disk (permissions 0600).
+// Attempts to store the GitHub token in the OS keychain; falls back to JSON.
 func (c *Credentials) Save() error {
 	path := credPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(c, "", "  ")
+	// Try to store GitHub token in OS keychain.
+	tokenInKeychain := false
+	if c.GitHubToken != "" {
+		if err := keychainSet("mantis", "github-token", c.GitHubToken); err == nil {
+			tokenInKeychain = true
+		}
+	}
+	// Write JSON — omit token if it's safely in the keychain.
+	toSave := *c
+	if tokenInKeychain {
+		toSave.GitHubToken = ""
+	}
+	data, err := json.MarshalIndent(toSave, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(path, data, 0600)
+}
+
+// keychainSet stores a secret in the OS keychain.
+// Returns nil on success, error if keychain is unavailable.
+func keychainSet(service, account, secret string) error {
+	switch runtime.GOOS {
+	case "darwin":
+		// Delete existing entry first (ignore error if not found).
+		_ = exec.Command("security", "delete-generic-password", "-s", service, "-a", account).Run()
+		return exec.Command("security", "add-generic-password",
+			"-s", service, "-a", account, "-w", secret, "-U").Run()
+	case "linux":
+		if _, err := exec.LookPath("secret-tool"); err != nil {
+			return fmt.Errorf("secret-tool not found")
+		}
+		cmd := exec.Command("secret-tool", "store", "--label", service+" "+account,
+			"service", service, "account", account)
+		cmd.Stdin = strings.NewReader(secret)
+		return cmd.Run()
+	default:
+		return fmt.Errorf("keychain not supported on %s", runtime.GOOS)
+	}
+}
+
+// keychainGet retrieves a secret from the OS keychain.
+// Returns empty string if not found or keychain unavailable.
+func keychainGet(service, account string) string {
+	switch runtime.GOOS {
+	case "darwin":
+		out, err := exec.Command("security", "find-generic-password",
+			"-s", service, "-a", account, "-w").Output()
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(out))
+	case "linux":
+		if _, err := exec.LookPath("secret-tool"); err != nil {
+			return ""
+		}
+		out, err := exec.Command("secret-tool", "lookup",
+			"service", service, "account", account).Output()
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(out))
+	default:
+		return ""
+	}
 }
 
 // NeedsSetup returns true if first-run setup has not been completed.

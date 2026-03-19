@@ -156,6 +156,72 @@ func graphContextFor(files []string, root string, querier *graph.Querier) (conte
 	return sb.String(), related
 }
 
+// topicKeywords maps domain concepts to file/directory name patterns.
+// When a user mentions "authentication", we look for files matching auth*.
+var topicKeywords = map[string][]string{
+	"auth":       {"auth", "login", "session", "jwt", "oauth", "token"},
+	"database":   {"db", "database", "model", "schema", "migration", "query"},
+	"routing":    {"router", "route", "handler", "endpoint", "controller"},
+	"test":       {"test", "spec", "fixture", "mock"},
+	"config":     {"config", "setting", "env", "option"},
+	"api":        {"api", "client", "request", "response", "middleware"},
+	"error":      {"error", "err", "panic", "recover"},
+	"logging":    {"log", "logger", "trace", "telemetry", "metric"},
+	"pipeline":   {"pipeline", "stage", "workflow", "job", "task"},
+	"parser":     {"parser", "parse", "ast", "lexer", "token"},
+	"graph":      {"graph", "node", "edge", "tree", "walk"},
+	"deploy":     {"deploy", "docker", "ci", "build", "release"},
+	"cache":      {"cache", "redis", "memcache", "store"},
+	"security":   {"security", "crypt", "hash", "salt", "secret"},
+	"template":   {"template", "render", "view", "component"},
+}
+
+// extractTopicFiles finds files matching domain topics mentioned in the input.
+// This supplements explicit file/symbol detection for topic-based graph context.
+func extractTopicFiles(input string, querier *graph.Querier) []string {
+	if querier == nil {
+		return nil
+	}
+	lower := strings.ToLower(input)
+	seen := map[string]bool{}
+	var files []string
+
+	for topic, keywords := range topicKeywords {
+		// Check if the topic or any keywords appear in the input.
+		matched := strings.Contains(lower, topic)
+		if !matched {
+			for _, kw := range keywords {
+				if strings.Contains(lower, kw) {
+					matched = true
+					break
+				}
+			}
+		}
+		if !matched {
+			continue
+		}
+
+		// Search graph nodes for files matching topic keywords.
+		for _, kw := range keywords {
+			nodes, err := querier.FindNodeByName(kw)
+			if err != nil {
+				continue
+			}
+			for _, n := range nodes {
+				if n.FilePath != "" && !seen[n.FilePath] {
+					seen[n.FilePath] = true
+					files = append(files, n.FilePath)
+				}
+			}
+			if len(files) >= 4 {
+				return files
+			}
+		}
+	}
+
+	return files
+}
+
 // readFileHead reads the first n lines of a file, returning the text.
 func readFileHead(path string, maxLines int) string {
 	data, err := os.ReadFile(path)

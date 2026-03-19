@@ -410,7 +410,12 @@ func (s *Store) IndexBrainFiles(ctx context.Context, mantisDir string) error {
 		if len(text) < 10 {
 			continue
 		}
-		for i, sc := range f.split(text) {
+		chunks := f.split(text)
+		// Delete orphaned chunks: if the file previously had more sections than now,
+		// remove stale entries (e.g. source "brain" had chunks brain-0..brain-4, now only brain-0..brain-2).
+		s.deleteOrphanChunks(f.src, len(chunks))
+
+		for i, sc := range chunks {
 			id := fmt.Sprintf("%s-%d", f.src, i)
 			if err := s.Add(ctx, id, f.src, sc.label, sc.text); err != nil {
 				return fmt.Errorf("index %s chunk %d: %w", f.name, i, err)
@@ -418,6 +423,39 @@ func (s *Store) IndexBrainFiles(ctx context.Context, mantisDir string) error {
 		}
 	}
 	return nil
+}
+
+// deleteOrphanChunks removes chunks for a source that have an index >= newCount.
+// For example, if "brain" previously had 5 chunks (brain-0..brain-4) and now has 3,
+// this deletes brain-3 and brain-4.
+func (s *Store) deleteOrphanChunks(source string, newCount int) {
+	// Delete all chunks for this source where the numeric suffix >= newCount.
+	// IDs follow the pattern "source-N".
+	rows, err := s.db.Query(`SELECT id FROM chunks WHERE source = ?`, source)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	var toDelete []string
+	prefix := source + "-"
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			continue
+		}
+		if !strings.HasPrefix(id, prefix) {
+			continue
+		}
+		suffix := id[len(prefix):]
+		n := 0
+		if _, err := fmt.Sscanf(suffix, "%d", &n); err == nil && n >= newCount {
+			toDelete = append(toDelete, id)
+		}
+	}
+	for _, id := range toDelete {
+		s.db.Exec(`DELETE FROM chunks WHERE id = ?`, id)
+	}
 }
 
 // ── Section-aware splitters ───────────────────────────────────────────────────

@@ -112,6 +112,24 @@ func TestFormatAnswers(t *testing.T) {
 	}
 }
 
+func TestFormatAnswers_FewerAnswersThanQuestions(t *testing.T) {
+	// BUG: formatAnswers panics if len(Answers) < len(Questions)
+	// because it accesses result.Answers[i] without bounds check.
+	result := &ClarifyResult{
+		Questions: []ClarifyQuestion{
+			{ID: 1, Question: "Q1?", Options: []string{"A", "B"}, Default: 0},
+			{ID: 2, Question: "Q2?", Options: []string{"X", "Y"}, Default: 1},
+			{ID: 3, Question: "Q3?", Options: []string{"M", "N"}, Default: 0},
+		},
+		Answers: []int{0}, // only 1 answer for 3 questions
+	}
+	// Should not panic — should use default for missing answers.
+	out := formatAnswers(result)
+	if out == "" {
+		t.Error("expected non-empty output")
+	}
+}
+
 func TestFormatAnswers_Nil(t *testing.T) {
 	if formatAnswers(nil) != "" {
 		t.Error("expected empty string for nil result")

@@ -236,23 +236,36 @@ func applyEdits(edits []EditBlock, root string) (modified []string, skipCount in
 
 		content := string(data)
 
+		// Normalise \r\n → \n in both content and search text (models sometimes
+		// output Windows line endings even on UNIX, or file has mixed endings).
+		content = strings.ReplaceAll(content, "\r\n", "\n")
+		oldText := strings.ReplaceAll(edit.OldText, "\r\n", "\n")
+		newText := strings.ReplaceAll(edit.NewText, "\r\n", "\n")
+
+		// Guard: empty SEARCH text is invalid — skip.
+		if strings.TrimSpace(oldText) == "" {
+			skipCount++
+			failures = append(failures, EditFailure{relPath, "empty search text", ""})
+			continue
+		}
+
 		// Exact match first.
-		count := strings.Count(content, edit.OldText)
+		count := strings.Count(content, oldText)
 		if count == 1 {
-			content = strings.Replace(content, edit.OldText, edit.NewText, 1)
+			content = strings.Replace(content, oldText, newText, 1)
 		} else if count == 0 {
 			// Fuzzy fallback: normalise whitespace on both sides and try to find
 			// the search text within the file line-by-line.  We rebuild a best-
 			// effort replacement by locating the stretch of original lines whose
 			// whitespace-normalised form matches the normalised OldText.
-			normOld := normalizeWS(edit.OldText)
+			normOld := normalizeWS(oldText)
 			if normOld == "" {
 				skipCount++
 				failures = append(failures, EditFailure{relPath, "empty search text", ""})
 				continue
 			}
 			lines := strings.Split(content, "\n")
-			oldLines := strings.Split(edit.OldText, "\n")
+			oldLines := strings.Split(oldText, "\n")
 			n := len(oldLines)
 			found := false
 			for start := 0; start+n <= len(lines); start++ {
@@ -264,7 +277,7 @@ func applyEdits(edits []EditBlock, root string) (modified []string, skipCount in
 					if start > 0 {
 						sb.WriteByte('\n')
 					}
-					sb.WriteString(edit.NewText)
+					sb.WriteString(newText)
 					if start+n < len(lines) {
 						sb.WriteByte('\n')
 						sb.WriteString(strings.Join(lines[start+n:], "\n"))
@@ -276,7 +289,7 @@ func applyEdits(edits []EditBlock, root string) (modified []string, skipCount in
 			}
 			// Tier 2b: per-line trim — catches indentation-only mismatches.
 			if !found {
-				trimOld := trimEachLine(edit.OldText)
+				trimOld := trimEachLine(oldText)
 				for start := 0; start+n <= len(lines); start++ {
 					candidate := trimEachLine(strings.Join(lines[start:start+n], "\n"))
 					if candidate == trimOld {
@@ -285,7 +298,7 @@ func applyEdits(edits []EditBlock, root string) (modified []string, skipCount in
 						if start > 0 {
 							sb2.WriteByte('\n')
 						}
-						sb2.WriteString(edit.NewText)
+						sb2.WriteString(newText)
 						if start+n < len(lines) {
 							sb2.WriteByte('\n')
 							sb2.WriteString(strings.Join(lines[start+n:], "\n"))
@@ -301,7 +314,7 @@ func applyEdits(edits []EditBlock, root string) (modified []string, skipCount in
 			// Only for blocks of 6+ lines to avoid false positives on short snippets.
 			// Signature lines (func/class/def/type/interface) must match exactly.
 			if !found && n >= 6 {
-				trimmedOldLines := strings.Split(edit.OldText, "\n")
+				trimmedOldLines := strings.Split(oldText, "\n")
 				bestStart, bestCount := -1, 0
 				for start := 0; start+n <= len(lines); start++ {
 					matchCount := 0
@@ -330,7 +343,7 @@ func applyEdits(edits []EditBlock, root string) (modified []string, skipCount in
 					if bestStart > 0 {
 						sb3.WriteByte('\n')
 					}
-					sb3.WriteString(edit.NewText)
+					sb3.WriteString(newText)
 					if bestStart+n < len(lines) {
 						sb3.WriteByte('\n')
 						sb3.WriteString(strings.Join(lines[bestStart+n:], "\n"))
@@ -342,13 +355,13 @@ func applyEdits(edits []EditBlock, root string) (modified []string, skipCount in
 
 			if !found {
 				skipCount++
-				failures = append(failures, EditFailure{relPath, "not found", searchPreview(edit.OldText)})
+				failures = append(failures, EditFailure{relPath, "not found", searchPreview(oldText)})
 				continue
 			}
 		} else {
 			// Ambiguous — more than one exact match.
 			skipCount++
-			failures = append(failures, EditFailure{relPath, "ambiguous (multiple matches)", searchPreview(edit.OldText)})
+			failures = append(failures, EditFailure{relPath, "ambiguous (multiple matches)", searchPreview(oldText)})
 			continue
 		}
 
@@ -371,7 +384,14 @@ func applyEdits(edits []EditBlock, root string) (modified []string, skipCount in
 // overwrite the file entirely (used for new files or when the model ignores edit format).
 // Returns (writtenPaths, warnings). Warnings are collected instead of printed directly,
 // so the caller can route them through a coordinated renderer.
-func extractAndApplyChanges(text, root string) ([]string, []string) {
+// allowOverwrite is an optional set of relative paths that may be overwritten by whole-file blocks
+// even if they already exist. Pass nil to use the default 9B guard (block overwrites).
+// This is used to allow later pipeline stages to overwrite files written by earlier stages.
+func extractAndApplyChanges(text, root string, allowOverwrite ...map[string]bool) ([]string, []string) {
+	pipelineWritten := map[string]bool{}
+	if len(allowOverwrite) > 0 && allowOverwrite[0] != nil {
+		pipelineWritten = allowOverwrite[0]
+	}
 	var allPaths []string
 	var warnings []string
 	seen := map[string]bool{}
@@ -436,11 +456,17 @@ func extractAndApplyChanges(text, root string) ([]string, []string) {
 
 		// 9B: Protect existing files from whole-file overwrite.
 		// If the file already exists with content, require edit blocks instead.
-		if info, err := os.Stat(abs); err == nil && info.Size() > 0 {
+		// Exceptions: (1) files written by earlier pipeline stages (in pipelineWritten),
+		// (2) small files under 50 lines (model is told to use whole-file for these).
+		if info, err := os.Stat(abs); err == nil && info.Size() > 0 && !pipelineWritten[relPath] {
 			existing, readErr := os.ReadFile(abs)
 			if readErr == nil && strings.TrimSpace(string(existing)) != strings.TrimSpace(content) {
-				warnings = append(warnings, fmt.Sprintf("skipped whole-file overwrite of existing %s — use edit blocks", relPath))
-				continue
+				// Allow whole-file overwrite for small files (<50 lines).
+				lineCount := strings.Count(string(existing), "\n") + 1
+				if lineCount >= 50 {
+					warnings = append(warnings, fmt.Sprintf("skipped whole-file overwrite of existing %s (%d lines) — use edit blocks", relPath, lineCount))
+					continue
+				}
 			}
 			// Content is identical (or only whitespace diff) — allow as no-op.
 		}
@@ -566,17 +592,26 @@ func collectFailedEdits(text, root string) map[string]string {
 		if matched {
 			continue
 		}
-		// Tier 2c: best-effort
-		if n >= 4 {
+		// Tier 2c: best-effort — must match applyEdits thresholds (n≥6, 90%, sig check).
+		if n >= 6 {
 			trimmedOldLines := strings.Split(edit.OldText, "\n")
 			for start := 0; start+n <= len(lines); start++ {
 				matchCount := 0
+				sigFail := false
 				for j := 0; j < n; j++ {
-					if strings.TrimSpace(lines[start+j]) == strings.TrimSpace(trimmedOldLines[j]) {
+					trimmedActual := strings.TrimSpace(lines[start+j])
+					trimmedExpected := strings.TrimSpace(trimmedOldLines[j])
+					if trimmedActual == trimmedExpected {
 						matchCount++
+					} else if isSignatureLine(trimmedExpected) {
+						sigFail = true
+						break
 					}
 				}
-				if float64(matchCount)/float64(n) >= 0.70 {
+				if sigFail {
+					continue
+				}
+				if float64(matchCount)/float64(n) >= 0.90 {
 					matched = true
 					break
 				}

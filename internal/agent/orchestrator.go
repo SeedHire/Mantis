@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,9 +18,19 @@ import (
 )
 
 const (
-	scratchFile   = "AGENT_SCRATCH.json"
-	workerMaxIter = 5 // hard cap on tool-call iterations per worker
+	scratchFile          = "AGENT_SCRATCH.json"
+	defaultWorkerMaxIter = 10 // default cap on tool-call iterations per worker
 )
+
+// getWorkerMaxIter returns the worker iteration cap, respecting MANTIS_AGENT_MAX_ITER env override.
+func getWorkerMaxIter() int {
+	if v := os.Getenv("MANTIS_AGENT_MAX_ITER"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultWorkerMaxIter
+}
 
 // WorkerResult is the output of a single worker agent.
 type WorkerResult struct {
@@ -413,8 +424,13 @@ func runWorker(
 	var summary, codeOutput strings.Builder
 	const maxToolErrors = 3
 	toolErrCount := 0
+	maxIter := getWorkerMaxIter()
 
-	for iter := 0; iter < workerMaxIter; iter++ {
+	// Oscillation detection: track recent tool-call signatures to detect A→B→A loops.
+	var recentActions []string // last N action signatures
+	const oscillationWindow = 4
+
+	for iter := 0; iter < maxIter; iter++ {
 		select {
 		case <-ctx.Done():
 			return WorkerResult{Package: pkg, Err: "context cancelled"}
@@ -434,6 +450,27 @@ func runWorker(
 			// No tool calls — treat as final answer.
 			summary.WriteString(result.Content)
 			break
+		}
+
+		// Build action signature for oscillation detection.
+		var actionSig strings.Builder
+		for _, tc := range result.ToolCalls {
+			fmt.Fprintf(&actionSig, "%s(%s);", tc.Function.Name, tc.Function.Arguments)
+		}
+		recentActions = append(recentActions, actionSig.String())
+		if len(recentActions) > oscillationWindow {
+			recentActions = recentActions[1:]
+		}
+		// Detect A→B→A→B pattern (same action repeating every 2 turns).
+		if len(recentActions) >= 4 &&
+			recentActions[len(recentActions)-1] == recentActions[len(recentActions)-3] &&
+			recentActions[len(recentActions)-2] == recentActions[len(recentActions)-4] {
+			return WorkerResult{
+				Package: pkg,
+				Summary: summary.String(),
+				Code:    codeOutput.String(),
+				Err:     "aborted: oscillation detected (A→B→A→B pattern)",
+			}
 		}
 
 		// Append assistant's turn (with tool calls).
