@@ -16,6 +16,6 @@ jobs:
       - name: Install Mantis from source
         run: CGO_ENABLED=1 go build -o /usr/local/bin/mantis ./cmd/mantis
       - name: Build graph
-        run: mantis init --lang ts
+        run: mantis init
       - name: Architecture check
         run: mantis lint --strict --ci
