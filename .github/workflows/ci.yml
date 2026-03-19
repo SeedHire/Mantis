@@ -32,5 +32,5 @@ jobs:
 
       - name: Smoke test — init + lint
         run: |
-          /tmp/mantis init --lang ts
+          /tmp/mantis init
           /tmp/mantis lint || true   # lint may report violations; we just check it runs
