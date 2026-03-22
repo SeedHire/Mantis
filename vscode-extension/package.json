@@ -1,0 +1,123 @@
+{
+  "name": "mantis",
+  "displayName": "Mantis",
+  "description": "Graph-powered code intelligence — hotspots, dead code, impact analysis, coupling detection",
+  "version": "0.1.0",
+  "publisher": "seedhire",
+  "author": {
+    "name": "SeedHire"
+  },
+  "license": "MIT",
+  "icon": "icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SeedHire/Mantis"
+  },
+  "bugs": {
+    "url": "https://github.com/SeedHire/Mantis/issues"
+  },
+  "homepage": "https://github.com/SeedHire/Mantis#readme",
+  "keywords": [
+    "code-intelligence",
+    "dependency-graph",
+    "hotspots",
+    "dead-code",
+    "impact-analysis",
+    "coupling",
+    "go",
+    "typescript",
+    "python",
+    "lsp"
+  ],
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Programming Languages", "Linters", "Other"],
+  "activationEvents": [
+    "onLanguage:go",
+    "onLanguage:typescript",
+    "onLanguage:python",
+    "workspaceContains:.mantis/graph.db"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "mantis.impact",
+        "title": "Mantis: Analyze Impact"
+      },
+      {
+        "command": "mantis.findSymbol",
+        "title": "Mantis: Find Symbol"
+      },
+      {
+        "command": "mantis.coupling",
+        "title": "Mantis: Show Coupling"
+      },
+      {
+        "command": "mantis.refreshDiagnostics",
+        "title": "Mantis: Refresh Diagnostics"
+      },
+      {
+        "command": "mantis.init",
+        "title": "Mantis: Initialize Project"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "mantis-explorer",
+          "title": "Mantis",
+          "icon": "$(graph)"
+        }
+      ]
+    },
+    "views": {
+      "mantis-explorer": [
+        {
+          "id": "mantis-hotspots",
+          "name": "Hotspots"
+        },
+        {
+          "id": "mantis-deadcode",
+          "name": "Dead Code"
+        },
+        {
+          "id": "mantis-impact",
+          "name": "Impact Analysis"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Mantis",
+      "properties": {
+        "mantis.binaryPath": {
+          "type": "string",
+          "default": "mantis",
+          "description": "Path to the mantis binary"
+        },
+        "mantis.autoRefresh": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically refresh diagnostics on file save"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "@vscode/vsce": "^3.0.0",
+    "typescript": "^5.3.0"
+  }
+}

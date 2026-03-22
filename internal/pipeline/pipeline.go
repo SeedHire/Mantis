@@ -1150,7 +1150,9 @@ func runTaskBased(
 	var allWrittenFiles []string // tracks all files written across tasks
 	buildCheckRoot := root           // used for autofix.Check; cleared if dep install fails
 	var sealedManifest string    // populated after sequential tasks, injected into parallel workers
-	failedTaskTitles := map[string]bool{} // P9.5: track failed tasks to skip dependents
+	// P9.5+Fix10: track failed tasks with file count — only cascade-skip on total failures (0 files).
+	type failedTask struct{ fileCount int }
+	failedTaskTitles := map[string]failedTask{}
 
 	// defaultTaskTimeout is 8 minutes per task — generous but bounded.
 	if taskTimeout <= 0 {
@@ -1567,11 +1569,64 @@ func readPriorContext(root string, writtenFiles []string, maxChars int) string {
 	return sb.String()
 }
 
-// exportRe matches lines that export symbols in JS/TS/Go/Python.
-var exportRe = regexp.MustCompile(`(?m)^(?:export\s|func\s+[A-Z]|type\s+[A-Z]|class\s+\w|def\s+\w)`)
+// exportRe matches lines that export symbols in JS/TS/Go/Python/CommonJS.
+var exportRe = regexp.MustCompile(`(?m)^(?:export\s|func\s+[A-Z]|type\s+[A-Z]|class\s+\w|def\s+\w|module\.exports\s|exports\.\w)`)
+
+// methodRe matches class method declarations (JS/TS async or sync methods).
+var methodRe = regexp.MustCompile(`^\s+(?:async\s+)?([a-zA-Z_]\w*)\s*\(`)
+
+// methodExclude filters out common non-method matches (constructors, control flow).
+var methodExclude = map[string]bool{
+	"constructor": true, "if": true, "for": true, "while": true,
+	"switch": true, "catch": true, "return": true, "throw": true,
+}
+
+// extractMethodNames extracts public method names from class bodies in JS/TS/Python files.
+// Returns a deduplicated list of method names found in the content.
+func extractMethodNames(content string) []string {
+	lines := strings.Split(content, "\n")
+	var methods []string
+	seen := map[string]bool{}
+	inClass := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// Track class scope entry.
+		if strings.HasPrefix(trimmed, "class ") {
+			inClass = true
+			continue
+		}
+		// Python method (indented def inside class).
+		if inClass && strings.HasPrefix(trimmed, "def ") {
+			// "def method_name(self, ...)"
+			if idx := strings.Index(trimmed, "("); idx > 4 {
+				name := strings.TrimSpace(trimmed[4:idx])
+				if name != "__init__" && !strings.HasPrefix(name, "_") && !seen[name] {
+					seen[name] = true
+					methods = append(methods, name)
+				}
+			}
+			continue
+		}
+		if !inClass {
+			continue
+		}
+		// JS/TS method: "  async methodName(" or "  methodName("
+		if m := methodRe.FindStringSubmatch(line); m != nil {
+			name := m[1]
+			if !methodExclude[name] && !seen[name] {
+				seen[name] = true
+				methods = append(methods, name)
+			}
+		}
+	}
+	return methods
+}
 
 // extractExportSummary scans file content for export/public declarations
 // and returns a formatted summary. Helps downstream tasks use exact names.
+// For CommonJS files with classes, also extracts method names so downstream
+// tasks can call the correct methods without hallucinating names.
 func extractExportSummary(content string) string {
 	lines := strings.Split(content, "\n")
 	var exports []string
@@ -1584,15 +1639,28 @@ func extractExportSummary(content string) string {
 			}
 		}
 	}
-	if len(exports) == 0 {
+
+	methods := extractMethodNames(content)
+
+	if len(exports) == 0 && len(methods) == 0 {
 		return ""
 	}
 	var sb strings.Builder
-	sb.WriteString("**Exports (use these exact names):**\n")
-	for _, e := range exports {
-		sb.WriteString("- `")
-		sb.WriteString(e)
-		sb.WriteString("`\n")
+	if len(exports) > 0 {
+		sb.WriteString("**Exports (use these exact names):**\n")
+		for _, e := range exports {
+			sb.WriteString("- `")
+			sb.WriteString(e)
+			sb.WriteString("`\n")
+		}
+	}
+	if len(methods) > 0 {
+		sb.WriteString("**Methods (use these EXACT method names — do NOT invent alternatives):**\n")
+		for _, m := range methods {
+			sb.WriteString("- `")
+			sb.WriteString(m)
+			sb.WriteString("()`\n")
+		}
 	}
 	sb.WriteString("\n")
 	return sb.String()
