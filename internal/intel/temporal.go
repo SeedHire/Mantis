@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -37,12 +38,35 @@ type TemporalStats struct {
 	Since    time.Time
 }
 
+// temporalCache caches results to avoid re-spawning git processes on repeat calls.
+var temporalCache struct {
+	mu     sync.RWMutex
+	stats  *TemporalStats
+	root   string
+	days   int
+	expiry time.Time
+}
+
+const temporalCacheTTL = 2 * time.Minute
+
 // Temporal analyzes git history for the given project root.
 // lookbackDays controls how far back to look (default 90).
+// Results are cached for 2 minutes to avoid redundant git calls.
 func Temporal(root string, lookbackDays int) (*TemporalStats, error) {
 	if lookbackDays <= 0 {
 		lookbackDays = 90
 	}
+
+	// Check cache.
+	temporalCache.mu.RLock()
+	if temporalCache.stats != nil && temporalCache.root == root &&
+		temporalCache.days == lookbackDays && time.Now().Before(temporalCache.expiry) {
+		cached := temporalCache.stats
+		temporalCache.mu.RUnlock()
+		return cached, nil
+	}
+	temporalCache.mu.RUnlock()
+
 	since := time.Now().AddDate(0, 0, -lookbackDays)
 	sinceStr := since.Format("2006-01-02")
 
@@ -57,11 +81,28 @@ func Temporal(root string, lookbackDays int) (*TemporalStats, error) {
 		coupling = nil
 	}
 
-	return &TemporalStats{
+	result := &TemporalStats{
 		Files:    files,
 		Coupling: coupling,
 		Since:    since,
-	}, nil
+	}
+
+	// Store in cache.
+	temporalCache.mu.Lock()
+	temporalCache.stats = result
+	temporalCache.root = root
+	temporalCache.days = lookbackDays
+	temporalCache.expiry = time.Now().Add(temporalCacheTTL)
+	temporalCache.mu.Unlock()
+
+	return result, nil
+}
+
+// InvalidateTemporalCache forces the next Temporal call to re-run git.
+func InvalidateTemporalCache() {
+	temporalCache.mu.Lock()
+	temporalCache.stats = nil
+	temporalCache.mu.Unlock()
 }
 
 // Hotspots returns the top N files ranked by churn × author diversity.

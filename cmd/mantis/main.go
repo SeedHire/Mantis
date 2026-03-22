@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -71,6 +75,9 @@ var replPlan bool
 var replContinue bool
 var replOffline bool
 var replAPIKeys []string
+
+var evalOffline bool
+var evalCompare bool
 
 // ── init ──────────────────────────────────────────────────────────────────────
 
@@ -1446,12 +1453,31 @@ var evalCmd = &cobra.Command{
 	Short: "Evaluate code generation quality on a prompt",
 	Long: `Runs the pipeline on a prompt and scores the output.
 Measures: build success, test pass rate, lint violations, token efficiency.
-Output: structured quality report (text or --json).`,
-	Args: cobra.MinimumNArgs(1),
+Output: structured quality report (text or --json).
+
+Flags:
+  --offline   Run offline eval suite (Go tests) instead of online pipeline
+  --compare   Compare current run against the last saved eval result`,
+	Args: cobra.MinimumNArgs(0),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		root, err := os.Getwd()
 		if err != nil {
 			return err
+		}
+
+		// --compare implies --offline
+		if evalCompare {
+			evalOffline = true
+		}
+
+		// ── Offline eval mode ──
+		if evalOffline {
+			return runOfflineEval(root)
+		}
+
+		// ── Online eval mode (requires prompt) ──
+		if len(args) == 0 {
+			return fmt.Errorf("prompt required for online eval (use --offline for test-based eval)")
 		}
 
 		prompt := strings.Join(args, " ")
@@ -1502,6 +1528,163 @@ Output: structured quality report (text or --json).`,
 	},
 }
 
+// ── eval history ─────────────────────────────────────────────────────────────
+
+type evalHistoryEntry struct {
+	Date   string  `json:"date"`
+	Commit string  `json:"commit"`
+	Mode   string  `json:"mode"`
+	Passed int     `json:"passed"`
+	Total  int     `json:"total"`
+	Pct    float64 `json:"pct"`
+}
+
+func evalHistoryPath(root string) string {
+	return filepath.Join(root, ".mantis", "eval-history.json")
+}
+
+func loadEvalHistory(root string) ([]evalHistoryEntry, error) {
+	data, err := os.ReadFile(evalHistoryPath(root))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var history []evalHistoryEntry
+	if err := json.Unmarshal(data, &history); err != nil {
+		return nil, err
+	}
+	return history, nil
+}
+
+func saveEvalHistory(root string, history []evalHistoryEntry) error {
+	dir := filepath.Join(root, ".mantis")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(history, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(evalHistoryPath(root), data, 0o644)
+}
+
+func currentCommitShort() string {
+	out, err := exec.Command("git", "rev-parse", "--short", "HEAD").Output()
+	if err != nil {
+		return "unknown"
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func runOfflineEval(root string) error {
+	fmt.Printf("╭─ eval (offline) ─╮\n")
+	fmt.Printf("│ Running offline eval suite...\n")
+	fmt.Printf("╰──────────────────╯\n\n")
+
+	// Load previous results for --compare.
+	var previous *evalHistoryEntry
+	if evalCompare {
+		history, err := loadEvalHistory(root)
+		if err != nil {
+			fmt.Printf("\033[38;5;208mwarning: could not load eval history: %v\033[0m\n", err)
+		} else if len(history) > 0 {
+			previous = &history[len(history)-1]
+		} else {
+			fmt.Printf("\033[38;5;208mwarning: no previous eval run found for comparison\033[0m\n")
+		}
+	}
+
+	// Run the offline eval test suite.
+	goTestCmd := exec.Command("go", "test", "-run", "TestEval_OverallScorecard", "-v", "./internal/pipeline/...")
+	goTestCmd.Dir = root
+	out, testErr := goTestCmd.CombinedOutput()
+	output := string(out)
+
+	// Parse results from test output.
+	passed, total := parseOfflineResults(output)
+	allPassed := testErr == nil
+
+	if total == 0 {
+		// If no scorecard tests found, count pass/fail lines.
+		passed, total = countPassFailLines(output)
+	}
+
+	var pct float64
+	if total > 0 {
+		pct = math.Round(float64(passed)/float64(total)*1000) / 10
+	}
+
+	// Display results.
+	fmt.Printf("╭─ Offline Eval Report ─╮\n")
+	fmt.Printf("│  Status:   %s\n", boolIcon(allPassed))
+	fmt.Printf("│  Checks:   %d/%d passed\n", passed, total)
+	fmt.Printf("│  Score:    %.1f%%\n", pct)
+	fmt.Printf("╰────────────────────────╯\n")
+
+	// Show comparison if requested.
+	if evalCompare && previous != nil {
+		deltaChecks := passed - previous.Passed
+		deltaPct := pct - previous.Pct
+		fmt.Printf("\n╭─ Comparison ─╮\n")
+		fmt.Printf("│  Previous:  %d/%d (%.1f%%) on %s [%s]\n", previous.Passed, previous.Total, previous.Pct, previous.Date, previous.Commit)
+		fmt.Printf("│  Current:   %d/%d (%.1f%%)\n", passed, total, pct)
+		fmt.Printf("│  Delta:     %+d checks, %+.1f%%\n", deltaChecks, deltaPct)
+		fmt.Printf("╰──────────────╯\n")
+	}
+
+	// Save to history.
+	entry := evalHistoryEntry{
+		Date:   time.Now().Format("2006-01-02"),
+		Commit: currentCommitShort(),
+		Mode:   "offline",
+		Passed: passed,
+		Total:  total,
+		Pct:    pct,
+	}
+	history, _ := loadEvalHistory(root)
+	history = append(history, entry)
+	if err := saveEvalHistory(root, history); err != nil {
+		fmt.Printf("\033[38;5;208mwarning: could not save eval history: %v\033[0m\n", err)
+	} else {
+		fmt.Printf("\nResults saved to %s\n", evalHistoryPath(root))
+	}
+
+	if !allPassed {
+		return fmt.Errorf("offline eval: %d/%d checks failed", total-passed, total)
+	}
+	return nil
+}
+
+// parseOfflineResults extracts passed/total from scorecard-style test output.
+// Looks for patterns like "95/95 checks passed" or "PASS: 42" / "FAIL: 3".
+func parseOfflineResults(output string) (passed, total int) {
+	// Pattern: "N/M checks passed" or "N/M passed"
+	re := regexp.MustCompile(`(\d+)/(\d+)\s+(?:checks?\s+)?passed`)
+	if m := re.FindStringSubmatch(output); len(m) == 3 {
+		passed, _ = strconv.Atoi(m[1])
+		total, _ = strconv.Atoi(m[2])
+		return
+	}
+	return 0, 0
+}
+
+// countPassFailLines counts --- PASS and --- FAIL lines from go test -v output.
+func countPassFailLines(output string) (passed, total int) {
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "--- PASS:") {
+			passed++
+			total++
+		} else if strings.HasPrefix(line, "--- FAIL:") {
+			total++
+		}
+	}
+	return
+}
+
 type testCount struct {
 	passed int
 	total  int
@@ -1525,9 +1708,9 @@ func countTestResults(root string) testCount {
 
 func boolIcon(b bool) string {
 	if b {
-		return "✓ pass"
+		return "pass"
 	}
-	return "✗ fail"
+	return "fail"
 }
 
 func truncateEval(s string, max int) string {
@@ -1535,6 +1718,83 @@ func truncateEval(s string, max int) string {
 		return s
 	}
 	return s[:max-3] + "..."
+}
+
+// ── tutorial ─────────────────────────────────────────────────────────────────
+
+var tutorialCmd = &cobra.Command{
+	Use:   "tutorial",
+	Short: "Interactive guide to Mantis features",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		gold := "\033[38;5;214m"
+		dim := "\033[38;5;244m"
+		cyan := "\033[38;5;81m"
+		green := "\033[38;5;114m"
+		bold := "\033[1m"
+		reset := "\033[0m"
+
+		fmt.Printf("%s╭─ Mantis Tutorial ──────────────────────────────────────────╮%s\n", gold, reset)
+		fmt.Printf("%s│%s  Welcome to Mantis — your AI coding assistant.             %s│%s\n", gold, reset, gold, reset)
+		fmt.Printf("%s│%s  This guide walks through the key features.                %s│%s\n", gold, reset, gold, reset)
+		fmt.Printf("%s╰────────────────────────────────────────────────────────────╯%s\n\n", gold, reset)
+
+		// 1. Getting Started
+		fmt.Printf("%s%s① Getting Started%s\n", bold, cyan, reset)
+		fmt.Printf("   Run %smantis init%s in your project root to index the codebase.\n", green, reset)
+		fmt.Printf("   This creates a %s.mantis/%s directory with the dependency graph,\n", dim, reset)
+		fmt.Printf("   embeddings, brain files, and ground truth signatures.\n\n")
+
+		// 2. Interactive Chat
+		fmt.Printf("%s%s② Interactive Chat%s\n", bold, cyan, reset)
+		fmt.Printf("   Just run %smantis%s with no arguments to start a session.\n", green, reset)
+		fmt.Printf("   Mantis auto-selects the best model tier for each message.\n")
+		fmt.Printf("   %sFlags:%s --model fast|smart|heavy|vision  --plan  --continue\n\n", dim, reset)
+
+		// 3. Slash Commands
+		fmt.Printf("%s%s③ Slash Commands%s\n", bold, cyan, reset)
+		fmt.Printf("   %s/file <path>%s    — inject a file into context\n", green, reset)
+		fmt.Printf("   %s/vision <img>%s   — send an image for multimodal analysis\n", green, reset)
+		fmt.Printf("   %s/brain%s          — view project memory (BRAIN.md)\n", green, reset)
+		fmt.Printf("   %s/context%s        — show what files are in the context window\n", green, reset)
+		fmt.Printf("   %s/reject <text>%s  — record a failed approach to avoid repeating\n", green, reset)
+		fmt.Printf("   %s/decision <text>%s— log an architecture decision\n\n", green, reset)
+
+		// 4. Code Generation Pipeline
+		fmt.Printf("%s%s④ Code Generation Pipeline%s\n", bold, cyan, reset)
+		fmt.Printf("   Prompts like %s\"build a REST API for users\"%s trigger the pipeline.\n", dim, reset)
+		fmt.Printf("   The pipeline: plan → generate → build → test → fix (iterative).\n")
+		fmt.Printf("   Uses diff-based edits for surgical changes to existing files.\n\n")
+
+		// 5. Codebase Intelligence
+		fmt.Printf("%s%s⑤ Codebase Intelligence%s\n", bold, cyan, reset)
+		fmt.Printf("   %smantis hotspots%s  — files that change most often (refactor candidates)\n", green, reset)
+		fmt.Printf("   %smantis dead%s      — detect unused symbols across the codebase\n", green, reset)
+		fmt.Printf("   %smantis circular%s  — find circular dependency chains\n", green, reset)
+		fmt.Printf("   %smantis impact%s    — blast radius analysis for a given file\n\n", green, reset)
+
+		// 6. Graph Visualization
+		fmt.Printf("%s%s⑥ Graph Visualization%s\n", bold, cyan, reset)
+		fmt.Printf("   %smantis graph%s generates an interactive D3 dependency graph.\n", green, reset)
+		fmt.Printf("   Open the output HTML in a browser to explore your architecture.\n")
+		fmt.Printf("   %sFlags:%s --module <path>  --depth N  --out <file>\n\n", dim, reset)
+
+		// 7. Quality Evaluation
+		fmt.Printf("%s%s⑦ Quality Evaluation%s\n", bold, cyan, reset)
+		fmt.Printf("   %smantis eval \"<prompt>\"%s scores code generation quality.\n", green, reset)
+		fmt.Printf("   Measures: build success, test pass rate, lint violations.\n")
+		fmt.Printf("   Outputs a 0–10 score with a structured report.\n\n")
+
+		// 8. Project Templates
+		fmt.Printf("%s%s⑧ Project Templates%s\n", bold, cyan, reset)
+		fmt.Printf("   %smantis new <template> [name]%s scaffolds a new project.\n", green, reset)
+		fmt.Printf("   Templates: go-cli, go-api, node-cli, python-pkg\n\n")
+
+		fmt.Printf("%s╭─ Tip ─────────────────────────────────────────────────────╮%s\n", gold, reset)
+		fmt.Printf("%s│%s  Run %smantis --help%s for the full command reference.          %s│%s\n", gold, reset, green, reset, gold, reset)
+		fmt.Printf("%s╰───────────────────────────────────────────────────────────╯%s\n", gold, reset)
+
+		return nil
+	},
 }
 
 // ── new (project templates) ──────────────────────────────────────────────────
@@ -1720,7 +1980,10 @@ func init() {
 	rootCmd.Flags().BoolVar(&replOffline, "offline", false, "Skip GitHub auth gate — for local-only use without internet")
 	rootCmd.Flags().StringArrayVar(&replAPIKeys, "api-key", nil, "Ollama API key (can be specified multiple times for rotation)")
 
-	rootCmd.AddCommand(initCmd, contextCmd, watchCmd, findCmd, impactCmd, deadCmd, circularCmd, graphCmd, lintCmd, tuiCmd, handoffCmd, hotspotsCmd, riskyCmd, couplingCmd, intentCmd, todosCmd, specGapsCmd, workspaceCmd, traceCmd, mcpCmd, lspCmd, hooksCmd, evalCmd, newCmd)
+	evalCmd.Flags().BoolVar(&evalOffline, "offline", false, "Run offline eval suite (no model needed)")
+	evalCmd.Flags().BoolVar(&evalCompare, "compare", false, "Compare against last eval run")
+
+	rootCmd.AddCommand(initCmd, contextCmd, watchCmd, findCmd, impactCmd, deadCmd, circularCmd, graphCmd, lintCmd, tuiCmd, handoffCmd, hotspotsCmd, riskyCmd, couplingCmd, intentCmd, todosCmd, specGapsCmd, workspaceCmd, traceCmd, mcpCmd, lspCmd, hooksCmd, evalCmd, newCmd, tutorialCmd)
 	hooksCmd.AddCommand(hooksInstallCmd)
 
 	workspaceCmd.AddCommand(wsInitCmd, wsFindCmd, wsImpactCmd, wsStatsCmd)

@@ -183,6 +183,50 @@ func printDoneLine(elapsed time.Duration) {
 	fmt.Printf("\n%s  ✻ %s in %s%s\n", pColorDim, verb, timeStr, pColorReset)
 }
 
+// writePipelineLog appends a structured entry to .mantis/pipeline.log for debugging.
+func writePipelineLog(root, prompt string, res *Result, elapsed time.Duration) {
+	logDir := filepath.Join(root, ".mantis")
+	_ = os.MkdirAll(logDir, 0o755)
+	logPath := filepath.Join(logDir, "pipeline.log")
+
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	// Truncate prompt for log readability.
+	p := prompt
+	if len(p) > 120 {
+		p = p[:117] + "..."
+	}
+
+	fmt.Fprintf(f, "\n── %s ── elapsed: %.1fs ──\n", time.Now().Format("2006-01-02 15:04:05"), elapsed.Seconds())
+	fmt.Fprintf(f, "prompt: %s\n", p)
+	fmt.Fprintf(f, "tokens: prompt=%d compl=%d\n", res.PromptTok, res.ComplTok)
+	fmt.Fprintf(f, "files_written: %d\n", len(res.WrittenFiles))
+	for _, s := range res.Stages {
+		icon := "✓"
+		if s.Status == "failed" {
+			icon = "✗"
+		} else if s.Status == "skipped" {
+			icon = "○"
+		}
+		line := fmt.Sprintf("  %s %-10s [%s] %.1fs %dt", icon, s.Name, s.Model, s.Elapsed.Seconds(), s.Tokens)
+		if s.Retries > 0 {
+			line += fmt.Sprintf(" (%d retries)", s.Retries)
+		}
+		if s.Error != "" {
+			errMsg := s.Error
+			if len(errMsg) > 100 {
+				errMsg = errMsg[:97] + "..."
+			}
+			line += " — " + errMsg
+		}
+		fmt.Fprintln(f, line)
+	}
+}
+
 // progressTicker prints a live token counter + elapsed time on the current line while a stage runs.
 // Call the returned stop function when the stage completes; it returns elapsed time.
 func progressTicker(stage string) (incr func(), stop func() time.Duration) {
@@ -764,6 +808,11 @@ func Run(
 				break
 			}
 		}
+	}
+
+	// Write pipeline log for debugging/observability.
+	if opts.Root != "" {
+		writePipelineLog(opts.Root, userRequest, res, time.Since(pipelineStart))
 	}
 
 	printDoneLine(time.Since(pipelineStart))

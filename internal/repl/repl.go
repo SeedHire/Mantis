@@ -246,7 +246,43 @@ func Run(cfg Config) error {
 		}
 	}
 
-	// Resolve available models; keep the list for ensemble use.
+	// ── Parallel startup: model resolution + brain loading + NL dispatcher ──
+	// These 3 operations are independent and can run concurrently.
+	// Model resolution has an 8s timeout — brain + NL loading runs alongside it.
+	mantisDir := filepath.Join(root, ".mantis")
+
+	// Channel results for parallel init.
+	type brainResult struct {
+		b            *brain.Brain
+		brainContext string
+		conventions  []verify.Convention
+	}
+	brainCh := make(chan brainResult, 1)
+	go func() {
+		b := brain.New(root)
+		if !b.Exists() {
+			_ = b.Init()
+		}
+		if b.IsBrainEmpty() {
+			lang, framework, runCmd := detectLangFramework(root)
+			entry := detectEntryPoint(root, lang)
+			b.AutoPopulateBrain(lang, framework, entry, runCmd)
+		}
+		bc := b.LoadHot()
+		convs := verify.ParseConventions(b.ReadFile("CONVENTIONS.md"))
+		brainCh <- brainResult{b: b, brainContext: bc, conventions: convs}
+	}()
+
+	type dispatcherResult struct {
+		d *nl.Dispatcher
+	}
+	dispCh := make(chan dispatcherResult, 1)
+	go func() {
+		d := nl.New(root)
+		dispCh <- dispatcherResult{d: d}
+	}()
+
+	// Resolve available models (blocking, up to 8s).
 	var availableModels []ollama.ModelInfo
 	{
 		fmt.Printf("%s  connecting to Ollama...%s", colorDim, colorReset)
@@ -255,12 +291,11 @@ func Run(cfg Config) error {
 		cancel()
 		fmt.Printf("\r%s                          %s\r", colorDim, colorReset) // clear line
 		if err != nil {
-			// If Ollama fails but we have a fallback, inject its model and continue.
 			if client.Fallback != nil && client.Fallback.Model != "" {
 				fmt.Printf("%s● Ollama unavailable — using %s fallback (%s)%s\n",
 					colorGold, client.Fallback.Name, client.Fallback.Model, colorReset)
 				models = []ollama.ModelInfo{{Name: client.Fallback.Model, Size: 70_000_000_000}}
-				err = nil // clear error so we proceed
+				err = nil
 			} else if strings.Contains(err.Error(), "connection refused") || strings.Contains(err.Error(), "dial") {
 				fmt.Printf("\033[38;5;196m● Ollama is not running\033[0m\n")
 				fmt.Printf("%s  To start:  ollama serve%s\n", colorDim, colorReset)
@@ -280,30 +315,25 @@ func Run(cfg Config) error {
 		if err == nil && len(models) > 0 {
 			availableModels = models
 			router.ResolveAll(models)
-			// Show discovered model assignments.
 			printModelSummary()
 		}
 	}
 
-	// Load project brain.
-	b := brain.New(root)
-	if !b.Exists() {
-		_ = b.Init()
+	// Collect parallel results.
+	br := <-brainCh
+	b := br.b
+	brainContext := br.brainContext
+	conventions := br.conventions
+
+	dr := <-dispCh
+	dispatcher := dr.d
+	if dispatcher != nil {
+		defer dispatcher.Close()
 	}
-	// Auto-populate BRAIN.md if still placeholder — ensures model always knows the stack.
-	if b.IsBrainEmpty() {
-		lang, framework, runCmd := detectLangFramework(root)
-		entry := detectEntryPoint(root, lang)
-		b.AutoPopulateBrain(lang, framework, entry, runCmd)
-	}
-	brainContext := b.LoadHot() // 7.5: hot tier only; cold memory retrieved on-demand
-	conventions := verify.ParseConventions(b.ReadFile("CONVENTIONS.md"))
 
 	// Semantic embeddings — optional, used for memory retrieval + router classifier.
 	var embStore *embeddings.Store
 	var routerStore router.EmbedStore
-	mantisDir := filepath.Join(root, ".mantis")
-	// shutdownCtx is cancelled when the REPL exits, signalling background goroutines to stop.
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	defer shutdownCancel()
 	if es, err := embeddings.Open(mantisDir, client); err == nil {
@@ -311,8 +341,6 @@ func Run(cfg Config) error {
 		defer embStore.Close()
 		adapter := &routerEmbedAdapter{store: embStore}
 		routerStore = adapter
-		// Re-index brain files and router examples in background.
-		// Uses shutdownCtx so the goroutine stops cleanly when the REPL exits.
 		go func() {
 			ctx, cancel := context.WithTimeout(shutdownCtx, 90*time.Second)
 			defer cancel()
@@ -321,12 +349,6 @@ func Run(cfg Config) error {
 		}()
 	} else {
 		fmt.Printf("%s● memory store unavailable: %v%s\n", colorGold, err, colorReset)
-	}
-
-	// NL dispatcher — codebase intelligence tools, called automatically.
-	dispatcher := nl.New(root)
-	if dispatcher != nil {
-		defer dispatcher.Close()
 	}
 
 	// Web fetcher — Jina Reader with cache and raw fallback.
@@ -1855,16 +1877,43 @@ func handleSlashCommand(input string, sess *session.Session, b *brain.Brain,
 		}
 	case "/vision":
 		if len(parts) < 2 {
-			fmt.Printf("%susage: /vision <path>%s\n\n", colorDim, colorReset)
+			fmt.Printf("%susage: /vision <path> [path2 ...] — load one or more images%s\n\n", colorDim, colorReset)
 		} else {
-			imgData, err := loadImage(parts[1])
-			if err != nil {
-				fmt.Printf("%sError: %v%s\n\n", colorRed, err, colorReset)
-			} else {
+			var allImages []string
+			var loadedPaths []string
+			for _, p := range parts[1:] {
+				p = strings.TrimSpace(p)
+				if p == "" {
+					continue
+				}
+				// Support glob patterns like *.png
+				matches, err := filepath.Glob(p)
+				if err != nil || len(matches) == 0 {
+					matches = []string{p}
+				}
+				for _, m := range matches {
+					imgData, err := loadImage(m)
+					if err != nil {
+						fmt.Printf("%s  ✗ %s: %v%s\n", colorRed, m, err, colorReset)
+						continue
+					}
+					allImages = append(allImages, imgData)
+					loadedPaths = append(loadedPaths, m)
+				}
+			}
+			if len(allImages) > 0 {
+				prompt := "Analyze this image:"
+				if len(allImages) > 1 {
+					prompt = fmt.Sprintf("Analyze these %d images:", len(allImages))
+				}
 				*messages = append(*messages, ollama.ImageMessage{
-					Role: "user", Content: "Analyze this image:", Images: []string{imgData},
+					Role: "user", Content: prompt, Images: allImages,
 				})
-				fmt.Printf("%s● image loaded — describe what you need%s\n\n", colorGold, colorReset)
+				fmt.Printf("%s● %d image(s) loaded — describe what you need%s\n", colorGold, len(allImages), colorReset)
+				for _, p := range loadedPaths {
+					fmt.Printf("%s  • %s%s\n", colorDim, p, colorReset)
+				}
+				fmt.Println()
 			}
 		}
 	case "/reject":

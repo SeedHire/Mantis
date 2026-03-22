@@ -45,6 +45,11 @@ type Writer struct {
 	mu        sync.Mutex
 	index     Index
 	batchMode bool // when true, UpdateFile skips per-call flush
+
+	// Debounced flush: coalesces rapid UpdateFile calls into one disk write.
+	flushTimer *time.Timer
+	dirty      bool
+	flushDelay time.Duration // default 500ms
 }
 
 // New creates a Writer for the given project root.
@@ -53,6 +58,7 @@ func New(projectRoot string) *Writer {
 		brainDir: filepath.Join(projectRoot, ".mantis"),
 		index:    make(Index),
 	}
+	w.flushDelay = 500 * time.Millisecond
 	w.parsers = map[string]parser.Parser{}
 	for _, p := range []parser.Parser{
 		&parser.TypeScriptParser{},
@@ -111,10 +117,43 @@ func (w *Writer) UpdateFile(path string) {
 
 	w.mu.Lock()
 	w.index[path] = entry
+	w.dirty = true
 	w.mu.Unlock()
 	if !w.batchMode {
-		_ = w.flush()
+		w.scheduleFlush()
 	}
+}
+
+// scheduleFlush coalesces rapid updates into a single disk write.
+// Each call resets the timer so only the last save in a burst triggers I/O.
+func (w *Writer) scheduleFlush() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.flushTimer != nil {
+		w.flushTimer.Stop()
+	}
+	w.flushTimer = time.AfterFunc(w.flushDelay, func() {
+		w.mu.Lock()
+		if !w.dirty {
+			w.mu.Unlock()
+			return
+		}
+		w.dirty = false
+		w.mu.Unlock()
+		_ = w.flush()
+	})
+}
+
+// Flush forces an immediate write to disk, cancelling any pending debounce.
+func (w *Writer) Flush() {
+	w.mu.Lock()
+	if w.flushTimer != nil {
+		w.flushTimer.Stop()
+		w.flushTimer = nil
+	}
+	w.dirty = false
+	w.mu.Unlock()
+	_ = w.flush()
 }
 
 // RemoveFile removes a file entry from the index.
