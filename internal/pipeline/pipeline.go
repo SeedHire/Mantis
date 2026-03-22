@@ -1264,7 +1264,15 @@ func runTaskBased(
 				valWarnings, stubRatio := validateContent(written)
 				qualityOK := stubRatio <= 0.3
 
-				if buildPassed && qualityOK {
+				// Fix 10: Cross-file call validation for plain JS (no compiler to catch mismatches).
+				mu.Lock()
+				allFilesSnapshot := make([]string, len(allWrittenFiles))
+				copy(allFilesSnapshot, allWrittenFiles)
+				mu.Unlock()
+				crossFileErrs := checkCrossFileRefs(root, allFilesSnapshot)
+				crossFileOK := len(crossFileErrs) == 0
+
+				if buildPassed && qualityOK && crossFileOK {
 					break // all good
 				}
 
@@ -1288,6 +1296,13 @@ func runTaskBased(
 						}
 						retryReason.WriteString(fmt.Sprintf("Build failed:\n```\n%s\n```\n\n", truncated))
 					}
+				}
+				if !crossFileOK {
+					retryReason.WriteString("Cross-file method call errors (method does not exist on target):\n")
+					for _, e := range crossFileErrs {
+						retryReason.WriteString("- " + e + "\n")
+					}
+					retryReason.WriteString("\nFix the method names to match the actual methods in the target files.\n\n")
 				}
 				if !qualityOK && len(valWarnings) > 0 {
 					retryReason.WriteString("Code quality issues found:\n")
@@ -1367,7 +1382,7 @@ func runTaskBased(
 		// P9.5: track failed sequential tasks — parallel tasks depend on them.
 		mu.Lock()
 		if tasks[i].Status == "failed" {
-			failedTaskTitles[tasks[i].Title] = true
+			failedTaskTitles[tasks[i].Title] = failedTask{fileCount: tasks[i].FileCount}
 		}
 		mu.Unlock()
 
@@ -1410,16 +1425,18 @@ func runTaskBased(
 			for j := range batch {
 				taskIdx := seqCount + batchStart + j // index into original tasks slice
 
-				// P9.5: skip if a prerequisite foundation task failed.
+				// P9.5+Fix10: skip only if a prerequisite task totally failed (wrote 0 files).
+				// Partial failures (some files written, edit mismatches) should not block dependents.
 				mu.Lock()
-				prereqFailed := len(failedTaskTitles) > 0
 				var prereqName string
-				for k := range failedTaskTitles {
-					prereqName = k
-					break
+				for k, info := range failedTaskTitles {
+					if info.fileCount == 0 {
+						prereqName = k
+						break
+					}
 				}
 				mu.Unlock()
-				if prereqFailed {
+				if prereqName != "" {
 					if len(prereqName) > 30 {
 						prereqName = prereqName[:30] + "\u2026"
 					}
@@ -1433,7 +1450,7 @@ func runTaskBased(
 					runOneTask(idx, files)
 					mu.Lock()
 					if tasks[idx].Status == "failed" {
-						failedTaskTitles[tasks[idx].Title] = true
+						failedTaskTitles[tasks[idx].Title] = failedTask{fileCount: tasks[idx].FileCount}
 					}
 					mu.Unlock()
 				}(taskIdx, snapshot)
@@ -1482,7 +1499,8 @@ func readPriorContext(root string, writtenFiles []string, maxChars int) string {
 		return ""
 	}
 
-	// Sort: prioritize files with model/type/interface in path.
+	// Sort: prioritize files by role. Models/types first (p=2), then repos/services (p=1).
+	// This ensures downstream tasks see type definitions AND method signatures.
 	type fileEntry struct {
 		path     string
 		priority int
@@ -1493,8 +1511,16 @@ func readPriorContext(root string, writtenFiles []string, maxChars int) string {
 		p := 0
 		for _, kw := range []string{"model", "type", "interface", "schema", "entity"} {
 			if strings.Contains(lower, kw) {
-				p = 1
+				p = 2
 				break
+			}
+		}
+		if p == 0 {
+			for _, kw := range []string{"repository", "service", "controller", "middleware", "route", "handler", "store", "dao"} {
+				if strings.Contains(lower, kw) {
+					p = 1
+					break
+				}
 			}
 		}
 		entries = append(entries, fileEntry{path: f, priority: p})
@@ -1537,9 +1563,10 @@ func readPriorContext(root string, writtenFiles []string, maxChars int) string {
 			continue
 		}
 
-		// Fix 5: For type/model files (priority=1), read full content so type defs are visible.
+		// Fix 5: For type/model files (priority=2) and repo/service files (priority=1),
+		// read full content so type defs and method signatures are visible.
 		var snippet string
-		if e.priority == 1 {
+		if e.priority >= 1 {
 			snippet = content
 		} else {
 			lines := strings.SplitN(content, "\n", maxLinesPerFile+1)
@@ -1575,30 +1602,98 @@ var exportRe = regexp.MustCompile(`(?m)^(?:export\s|func\s+[A-Z]|type\s+[A-Z]|cl
 // methodRe matches class method declarations (JS/TS async or sync methods).
 var methodRe = regexp.MustCompile(`^\s+(?:async\s+)?([a-zA-Z_]\w*)\s*\(`)
 
+// goMethodRe matches Go exported methods on structs: func (r *Repo) MethodName(
+var goMethodRe = regexp.MustCompile(`^func\s+\(\w+\s+\*?\w+\)\s+([A-Z]\w*)\(`)
+
+// goFuncRe matches Go exported standalone functions: func FuncName(
+var goFuncRe = regexp.MustCompile(`^func\s+([A-Z]\w*)\(`)
+
+// pyFuncRe matches Python module-level function defs: def func_name(
+var pyFuncRe = regexp.MustCompile(`^def\s+([a-zA-Z_]\w*)\s*\(`)
+
+// esmImportRe matches ES module imports: import { X, Y } from './module'
+var esmImportRe = regexp.MustCompile(`import\s+\{([^}]+)\}\s+from\s+['"](\.[^'"]+)['"]`)
+
+// esmDefaultImportRe matches: import X from './module'
+var esmDefaultImportRe = regexp.MustCompile(`import\s+(\w+)\s+from\s+['"](\.[^'"]+)['"]`)
+
+// pyFromImportRe matches: from .module import func1, func2
+var pyFromImportRe = regexp.MustCompile(`from\s+(\.[.\w]*)\s+import\s+(.+)`)
+
+// pyImportRe matches: import module
+var pyImportRe = regexp.MustCompile(`^import\s+(\w[\w.]*)$`)
+
 // methodExclude filters out common non-method matches (constructors, control flow).
 var methodExclude = map[string]bool{
 	"constructor": true, "if": true, "for": true, "while": true,
 	"switch": true, "catch": true, "return": true, "throw": true,
 }
 
-// extractMethodNames extracts public method names from class bodies in JS/TS/Python files.
-// Returns a deduplicated list of method names found in the content.
+// extractMethodNames extracts public method/function names from source files.
+// Works for JS/TS (class methods), Python (class methods + module-level functions),
+// and Go (exported struct methods + exported functions).
+// Returns a deduplicated list of names found in the content.
 func extractMethodNames(content string) []string {
 	lines := strings.Split(content, "\n")
 	var methods []string
 	seen := map[string]bool{}
 	inClass := false
+	// Track Python indentation to know when we leave a class body.
+	classIndent := -1
 
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		// Track class scope entry.
-		if strings.HasPrefix(trimmed, "class ") {
-			inClass = true
+
+		// Go exported struct methods: func (r *Repo) MethodName(
+		if m := goMethodRe.FindStringSubmatch(line); m != nil {
+			name := m[1]
+			if !seen[name] {
+				seen[name] = true
+				methods = append(methods, name)
+			}
 			continue
 		}
+		// Go exported standalone functions: func FuncName(
+		if m := goFuncRe.FindStringSubmatch(line); m != nil {
+			name := m[1]
+			if !seen[name] {
+				seen[name] = true
+				methods = append(methods, name)
+			}
+			continue
+		}
+
+		// Track class scope entry (JS/TS/Python).
+		if strings.HasPrefix(trimmed, "class ") {
+			inClass = true
+			// For Python, track indentation of the class line to detect end.
+			classIndent = len(line) - len(strings.TrimLeft(line, " \t"))
+			continue
+		}
+
+		// Python: module-level function (not in a class).
+		if !inClass && strings.HasPrefix(trimmed, "def ") {
+			if m := pyFuncRe.FindStringSubmatch(trimmed); m != nil {
+				name := m[1]
+				if !strings.HasPrefix(name, "_") && !seen[name] {
+					seen[name] = true
+					methods = append(methods, name)
+				}
+			}
+			continue
+		}
+
+		// Python: detect leaving class body (line at same or less indentation as class).
+		if inClass && classIndent >= 0 && trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+			lineIndent := len(line) - len(strings.TrimLeft(line, " \t"))
+			if lineIndent <= classIndent && !strings.HasPrefix(trimmed, "class ") && !strings.HasPrefix(trimmed, "def ") && !strings.HasPrefix(trimmed, "@") {
+				inClass = false
+				classIndent = -1
+			}
+		}
+
 		// Python method (indented def inside class).
 		if inClass && strings.HasPrefix(trimmed, "def ") {
-			// "def method_name(self, ...)"
 			if idx := strings.Index(trimmed, "("); idx > 4 {
 				name := strings.TrimSpace(trimmed[4:idx])
 				if name != "__init__" && !strings.HasPrefix(name, "_") && !seen[name] {
@@ -1756,7 +1851,7 @@ func taskCodePrompt(request, plan, taskTitle, root string, writtenFiles []string
 		sb.WriteString(sealedManifest)
 	}
 
-	priorCtx := readPriorContext(root, writtenFiles, 36000)
+	priorCtx := readPriorContext(root, writtenFiles, 64000)
 	if priorCtx != "" {
 		sb.WriteString(priorCtx)
 	}
@@ -2227,6 +2322,205 @@ func validateContent(files []string) (warnings []string, stubRatio float64) {
 	}
 	stubRatio = float64(issueCount) / float64(len(files))
 	return
+}
+
+// requireRe matches CommonJS require('./...') patterns.
+var requireRe = regexp.MustCompile(`(?:const|let|var)\s+(\w+)\s*=\s*require\(['"](\.[^'"]+)['"]\)`)
+
+// callRe matches method calls on a variable: varName.methodName(
+var callRe = regexp.MustCompile(`(\w+)\.(\w+)\s*\(`)
+
+// supportedCrossFileExt lists file extensions eligible for cross-file validation.
+var supportedCrossFileExt = map[string]bool{
+	".js": true, ".ts": true, ".jsx": true, ".tsx": true, ".mjs": true, ".py": true,
+}
+
+// checkCrossFileRefs validates that method/function calls across files match actual
+// exports. Works for JS/TS (CommonJS require + ES imports), Python (from X import Y),
+// and any file with class methods. Go/Rust/TS-with-tsconfig are skipped because
+// their compilers already catch these via autofix.Check.
+// Returns error descriptions for the retry prompt, or nil if all calls resolve.
+func checkCrossFileRefs(root string, writtenFiles []string) []string {
+	if root == "" || len(writtenFiles) == 0 {
+		return nil
+	}
+
+	// Build a map of relative path (multiple keys per file) → set of method/function names.
+	fileMethods := map[string]map[string]bool{}
+	for _, f := range writtenFiles {
+		ext := strings.ToLower(filepath.Ext(f))
+		if !supportedCrossFileExt[ext] {
+			continue
+		}
+		data, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		methods := extractMethodNames(string(data))
+		if len(methods) == 0 {
+			continue
+		}
+		methodSet := map[string]bool{}
+		for _, m := range methods {
+			methodSet[m] = true
+		}
+		relPath, _ := filepath.Rel(root, f)
+		fileMethods[relPath] = methodSet
+		// Store without extension: require('./foo') → 'src/foo.js', from .foo import X
+		noExt := strings.TrimSuffix(relPath, filepath.Ext(relPath))
+		fileMethods[noExt] = methodSet
+		// Store base name without extension for Python module imports.
+		baseName := filepath.Base(noExt)
+		fileMethods[baseName] = methodSet
+	}
+	if len(fileMethods) == 0 {
+		return nil
+	}
+
+	var errors []string
+	for _, f := range writtenFiles {
+		ext := strings.ToLower(filepath.Ext(f))
+		if !supportedCrossFileExt[ext] {
+			continue
+		}
+		data, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		content := string(data)
+		relPath, _ := filepath.Rel(root, f)
+
+		// Collect imports: varName/moduleName → resolved relative path.
+		imports := map[string]string{}
+
+		// JS/TS: CommonJS require
+		for _, m := range requireRe.FindAllStringSubmatch(content, -1) {
+			varName, reqPath := m[1], m[2]
+			dir := filepath.Dir(relPath)
+			imports[varName] = filepath.Clean(filepath.Join(dir, reqPath))
+		}
+
+		// JS/TS: ES module imports — import { X } from './module'
+		for _, m := range esmImportRe.FindAllStringSubmatch(content, -1) {
+			// Named imports don't map to var.method() calls — they're direct function calls.
+			// We validate these separately below.
+			_ = m
+		}
+
+		// JS/TS: import defaultVar from './module'
+		for _, m := range esmDefaultImportRe.FindAllStringSubmatch(content, -1) {
+			varName, reqPath := m[1], m[2]
+			dir := filepath.Dir(relPath)
+			imports[varName] = filepath.Clean(filepath.Join(dir, reqPath))
+		}
+
+		// Python: from .module import func → check func exists in module
+		if ext == ".py" {
+			for _, m := range pyFromImportRe.FindAllStringSubmatch(content, -1) {
+				modPath := m[1] // e.g., ".repositories.group_repo"
+				importedNames := m[2]
+				// Resolve relative dot-path to file path.
+				resolved := resolvePyImport(relPath, modPath)
+				// Check each imported name exists.
+				for _, name := range strings.Split(importedNames, ",") {
+					name = strings.TrimSpace(name)
+					if name == "" || name == "*" {
+						continue
+					}
+					// Strip "as alias" suffix.
+					if idx := strings.Index(name, " as "); idx > 0 {
+						name = strings.TrimSpace(name[:idx])
+					}
+					methods := resolveFileMethods(fileMethods, resolved)
+					if methods != nil && !methods[name] {
+						available := methodSetToSlice(methods)
+						errors = append(errors, fmt.Sprintf(
+							"%s: imports '%s' from %s but it has no such function/class. Available: %s",
+							relPath, name, modPath, strings.Join(available, ", ")))
+					}
+				}
+			}
+
+			// Python: import module → module.func() calls
+			for _, m := range pyImportRe.FindAllStringSubmatch(content, -1) {
+				modName := m[1]
+				// Only validate local imports (not stdlib).
+				parts := strings.Split(modName, ".")
+				imports[parts[len(parts)-1]] = modName
+			}
+		}
+
+		// Validate var.method() calls against imported module's methods.
+		if len(imports) > 0 {
+			for _, m := range callRe.FindAllStringSubmatch(content, -1) {
+				varName, methodName := m[1], m[2]
+				resolved, ok := imports[varName]
+				if !ok {
+					continue
+				}
+				methods := resolveFileMethods(fileMethods, resolved)
+				if methods == nil {
+					continue // target not in written files — can't validate
+				}
+				if !methods[methodName] {
+					available := methodSetToSlice(methods)
+					errors = append(errors, fmt.Sprintf(
+						"%s: calls %s.%s() but %s has no method '%s'. Available methods: %s",
+						relPath, varName, methodName, resolved, methodName, strings.Join(available, ", ")))
+				}
+			}
+		}
+	}
+	return errors
+}
+
+// resolveFileMethods looks up methods for a module path, trying multiple key forms.
+func resolveFileMethods(fileMethods map[string]map[string]bool, resolved string) map[string]bool {
+	if m, ok := fileMethods[resolved]; ok {
+		return m
+	}
+	// Try with common extensions.
+	for _, ext := range []string{".js", ".ts", ".jsx", ".tsx", ".py"} {
+		if m, ok := fileMethods[resolved+ext]; ok {
+			return m
+		}
+	}
+	return nil
+}
+
+// resolvePyImport converts a Python relative import path to a file-relative path.
+// e.g., ".repositories.group_repo" from "src/services/auth.py" → "src/repositories/group_repo"
+func resolvePyImport(importerRelPath, dotPath string) string {
+	dir := filepath.Dir(importerRelPath)
+	// Count leading dots for relative depth.
+	dots := 0
+	for _, c := range dotPath {
+		if c == '.' {
+			dots++
+		} else {
+			break
+		}
+	}
+	// Go up (dots-1) directories from the importer's dir.
+	for i := 1; i < dots; i++ {
+		dir = filepath.Dir(dir)
+	}
+	// Convert remaining module path to file path.
+	modPart := dotPath[dots:]
+	modPart = strings.ReplaceAll(modPart, ".", string(filepath.Separator))
+	if modPart == "" {
+		return dir
+	}
+	return filepath.Join(dir, modPart)
+}
+
+// methodSetToSlice converts a method set to a sorted slice for error messages.
+func methodSetToSlice(methods map[string]bool) []string {
+	result := make([]string, 0, len(methods))
+	for m := range methods {
+		result = append(result, m)
+	}
+	return result
 }
 
 // installDeps runs dependency installation after the setup task completes.

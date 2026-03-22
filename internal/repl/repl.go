@@ -1111,7 +1111,11 @@ func Run(cfg Config) error {
 							continue // deduplicate
 						}
 						seen[p] = true
-						absPath := filepath.Join(root, p)
+						// Fix 10: pipeline returns absolute paths — don't double-join.
+						absPath := p
+						if !filepath.IsAbs(p) {
+							absPath = filepath.Join(root, p)
+						}
 						opLog.Record(batchID, absPath, "create", "")
 						// Fix 8: check if file existed before pipeline to set Created flag.
 						isNew := !preExisting[absPath] && !preExisting[p]
