@@ -9,6 +9,7 @@ import {
 import { HotspotsProvider } from './panels/hotspotsView';
 import { DeadCodeProvider } from './panels/deadCodeView';
 import { ImpactProvider } from './panels/impactView';
+import { ChatViewProvider } from './panels/chatView';
 import { createStatusBar, updateStatusBar } from './statusBar';
 import { registerCommands } from './commands';
 
@@ -57,6 +58,12 @@ export function activate(context: vscode.ExtensionContext) {
     }
   });
   context.subscriptions.push(watcher);
+
+  // Register chat webview.
+  const chatProvider = new ChatViewProvider(context.extensionUri, workspaceRoot);
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(ChatViewProvider.viewType, chatProvider)
+  );
 
   // Register tree views.
   const hotspotsProvider = new HotspotsProvider();

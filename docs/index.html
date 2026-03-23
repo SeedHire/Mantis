@@ -337,13 +337,22 @@
       background: linear-gradient(90deg, transparent, rgba(200,121,65,.4), transparent);
     }
     .install-strip .container {
-      display: flex; align-items: center; gap: 14px;
-      flex-wrap: wrap; justify-content: center;
+      display: flex; flex-direction: column; align-items: center; gap: 12px;
     }
     .install-label {
       font-size: 11px; font-weight: 600;
       text-transform: uppercase; letter-spacing: .1em; color: var(--fg-muted);
     }
+    .install-tabs {
+      display: flex; gap: 4px; background: var(--bg); border-radius: 8px; padding: 3px; border: 1px solid var(--border);
+    }
+    .install-tab {
+      font-family: 'Space Grotesk', system-ui, sans-serif;
+      font-size: 12px; font-weight: 500; padding: 6px 14px; border-radius: 6px;
+      border: none; background: none; color: var(--fg-dim); cursor: pointer; transition: all .2s;
+    }
+    .install-tab:hover { color: var(--fg); }
+    .install-tab.active { background: var(--surface); color: var(--copper); box-shadow: 0 1px 3px rgba(0,0,0,.2); }
     .install-cmd {
       display: flex; align-items: center; gap: 12px;
       background: var(--bg); border: 1px solid var(--border-hi);
@@ -351,7 +360,7 @@
     }
     .install-cmd:hover { border-color: var(--copper-dk); }
     .install-cmd code { color: var(--green); font-size: 12.5px; }
-    .install-sep { color: var(--fg-dim); font-size: 14px; padding: 3px 8px; }
+    .install-cmd[hidden] { display: none; }
     .copy-btn {
       background: none; border: none; cursor: pointer;
       color: var(--fg-muted); font-size: 12px; padding: 3px 8px;
@@ -799,19 +808,22 @@
 <div class="install-strip" id="install">
   <div class="container">
     <span class="install-label">Quick install</span>
-    <div class="install-cmd">
+    <div class="install-tabs">
+      <button class="install-tab active" onclick="showInstall('mac')">macOS</button>
+      <button class="install-tab" onclick="showInstall('linux')">Linux</button>
+      <button class="install-tab" onclick="showInstall('win')">Windows</button>
+    </div>
+    <div class="install-cmd" data-os="mac">
       <code id="cmd-brew">brew install seedhire/tap/mantis</code>
       <button class="copy-btn" onclick="copy('cmd-brew', this)">copy</button>
     </div>
-    <span class="install-sep">or</span>
-    <div class="install-cmd">
-      <code id="cmd-go">go install github.com/seedhire/mantis/cmd/mantis@latest</code>
-      <button class="copy-btn" onclick="copy('cmd-go', this)">copy</button>
-    </div>
-    <span class="install-sep">or</span>
-    <div class="install-cmd">
-      <code id="cmd-curl">curl -fsSL https://mantis.sh/install | sh</code>
+    <div class="install-cmd" data-os="linux" hidden>
+      <code id="cmd-curl">curl -fsSL https://raw.githubusercontent.com/seedhire/mantis/main/install.sh | sh</code>
       <button class="copy-btn" onclick="copy('cmd-curl', this)">copy</button>
+    </div>
+    <div class="install-cmd" data-os="win" hidden>
+      <code id="cmd-win">powershell -c "irm https://raw.githubusercontent.com/seedhire/mantis/main/install.ps1 | iex"</code>
+      <button class="copy-btn" onclick="copy('cmd-win', this)">copy</button>
     </div>
   </div>
 </div>
@@ -1064,6 +1076,17 @@
       setTimeout(() => { btn.classList.remove('copied'); btn.textContent = orig; }, 2000);
     });
   }
+
+  // ── Install tab switcher + OS auto-detect ──
+  function showInstall(os) {
+    document.querySelectorAll('.install-cmd[data-os]').forEach(el => el.hidden = el.dataset.os !== os);
+    document.querySelectorAll('.install-tab').forEach(t => t.classList.toggle('active', t.textContent.toLowerCase().includes(os === 'win' ? 'windows' : os)));
+  }
+  (function autoDetectOS() {
+    const ua = navigator.userAgent || navigator.platform || '';
+    if (/win/i.test(ua)) showInstall('win');
+    else if (/linux/i.test(ua)) showInstall('linux');
+  })();
 
   // ── IntersectionObserver for fade-in, slide-in, scale-in ──
   const revealObserver = new IntersectionObserver((entries) => {

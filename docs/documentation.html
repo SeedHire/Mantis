@@ -365,16 +365,19 @@ ollama pull llama3.1           # local fallback
 export OLLAMA_API_KEY=your_key</code></pre>
 
       <h3>Install Methods</h3>
-      <pre><code># Homebrew (macOS — recommended)
+      <pre><code># macOS (Homebrew — recommended)
 brew install seedhire/tap/mantis
 
-# Go install
+# macOS / Linux (shell script)
+curl -fsSL https://raw.githubusercontent.com/seedhire/mantis/main/install.sh | sh
+
+# Windows (paste into any terminal — cmd, PowerShell, or Windows Terminal)
+powershell -c "irm https://raw.githubusercontent.com/seedhire/mantis/main/install.ps1 | iex"
+
+# Any platform (requires Go 1.21+)
 go install github.com/seedhire/mantis/cmd/mantis@latest
 
-# Shell script
-curl -fsSL https://mantis.sh/install | sh
-
-# Build from source
+# Build from source (any platform)
 git clone https://github.com/seedhire/mantis
 cd Mantis && make build && make install</code></pre>
 

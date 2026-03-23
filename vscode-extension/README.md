@@ -26,7 +26,10 @@ Runs as a language server, providing diagnostics inline as you edit. Supports Go
 
 ## Getting Started
 
-1. Install the Mantis CLI: `brew install seedhire/tap/mantis`
+1. Install the Mantis CLI:
+   - **macOS:** `brew install seedhire/tap/mantis`
+   - **Linux:** `curl -fsSL https://raw.githubusercontent.com/seedhire/mantis/main/install.sh | sh`
+   - **Windows:** `powershell -c "irm https://raw.githubusercontent.com/seedhire/mantis/main/install.ps1 | iex"`
 2. Open your project in VS Code
 3. Run `mantis init` from the terminal (or use the command palette: **Mantis: Initialize Project**)
 4. The Mantis sidebar panel appears with hotspots, dead code, and impact views

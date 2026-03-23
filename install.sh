@@ -23,7 +23,10 @@ OS="$(uname -s)"
 case "$OS" in
   Linux)   OS="linux"   ;;
   Darwin)  OS="darwin"  ;;
-  MINGW*|MSYS*|CYGWIN*) OS="windows" ;;
+  MINGW*|MSYS*|CYGWIN*)
+    echo "On Windows, use the PowerShell installer instead:"
+    echo "  powershell -c \"irm https://raw.githubusercontent.com/seedhire/mantis/main/install.ps1 | iex\""
+    exit 1 ;;
   *) echo "Unsupported OS: $OS"; exit 1 ;;
 esac
 

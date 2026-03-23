@@ -20,6 +20,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/seedhire/mantis/internal/brain"
+	"github.com/seedhire/mantis/internal/chatjson"
 	"github.com/seedhire/mantis/internal/config"
 	appcontext "github.com/seedhire/mantis/internal/context"
 	"github.com/seedhire/mantis/internal/graph"
@@ -1943,6 +1944,38 @@ __version__ = "0.1.0"
 	},
 }
 
+// ── chat ──────────────────────────────────────────────────────────────────────
+
+var chatJSON bool
+
+var chatCmd = &cobra.Command{
+	Use:   "chat",
+	Short: "Start an interactive AI chat session",
+	Long: `Start an AI chat session. By default launches the interactive REPL.
+
+Use --json to start a JSON Lines mode for programmatic communication
+(used by the VSCode extension):
+  mantis chat --json`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if chatJSON {
+			return chatjson.Run(chatjson.Config{
+				Offline: replOffline,
+			})
+		}
+		// Default: regular REPL.
+		cfg := repl.Config{
+			ForceTier: replTier,
+			Budget:    replBudget,
+			ImagePath: replImage,
+			PlanMode:  replPlan,
+			Continue:  replContinue,
+			Version:   version,
+			Offline:   replOffline,
+		}
+		return repl.Run(cfg)
+	},
+}
+
 // ── main ──────────────────────────────────────────────────────────────────────
 
 func init() {
@@ -1983,7 +2016,9 @@ func init() {
 	evalCmd.Flags().BoolVar(&evalOffline, "offline", false, "Run offline eval suite (no model needed)")
 	evalCmd.Flags().BoolVar(&evalCompare, "compare", false, "Compare against last eval run")
 
-	rootCmd.AddCommand(initCmd, contextCmd, watchCmd, findCmd, impactCmd, deadCmd, circularCmd, graphCmd, lintCmd, tuiCmd, handoffCmd, hotspotsCmd, riskyCmd, couplingCmd, intentCmd, todosCmd, specGapsCmd, workspaceCmd, traceCmd, mcpCmd, lspCmd, hooksCmd, evalCmd, newCmd, tutorialCmd)
+	chatCmd.Flags().BoolVar(&chatJSON, "json", false, "JSON Lines mode for programmatic use (VSCode extension)")
+
+	rootCmd.AddCommand(initCmd, contextCmd, watchCmd, findCmd, impactCmd, deadCmd, circularCmd, graphCmd, lintCmd, tuiCmd, handoffCmd, hotspotsCmd, riskyCmd, couplingCmd, intentCmd, todosCmd, specGapsCmd, workspaceCmd, traceCmd, mcpCmd, lspCmd, hooksCmd, evalCmd, newCmd, tutorialCmd, chatCmd)
 	hooksCmd.AddCommand(hooksInstallCmd)
 
 	workspaceCmd.AddCommand(wsInitCmd, wsFindCmd, wsImpactCmd, wsStatsCmd)

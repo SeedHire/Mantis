@@ -40,23 +40,29 @@ Mantis combines:
 - **28,000+ LOC** across 28 packages, 243+ tests
 - **30 CLI commands**, **22 REPL slash commands**
 - All tests pass: `go test ./...`
-- Deployed via GitHub Actions + GoReleaser (macOS arm64/amd64)
+- Deployed via GitHub Actions + GoReleaser (macOS arm64/amd64, Linux amd64/arm64, Windows amd64)
 
 ---
 
 ## Install
 
-### Homebrew
+### macOS (Homebrew)
 ```bash
 brew install seedhire/tap/mantis
 ```
 
-### Install script
+### macOS / Linux (curl)
 ```bash
 curl -fsSL https://raw.githubusercontent.com/seedhire/mantis/main/install.sh | sh
 ```
 
-### Go install
+### Windows
+```
+powershell -c "irm https://raw.githubusercontent.com/seedhire/mantis/main/install.ps1 | iex"
+```
+Works from cmd, PowerShell, or Windows Terminal. Downloads the latest `.exe`, places it in `%LOCALAPPDATA%\mantis\bin`, and adds it to your PATH.
+
+### Go install (any platform)
 ```bash
 go install github.com/seedhire/mantis/cmd/mantis@latest
 ```
@@ -65,7 +71,8 @@ go install github.com/seedhire/mantis/cmd/mantis@latest
 ```bash
 git clone https://github.com/seedhire/mantis
 cd Mantis
-go build -o mantis ./cmd/mantis
+go build -o mantis ./cmd/mantis   # macOS/Linux
+# or: go build -o mantis.exe ./cmd/mantis   # Windows
 ```
 
 ---

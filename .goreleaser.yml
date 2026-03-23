@@ -47,13 +47,16 @@ release:
 
     **Install:**
     ```bash
-    # macOS / Linux (curl)
+    # macOS / Linux
     curl -fsSL https://raw.githubusercontent.com/seedhire/mantis/main/install.sh | sh
 
-    # Homebrew
+    # Windows (works from cmd, PowerShell, or Windows Terminal)
+    powershell -c "irm https://raw.githubusercontent.com/seedhire/mantis/main/install.ps1 | iex"
+
+    # Homebrew (macOS)
     brew install mantis-dev/tap/mantis
 
-    # Go
+    # Go (any platform)
     go install github.com/seedhire/mantis/cmd/mantis@latest
     ```
   footer: |
